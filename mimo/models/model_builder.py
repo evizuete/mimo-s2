@@ -1,0 +1,871 @@
+from dataclasses import dataclass
+from typing import Tuple, Dict
+
+import numpy as np
+import tensorflow as tf
+from keras import Model, Input, layers, regularizers
+from keras.src.callbacks import EarlyStopping, ReduceLROnPlateau, Callback, TerminateOnNaN
+from keras.src.optimizers import Adam
+from keras.src.saving import load_model, register_keras_serializable
+
+
+@dataclass
+class Config:
+    release: str | None = None
+    period: int = 120
+    val_size: float = 0.20
+    use_oof: bool = True
+    oof_splits: int = 6
+    oof_epochs: int = 25
+    save_oof_artifacts: bool = True
+
+@dataclass
+class ModelConfig:
+    """Configuración del modelo single-output optimizado"""
+    # Arquitectura multi-scale
+    seq_len_short: int = 64
+    seq_len_long: int = 256
+
+    # Capas
+    conv1d_filters: int = 96
+    lstm_units: int = 96
+    dense_units: int = 64
+    context_units: int = 48
+    time_units: int = 32
+    head_units: int = 64
+
+    # Regularización
+    dropout_seq: float = 0.15
+    dropout_lstm: float = 0.15
+    dropout_dense: float = 0.20
+    l2_reg: float = 1e-5
+
+    # Entrenamiento
+    learning_rate: float = 1e-3  # 1e-4
+    batch_size: int = 4096  # 256
+    epochs: int = 100
+    patience: int = 15
+
+    # Focal loss para desbalance
+    focal_alpha: float = 0.25
+    focal_gamma: float = 1.25  # 1.5 #2.0
+
+    # Features
+    use_attention: bool = True
+    use_gate: bool = True
+
+    # v3: fusión jerárquica — separa "contexto de mercado" de "trigger de entrada"
+    # False → comportamiento idéntico a v2 (retrocompatible)
+    # True  → build_model_v3: market_repr = [x_long, x_context]
+    #                          entry_repr  = [x_short, x_time]
+    #                          combined    = [market_repr, entry_repr]
+    use_hierarchical_fusion: bool = False
+
+    # v3: hybrid loss = focal + ranking
+    # 0.0 → solo focal (comportamiento actual, retrocompatible)
+    # 0.1-0.3 → término de ranking ListNet ponderado
+    # El ranking loss empuja al modelo a ORDENAR bien las señales dentro del batch,
+    # no solo a clasificarlas — mejora directamente la calidad de los percentiles.
+    ranking_loss_weight: float = 0.0
+
+class TradingModel:
+    """Modelo de deep learning con arquitectura multi-scale"""
+
+    def __init__(self, general_config: Config, model_config: ModelConfig = ModelConfig(), side = None):
+        self.general_config = general_config
+        self.model_config = model_config
+        self.side = side
+        self.model = None
+        self.history = None
+
+    def build_model(self,
+                    shape_short: Tuple[int, int],
+                    shape_long: Tuple[int, int],
+                    n_context: int,
+                    n_time: int,
+                    init_bias: float = 0.0) -> Model:
+        """
+        Construye el modelo con múltiples inputs y single output
+
+        Args:
+            shape_short: (seq_len_short, n_features_short)
+            shape_long: (seq_len_long, n_features_long)
+            n_context: número de features de contexto
+            n_time: número de features temporales
+            init_bias: bias inicial para la capa de salida
+        """
+        config = self.model_config
+
+        # === INPUTS ===
+        input_short = Input(shape=shape_short, name='seq_short')
+        input_long = Input(shape=shape_long, name='seq_long')
+        input_context = Input(shape=(n_context,), name='context')
+        input_time = Input(shape=(n_time,), name='time')
+
+        # === PROCESAMIENTO SECUENCIA CORTA ===
+        # Conv1D para capturar patrones locales
+        x_short = layers.Conv1D(
+            config.conv1d_filters,
+            kernel_size=3,
+            padding='same',
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(input_short)
+        x_short = layers.BatchNormalization()(x_short)
+        x_short = layers.Dropout(config.dropout_seq)(x_short)
+
+        # LSTM para dependencias temporales
+        x_short = layers.LSTM(
+            config.lstm_units,
+            return_sequences=False,
+            dropout=config.dropout_lstm,
+            recurrent_dropout=config.dropout_lstm,
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(x_short)
+
+        # === PROCESAMIENTO SECUENCIA LARGA ===
+        # Reducir dimensionalidad con Conv1D strided
+        x_long = layers.Conv1D(
+            config.conv1d_filters // 2,
+            kernel_size=5,
+            strides=2,
+            padding='same',
+            activation='relu'
+        )(input_long)
+        x_long = layers.BatchNormalization()(x_long)
+
+        # GRU más eficiente para secuencias largas
+        x_long = layers.GRU(
+            config.lstm_units // 2,
+            return_sequences=False,
+            dropout=config.dropout_lstm,
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(x_long)
+
+        # === PROCESAMIENTO CONTEXTO ===
+        x_context = layers.Dense(
+            config.context_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(input_context)
+        x_context = layers.Dropout(config.dropout_dense)(x_context)
+
+        # === PROCESAMIENTO TIEMPO ===
+        x_time = layers.Dense(
+            config.time_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(input_time)
+
+        # === ATENCIÓN (opcional) ===
+        if config.use_attention:
+            # Self-attention en la secuencia corta
+            attention = layers.MultiHeadAttention(
+                num_heads=4,
+                key_dim=config.lstm_units // 4
+            )(x_short[..., tf.newaxis], x_short[..., tf.newaxis])
+            attention = layers.Flatten()(attention)
+            x_short = layers.Add()([x_short, attention])
+            x_short = layers.LayerNormalization()(x_short)
+
+        # === FUSIÓN ===
+        combined = layers.Concatenate()([x_short, x_long, x_context, x_time])
+
+        # Gated fusion (opcional)
+        if config.use_gate:
+            gate = layers.Dense(
+                combined.shape[-1],
+                activation='sigmoid',
+                kernel_regularizer=regularizers.l2(config.l2_reg * 0.1)
+            )(combined)
+            combined = layers.Multiply()([combined, gate])
+
+        # === HEAD FINAL ===
+        x = layers.Dense(
+            config.head_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(combined)
+        x = layers.Dropout(config.dropout_dense)(x)
+
+        x = layers.Dense(
+            config.head_units // 2,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(x)
+        x = layers.Dropout(config.dropout_dense)(x)
+
+        # === OUTPUT ===
+        # Capa de logits para poder extraerlos si es necesario
+        signal_logit = layers.Dense(
+            1,
+            name='signal_logit',
+            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+            bias_initializer=tf.keras.initializers.Constant(init_bias)
+        )(x)
+
+        # Activación sigmoid para probabilidad
+        signal_output = layers.Activation('sigmoid', name='signal')(signal_logit)
+
+        # === CREAR MODELO ===
+        model = Model(
+            inputs=[input_short, input_long, input_context, input_time],
+            outputs=signal_output,
+            name='TradingModel'
+        )
+
+        self.model = model
+        return model
+
+    def build_model_v2(self,
+                    shape_short: Tuple[int, int],
+                    shape_long: Tuple[int, int],
+                    n_context: int,
+                    n_time: int,
+                    init_bias: float = 0.0) -> Model:
+        """
+        Construye el modelo con múltiples inputs y single output
+
+        Args:
+            shape_short: (seq_len_short, n_features_short)
+            shape_long: (seq_len_long, n_features_long)
+            n_context: número de features de contexto
+            n_time: número de features temporales
+            init_bias: bias inicial para la capa de salida
+        """
+        config = self.model_config
+
+        # === INPUTS ===
+        input_short = Input(shape=shape_short, name='seq_short')
+        input_long = Input(shape=shape_long, name='seq_long')
+        input_context = Input(shape=(n_context,), name='context')
+        input_time = Input(shape=(n_time,), name='time')
+
+        # === PROCESAMIENTO SECUENCIA CORTA ===
+        # Conv1D para capturar patrones locales
+        x_short = layers.Conv1D(
+            config.conv1d_filters,
+            kernel_size=3,
+            padding='same',
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(input_short)
+        x_short = layers.BatchNormalization()(x_short)
+        x_short = layers.Dropout(config.dropout_seq)(x_short)
+
+        if config.use_attention:
+            att = layers.MultiHeadAttention(
+                num_heads=4,
+                key_dim=max(8, x_short.shape[-1] // 4),
+            )(x_short, x_short)  # (B, T, C)
+
+            x_short = layers.Add()([x_short, att])
+            x_short = layers.LayerNormalization()(x_short)
+
+        # ahora ya sí reduces a vector
+        x_short = layers.LSTM(
+            config.lstm_units,
+            return_sequences=False,
+            dropout=config.dropout_lstm,
+            recurrent_dropout=config.dropout_lstm,
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(x_short)
+
+        # === PROCESAMIENTO SECUENCIA LARGA ===
+        # Reducir dimensionalidad con Conv1D strided
+        x_long = layers.Conv1D(
+            config.conv1d_filters // 2,
+            kernel_size=5,
+            strides=2,
+            padding='same',
+            activation='relu'
+        )(input_long)
+        x_long = layers.BatchNormalization()(x_long)
+
+        # GRU más eficiente para secuencias largas
+        x_long = layers.GRU(
+            config.lstm_units // 2,
+            return_sequences=False,
+            dropout=config.dropout_lstm,
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(x_long)
+
+        # === PROCESAMIENTO CONTEXTO ===
+        x_context = layers.Dense(
+            config.context_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(input_context)
+        x_context = layers.Dropout(config.dropout_dense)(x_context)
+
+        # === PROCESAMIENTO TIEMPO ===
+        x_time = layers.Dense(
+            config.time_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(input_time)
+
+        # === FUSIÓN ===
+        combined = layers.Concatenate()([x_short, x_long, x_context, x_time])
+
+        # Gated fusion (opcional)
+        if config.use_gate:
+            gate = layers.Dense(
+                combined.shape[-1],
+                activation='sigmoid',
+                kernel_regularizer=regularizers.l2(config.l2_reg * 0.1)
+            )(combined)
+            combined = layers.Multiply()([combined, gate])
+
+        # === HEAD FINAL ===
+        x = layers.Dense(
+            config.head_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(combined)
+        x = layers.Dropout(config.dropout_dense)(x)
+
+        x = layers.Dense(
+            config.head_units // 2,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(x)
+        x = layers.Dropout(config.dropout_dense)(x)
+
+        # === OUTPUT ===
+        # Capa de logits para poder extraerlos si es necesario
+        signal_logit = layers.Dense(
+            1,
+            name='signal_logit',
+            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+            bias_initializer=tf.keras.initializers.Constant(init_bias)
+        )(x)
+
+        # Activación sigmoid para probabilidad
+        signal_output = layers.Activation('sigmoid', name='signal')(signal_logit)
+
+        # === CREAR MODELO ===
+        model = Model(
+            inputs=[input_short, input_long, input_context, input_time],
+            outputs=signal_output,
+            name='TradingModel'
+        )
+
+        self.model = model
+        return model
+
+    def build_model_v3(self,
+                    shape_short: Tuple[int, int],
+                    shape_long: Tuple[int, int],
+                    n_context: int,
+                    n_time: int,
+                    init_bias: float = 0.0) -> Model:
+        """
+        v3: Fusión jerárquica en dos pasos.
+
+        En v2 todo se concatena de golpe:
+            combined = Concat([x_short, x_long, x_context, x_time])
+
+        En v3 se separa en dos representaciones semánticas antes de fusionar:
+            market_repr = Concat([x_long, x_context])   → "¿hay contexto favorable?"
+            entry_repr  = Concat([x_short, x_time])     → "¿hay trigger ejecutable?"
+            combined    = Concat([market_repr, entry_repr])
+
+        Ventajas:
+        - El modelo aprende explícitamente a separar calidad de contexto vs timing.
+        - El score final es más ordenable (mejora percentiles por estado).
+        - No requiere cambios en pipeline ni en feature_builder.
+        - Compatible con los mismos 4 inputs que v2.
+
+        Activar con: ModelConfig(use_hierarchical_fusion=True)
+        """
+        config = self.model_config
+
+        # === INPUTS (idénticos a v2) ===
+        input_short   = Input(shape=shape_short, name='seq_short')
+        input_long    = Input(shape=shape_long,  name='seq_long')
+        input_context = Input(shape=(n_context,), name='context')
+        input_time    = Input(shape=(n_time,),    name='time')
+
+        # === RAMA CORTA — microestructura y trigger local ===
+        x_short = layers.Conv1D(
+            config.conv1d_filters,
+            kernel_size=3,
+            padding='same',
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(input_short)
+        x_short = layers.BatchNormalization()(x_short)
+        x_short = layers.Dropout(config.dropout_seq)(x_short)
+
+        if config.use_attention:
+            att = layers.MultiHeadAttention(
+                num_heads=4,
+                key_dim=max(8, x_short.shape[-1] // 4),
+            )(x_short, x_short)
+            x_short = layers.Add()([x_short, att])
+            x_short = layers.LayerNormalization()(x_short)
+
+        x_short = layers.LSTM(
+            config.lstm_units,
+            return_sequences=False,
+            dropout=config.dropout_lstm,
+            recurrent_dropout=0.0,
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(x_short)
+
+        # === RAMA LARGA — régimen y estructura macro ===
+        x_long = layers.Conv1D(
+            config.conv1d_filters // 2,
+            kernel_size=5,
+            strides=2,
+            padding='same',
+            activation='relu'
+        )(input_long)
+        x_long = layers.BatchNormalization()(x_long)
+
+        x_long = layers.GRU(
+            config.lstm_units // 2,
+            return_sequences=False,
+            dropout=config.dropout_lstm,
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(x_long)
+
+        # === CONTEXTO ===
+        x_context = layers.Dense(
+            config.context_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(input_context)
+        x_context = layers.LayerNormalization()(x_context)
+        x_context = layers.Dropout(config.dropout_dense)(x_context)
+
+        # === TIEMPO ===
+        x_time = layers.Dense(
+            config.time_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(input_time)
+
+        # === FUSIÓN JERÁRQUICA ===
+        # Paso A: representación de mercado (contexto estructural)
+        # Responde: "¿el régimen y la estructura de fondo son favorables?"
+        market_repr = layers.Concatenate()([x_long, x_context])
+        market_units = config.lstm_units // 2 + config.context_units
+        market_repr = layers.Dense(
+            market_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(market_repr)
+        market_repr = layers.Dropout(config.dropout_dense)(market_repr)
+
+        # Paso B: representación de entrada (timing y microestructura)
+        # Responde: "¿hay un trigger ejecutable ahora mismo?"
+        entry_repr = layers.Concatenate()([x_short, x_time])
+        entry_units = config.lstm_units + config.time_units
+        entry_repr = layers.Dense(
+            entry_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(entry_repr)
+        entry_repr = layers.Dropout(config.dropout_dense)(entry_repr)
+
+        # Paso C: decisión final = contexto × trigger
+        combined = layers.Concatenate()([market_repr, entry_repr])
+
+        # Gate opcional sobre la fusión final
+        if config.use_gate:
+            gate = layers.Dense(
+                combined.shape[-1],
+                activation='sigmoid',
+                kernel_regularizer=regularizers.l2(config.l2_reg * 0.1)
+            )(combined)
+            combined = layers.Multiply()([combined, gate])
+
+        # === HEAD FINAL (idéntico a v2) ===
+        x = layers.Dense(
+            config.head_units,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(combined)
+        x = layers.Dropout(config.dropout_dense)(x)
+
+        x = layers.Dense(
+            config.head_units // 2,
+            activation='relu',
+            kernel_regularizer=regularizers.l2(config.l2_reg)
+        )(x)
+        x = layers.Dropout(config.dropout_dense)(x)
+
+        # === OUTPUT ===
+        signal_logit = layers.Dense(
+            1,
+            name='signal_logit',
+            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+            bias_initializer=tf.keras.initializers.Constant(init_bias)
+        )(x)
+
+        signal_output = layers.Activation('sigmoid', name='signal')(signal_logit)
+
+        model = Model(
+            inputs=[input_short, input_long, input_context, input_time],
+            outputs=signal_output,
+            name='TradingModel_v3'
+        )
+
+        self.model = model
+        return model
+
+    def compile_model(self, class_weight: Dict[int, float] = None):
+        # ── Hybrid loss: focal + ranking (ListNet) ────────────────────────────
+        # Si ranking_loss_weight=0.0 → solo focal (retrocompatible con v1/v2).
+        # Si ranking_loss_weight>0.0 → focal + ListNet ponderado.
+        #
+        # ListNet ranking loss:
+        #   Entrena al modelo a ORDENAR bien las señales dentro del batch,
+        #   no solo a clasificarlas. Esto mejora directamente la calidad de
+        #   los percentiles por estado: el top 10% de señales debería tener
+        #   un win rate significativamente mayor que el top 50%.
+        #
+        #   Implementación: softmax sobre scores vs softmax sobre labels →
+        #   cross-entropy entre las dos distribuciones de ranking.
+        #   Solo se aplica cuando hay suficiente variedad de labels en el batch
+        #   (evita NaN cuando todos los labels son 0 o todos son 1).
+        #
+        ranking_w = float(self.model_config.ranking_loss_weight)
+
+        focal_loss_fn = ClippedBinaryFocalCrossentropy(
+            alpha=self.model_config.focal_alpha,
+            gamma=self.model_config.focal_gamma,
+            from_logits=False,
+        )
+
+        if ranking_w > 0.0:
+            # HybridFocalRankingLoss definida a nivel de módulo para que Keras
+            # pueda localizarla correctamente al deserializar el modelo desde disco.
+            loss = HybridFocalRankingLoss(
+                alpha=self.model_config.focal_alpha,
+                gamma=self.model_config.focal_gamma,
+                ranking_weight=ranking_w,
+            )
+        else:
+            loss = focal_loss_fn
+
+        metrics = [
+            tf.keras.metrics.AUC(name='auc_roc', curve='ROC'),
+            tf.keras.metrics.AUC(name='auc_pr', curve='PR'),
+            # precision_30/recall_30 eliminados: con pos_rate~0.274 el threshold 0.30
+            # está solo 0.026 sobre la base rate → recall_30≈1.0 siempre, no discrimina.
+            # precision_35 añadido: threshold 0.076 sobre la base rate, zona intermedia
+            # donde ranking_loss debería mostrar mejora consistente.
+            tf.keras.metrics.Precision(name='precision_35', thresholds=0.35),
+            tf.keras.metrics.Precision(name='precision_40', thresholds=0.40),
+            tf.keras.metrics.Recall(name='recall_40', thresholds=0.40),
+        ]
+
+        # Optimizador
+        optimizer = Adam(
+            learning_rate=self.model_config.learning_rate,
+            clipnorm=1.0,
+            beta_1=0.9,
+            beta_2=0.999,
+            epsilon=1e-8
+        )
+
+        # loss ya definida arriba: focal puro (ranking_loss_weight=0) o hybrid (>0)
+        self.model.compile(
+            optimizer=optimizer,
+            loss=loss,
+            metrics=metrics
+        )
+
+    def get_logits(self, X: Dict[str, np.ndarray]) -> np.ndarray:
+        """Extrae los logits antes de la activación sigmoid"""
+        logit_model = Model(
+            inputs=self.model.inputs,
+            outputs=self.model.get_layer('signal_logit').output
+        )
+
+        logits = logit_model.predict(
+            [X['seq_short'], X['seq_long'], X['context'], X['time']],
+            batch_size=self.model_config.batch_size,
+            verbose=0
+        )
+
+        return logits.ravel()
+
+    def train(self,
+              X_train: Dict[str, np.ndarray],
+              y_train: np.ndarray,
+              X_val: Dict[str, np.ndarray] = None,
+              y_val: np.ndarray = None,
+              sample_weight: np.ndarray = None,
+              verbose: int = 1,
+              for_production: bool = False) -> Dict:
+        """
+        Entrena el modelo
+
+        Args:
+            X_train: Dict con keys ['seq_short', 'seq_long', 'context', 'time']
+            y_train: Etiquetas de entrenamiento
+            X_val: Datos de validación (opcional)
+            y_val: Etiquetas de validación (opcional)
+            sample_weight: Pesos para las muestras (opcional)
+            verbose: Nivel de verbosidad
+        """
+
+        # Callbacks
+        if for_production:
+            callbacks = [
+                # LR schedule: reduce a mitad cada N épocas fijas si la loss no mejora
+                ReduceLROnPlateau(
+                    monitor='loss',  # train loss — lo único disponible
+                    factor=0.5,
+                    patience=max(3, self.model_config.patience // 4),
+                    min_lr=1e-6,
+                    mode='min',
+                    verbose=verbose
+                ),
+                TerminateOnNaN(),
+            ]
+        else:
+            callbacks = [
+                EarlyStopping(
+                    monitor='val_auc_pr' if X_val is not None else 'auc_pr',
+                    patience=self.model_config.patience,
+                    restore_best_weights=True,
+                    mode='max',
+                    verbose=verbose
+                ),
+                ReduceLROnPlateau(monitor='val_auc_pr' if X_val is not None else 'auc_pr',
+                                  factor=0.5,
+                                  patience=self.model_config.patience // 3,  # más reactivo que ES
+                                  min_lr=1e-6,
+                                  mode='max',  # ← obligatorio cuando monitor es AUC
+                                  verbose=verbose),
+                GeneralizationGapStopping(
+                    monitor_train='auc_pr',
+                    monitor_val='val_auc_pr',
+                    mode='max',
+                    max_gap=0.03,
+                    min_epochs=8,
+                    patience=2,
+                    restore_best_weights=True
+                ), TerminateOnNaN(),
+            ]
+
+        # Datos de validación
+        validation_data = None
+        if X_val is not None and y_val is not None:
+            validation_data = (
+                [X_val['seq_short'], X_val['seq_long'], X_val['context'], X_val['time']],
+                y_val
+            )
+        else:
+            validation_data = None
+
+        # Entrenar
+        self.history = self.model.fit(
+            x=[X_train['seq_short'], X_train['seq_long'], X_train['context'], X_train['time']],
+            y=y_train,
+            batch_size=self.model_config.batch_size,
+            epochs=self.model_config.epochs,
+            validation_data=validation_data,
+            sample_weight=sample_weight,
+            callbacks=callbacks,
+            verbose=verbose,
+            shuffle=False  # Importante para series temporales
+        )
+
+        return self.history.history
+
+    def predict(self, X: Dict[str, np.ndarray]) -> np.ndarray:
+        """Realiza predicciones"""
+        return self.model.predict(
+            [X['seq_short'], X['seq_long'], X['context'], X['time']],
+            batch_size=self.model_config.batch_size,
+            verbose=0
+        ).ravel()
+
+    def evaluate(self, X: Dict[str, np.ndarray], y: np.ndarray) -> Dict:
+        """Evalúa el modelo"""
+        results = self.model.evaluate(
+            [X['seq_short'], X['seq_long'], X['context'], X['time']],
+            y,
+            batch_size=self.model_config.batch_size,
+            verbose=0,
+            return_dict=True
+        )
+        return results
+
+    def save(self, path: str = None):
+        filename = f'model_{self.general_config.release}_{self.side}.keras'
+        if path is None:
+            path = f'./{filename}'
+        else:
+            path = f'{path}/{filename}'
+
+        self.model.save(path)
+
+    def load(self, path: str = None):
+        filename = f'model_{self.general_config.release}_{self.side}.keras'
+        if path is None:
+            path = f'./{filename}'
+        else:
+            path = f'{path}/{filename}'
+
+        self.model = load_model(path)
+
+class GeneralizationGapStopping(Callback):
+    def __init__(self,
+                 monitor_train='auc_pr',  # métrica en entrenamiento
+                 monitor_val='val_auc_pr',  # métrica en validación
+                 mode='max',  # 'max' si mayor es mejor (AUC/accuracy), 'min' si menor es mejor (loss)
+                 max_gap=0.08,  # umbral de gap permitido
+                 min_epochs=10,  # no parar antes de X epochs
+                 patience=2,  # nº de epochs consecutivos tolerados con gap>max_gap
+                 restore_best_weights=True):  # restaurar mejor val
+        super().__init__()
+        self.monitor_train = monitor_train
+        self.monitor_val = monitor_val
+        self.mode = mode
+        self.max_gap = max_gap
+        self.min_epochs = min_epochs
+        self.patience = patience
+        self.restore_best_weights = restore_best_weights
+        self._bad_epochs = 0
+        self._best_val = -np.inf if mode == 'max' else np.inf
+        self._best_weights = None
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        tr = logs.get(self.monitor_train)
+        va = logs.get(self.monitor_val)
+        if tr is None or va is None:
+            return  # no están las métricas aún
+
+        # gap definido de forma que "gap grande" = peor generalización
+        if self.mode == 'max':  # ej. PR-AUC/accuracy
+            gap = tr - va
+            is_better = va > self._best_val
+        else:  # ej. loss
+            gap = va - tr
+            is_better = va < self._best_val
+
+        # guarda mejores pesos por métrica de validación
+        if is_better:
+            self._best_val = va
+            if self.restore_best_weights:
+                self._best_weights = self.model.get_weights()
+
+        # no evaluar muy pronto
+        if (epoch + 1) < self.min_epochs:
+            return
+
+        # cuenta epochs “malos” por gap
+        if gap > self.max_gap:
+            self._bad_epochs += 1
+        else:
+            self._bad_epochs = 0
+
+        if self._bad_epochs > self.patience:
+            if self.restore_best_weights and self._best_weights is not None:
+                self.model.set_weights(self._best_weights)
+            print(f"\n⛔ Parando por generalization gap: {gap:.4f} > {self.max_gap} "
+                  f"(patience {self.patience}) en epoch {epoch + 1}. Mejor {self.monitor_val} = {self._best_val:.4f}")
+            self.model.stop_training = True
+
+
+@register_keras_serializable(package='mimo_old')
+class HybridFocalRankingLoss(tf.keras.losses.Loss):
+    """
+    Hybrid loss = (1 - w) * focal + w * ListNet_ranking
+
+    Definida a nivel de módulo (no dentro de compile_model) para que Keras
+    pueda localizarla correctamente al deserializar modelos guardados en disco.
+
+    ListNet:
+      P_pred = softmax(scores)
+      P_true = softmax(labels * scale)  # scale=10 para separar 0/1
+      loss   = -sum(P_true * log(P_pred))
+
+    Solo activa el ranking term cuando el batch tiene ambas clases
+    (evita NaN con batches homogéneos).
+    """
+    def __init__(self, alpha, gamma, ranking_weight,
+                 ranking_scale=10.0,
+                 reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE,
+                 name='hybrid_focal_ranking'):
+        super().__init__(reduction=reduction, name=name)
+        self.alpha          = float(alpha)
+        self.gamma          = float(gamma)
+        self.ranking_weight = float(ranking_weight)
+        self.ranking_scale  = float(ranking_scale)
+        self._focal = ClippedBinaryFocalCrossentropy(
+            alpha=alpha, gamma=gamma, from_logits=False
+        )
+
+    def call(self, y_true, y_pred):
+        focal = self._focal(y_true, y_pred)
+
+        y_true_f = tf.cast(tf.reshape(y_true, [-1]), tf.float32)
+        y_pred_f = tf.cast(tf.reshape(y_pred, [-1]), tf.float32)
+
+        has_pos = tf.reduce_sum(y_true_f) > 0.5
+        has_neg = tf.reduce_sum(1.0 - y_true_f) > 0.5
+
+        def _ranking_loss():
+            eps = tf.keras.backend.epsilon()
+            p_pred = tf.nn.softmax(y_pred_f)
+            p_true = tf.nn.softmax(y_true_f * self.ranking_scale)
+            return -tf.reduce_sum(p_true * tf.math.log(p_pred + eps))
+
+        ranking = tf.cond(
+            has_pos & has_neg,
+            _ranking_loss,
+            lambda: tf.constant(0.0)
+        )
+
+        return (1.0 - self.ranking_weight) * focal + self.ranking_weight * ranking
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({
+            'alpha':          self.alpha,
+            'gamma':          self.gamma,
+            'ranking_weight': self.ranking_weight,
+            'ranking_scale':  self.ranking_scale,
+        })
+        return cfg
+
+
+@register_keras_serializable(package="mimo_old")
+class ClippedBinaryFocalCrossentropy(tf.keras.losses.Loss):
+    def __init__(self, alpha=0.25, gamma=2.0, from_logits=False,
+                 reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE,
+                 name="clipped_focal"):
+        super().__init__(reduction=reduction, name=name)
+        self.alpha = float(alpha)
+        self.gamma = float(gamma)
+        self.from_logits = bool(from_logits)
+        self._focal = tf.keras.losses.BinaryFocalCrossentropy(
+            alpha=self.alpha,
+            gamma=self.gamma,
+            from_logits=self.from_logits,
+            reduction=tf.keras.losses.Reduction.NONE,
+        )
+
+    def call(self, y_true, y_pred):
+        eps = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, eps, 1.0 - eps)
+        loss = self._focal(y_true, y_pred)
+        return tf.reduce_mean(loss)
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({
+            "alpha": self.alpha,
+            "gamma": self.gamma,
+            "from_logits": self.from_logits,
+        })
+        return cfg

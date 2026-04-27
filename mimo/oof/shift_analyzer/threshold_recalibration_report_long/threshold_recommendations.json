@@ -1,0 +1,289 @@
+{
+  "LOW_VOL": {
+    "train_thresholds": {
+      "p80": 0.3451937735080719,
+      "p85": 0.3527444303035736,
+      "p90": 0.3663771152496338,
+      "p95": 0.39063793420791626,
+      "p97": 0.42626070976257324,
+      "p98": 0.42881500720977783,
+      "p99": 0.4466403126716614
+    },
+    "holdout_thresholds": {
+      "p80": 0.4288150042625747,
+      "p85": 0.44664031620553357,
+      "p90": 0.4609286523216308,
+      "p95": 0.5324675324675324,
+      "p97": 0.5324675324675324,
+      "p98": 0.5324675324675324,
+      "p99": 0.5324675324675324
+    },
+    "recommended": {
+      "threshold_source": "holdout_percentile_value",
+      "quantile": 95.0,
+      "threshold": 0.5324675324675324,
+      "train_precision": 0.5714285714285714,
+      "holdout_precision": 0.6617647058823529,
+      "train_signal_rate": 0.0010661792704287564,
+      "holdout_signal_rate": 0.059388646288209605,
+      "holdout_profit_factor": 1.9565217391304348,
+      "selection_reason": "meets_constraints"
+    },
+    "baseline": {
+      "threshold_source": "train_percentile_value",
+      "quantile": 99.0,
+      "threshold": 0.4466403126716614,
+      "train_precision": 0.45425867507886436,
+      "holdout_precision": 0.5071090047393365,
+      "train_signal_rate": 0.012070672454496991,
+      "holdout_signal_rate": 0.18427947598253275,
+      "holdout_profit_factor": 1.0288461538461537
+    }
+  },
+  "RANGE": {
+    "train_thresholds": {
+      "p80": 0.31071528792381287,
+      "p85": 0.3178480267524719,
+      "p90": 0.3178480267524719,
+      "p95": 0.33542096614837646,
+      "p97": 0.3451937735080719,
+      "p98": 0.3451937735080719,
+      "p99": 0.3527444303035736
+    },
+    "holdout_thresholds": {
+      "p80": 0.3451937747940189,
+      "p85": 0.3663771078180889,
+      "p90": 0.3906379453189728,
+      "p95": 0.4288150042625747,
+      "p97": 0.44664031620553357,
+      "p98": 0.44664031620553357,
+      "p99": 0.4609286523216308
+    },
+    "recommended": {
+      "threshold_source": "holdout_percentile_value",
+      "quantile": 95.0,
+      "threshold": 0.4288150042625747,
+      "train_precision": 0.631578947368421,
+      "holdout_precision": 0.38207547169811323,
+      "train_signal_rate": 0.0005477240623828879,
+      "holdout_signal_rate": 0.05555555555555555,
+      "holdout_profit_factor": 0.6183206106870229,
+      "selection_reason": "fallback_best_available"
+    },
+    "baseline": {
+      "threshold_source": "train_percentile_value",
+      "quantile": 99.0,
+      "threshold": 0.3527444303035736,
+      "train_precision": 0.37028824833702884,
+      "holdout_precision": 0.31516936671575846,
+      "train_signal_rate": 0.013001239586035919,
+      "holdout_signal_rate": 0.1779350104821803,
+      "holdout_profit_factor": 0.46021505376344085
+    }
+  },
+  "TRANSITION_DOWN": {
+    "train_thresholds": {
+      "p80": 0.3178480267524719,
+      "p85": 0.33542096614837646,
+      "p90": 0.3376971483230591,
+      "p95": 0.3451937735080719,
+      "p97": 0.3663771152496338,
+      "p98": 0.3663771152496338,
+      "p99": 0.39063793420791626
+    },
+    "holdout_thresholds": {
+      "p80": 0.3451937747940189,
+      "p85": 0.3451937747940189,
+      "p90": 0.3663771078180889,
+      "p95": 0.4288150042625747,
+      "p97": 0.44664031620553357,
+      "p98": 0.4609286523216308,
+      "p99": 0.5324675324675324
+    },
+    "recommended": {
+      "threshold_source": "holdout_percentile_value",
+      "quantile": 95.0,
+      "threshold": 0.4288150042625747,
+      "train_precision": 0.38974358974358975,
+      "holdout_precision": 0.4052132701421801,
+      "train_signal_rate": 0.004202857943401513,
+      "holdout_signal_rate": 0.055134570159393784,
+      "holdout_profit_factor": 0.6812749003984063,
+      "selection_reason": "fallback_best_available"
+    },
+    "baseline": {
+      "threshold_source": "train_percentile_value",
+      "quantile": 99.0,
+      "threshold": 0.39063793420791626,
+      "train_precision": 0.38117283950617287,
+      "holdout_precision": 0.380449141347424,
+      "train_signal_rate": 0.013966420242688104,
+      "holdout_signal_rate": 0.09890253462241964,
+      "holdout_profit_factor": 0.6140724946695096
+    }
+  },
+  "TRANSITION_UP": {
+    "train_thresholds": {
+      "p80": 0.3178480267524719,
+      "p85": 0.33542096614837646,
+      "p90": 0.3376971483230591,
+      "p95": 0.3451937735080719,
+      "p97": 0.3663771152496338,
+      "p98": 0.3663771152496338,
+      "p99": 0.4074702858924866
+    },
+    "holdout_thresholds": {
+      "p80": 0.3354209710743802,
+      "p85": 0.3451937747940189,
+      "p90": 0.35274444225850876,
+      "p95": 0.3991494377261838,
+      "p97": 0.4353884103846256,
+      "p98": 0.44664031620553357,
+      "p99": 0.4609286523216308
+    },
+    "recommended": {
+      "threshold_source": "holdout_percentile_value",
+      "quantile": 99.0,
+      "threshold": 0.4609286523216308,
+      "train_precision": 0.0,
+      "holdout_precision": 0.48,
+      "train_signal_rate": 0.0007195107327017628,
+      "holdout_signal_rate": 0.019470404984423675,
+      "holdout_profit_factor": 0.9230769230769231,
+      "selection_reason": "meets_constraints"
+    },
+    "baseline": {
+      "threshold_source": "train_percentile_value",
+      "quantile": 99.0,
+      "threshold": 0.4074702858924866,
+      "train_precision": 0.42528735632183906,
+      "holdout_precision": 0.3333333333333333,
+      "train_signal_rate": 0.010432905624175561,
+      "holdout_signal_rate": 0.04672897196261682,
+      "holdout_profit_factor": 0.5
+    }
+  },
+  "TREND_DOWN": {
+    "train_thresholds": {
+      "p80": 0.3376971483230591,
+      "p85": 0.3451937735080719,
+      "p90": 0.3527444303035736,
+      "p95": 0.3663771152496338,
+      "p97": 0.4074702858924866,
+      "p98": 0.42626070976257324,
+      "p99": 0.44170403480529785
+    },
+    "holdout_thresholds": {
+      "p80": 0.3354209710743802,
+      "p85": 0.3451937747940189,
+      "p90": 0.3663771078180889,
+      "p95": 0.4288150042625747,
+      "p97": 0.4609286523216308,
+      "p98": 0.4609286523216308,
+      "p99": 0.5324675324675324
+    },
+    "recommended": {
+      "threshold_source": "holdout_percentile_value",
+      "quantile": 99.0,
+      "threshold": 0.5324675324675324,
+      "train_precision": 0.5897435897435898,
+      "holdout_precision": 0.5534351145038168,
+      "train_signal_rate": 0.0011037059048265908,
+      "holdout_signal_rate": 0.013932464770007976,
+      "holdout_profit_factor": 1.2393162393162394,
+      "selection_reason": "meets_constraints"
+    },
+    "baseline": {
+      "threshold_source": "train_percentile_value",
+      "quantile": 99.0,
+      "threshold": 0.44170403480529785,
+      "train_precision": 0.49642857142857144,
+      "holdout_precision": 0.44651162790697674,
+      "train_signal_rate": 0.01188606359044021,
+      "holdout_signal_rate": 0.045732517947354424,
+      "holdout_profit_factor": 0.8067226890756303
+    }
+  },
+  "TREND_UP": {
+    "train_thresholds": {
+      "p80": 0.33542096614837646,
+      "p85": 0.3376971483230591,
+      "p90": 0.3451937735080719,
+      "p95": 0.3663771152496338,
+      "p97": 0.4074702858924866,
+      "p98": 0.42626070976257324,
+      "p99": 0.4466403126716614
+    },
+    "holdout_thresholds": {
+      "p80": 0.3354209710743802,
+      "p85": 0.3451937747940189,
+      "p90": 0.3663771078180889,
+      "p95": 0.4288150042625747,
+      "p97": 0.44664031620553357,
+      "p98": 0.4609286523216308,
+      "p99": 0.5324675324675324
+    },
+    "recommended": {
+      "threshold_source": "train_percentile_value",
+      "quantile": 97.0,
+      "threshold": 0.4074702858924866,
+      "train_precision": 0.4319271332694152,
+      "holdout_precision": 0.37340619307832423,
+      "train_signal_rate": 0.03035771458509183,
+      "holdout_signal_rate": 0.06576031622447147,
+      "holdout_profit_factor": 0.5959302325581395,
+      "selection_reason": "fallback_best_available"
+    },
+    "baseline": {
+      "threshold_source": "train_percentile_value",
+      "quantile": 99.0,
+      "threshold": 0.4466403126716614,
+      "train_precision": 0.4454022988505747,
+      "holdout_precision": 0.34146341463414637,
+      "train_signal_rate": 0.010128940245073784,
+      "holdout_signal_rate": 0.03683296400550997,
+      "holdout_profit_factor": 0.5185185185185185
+    }
+  },
+  "VOLATILE": {
+    "train_thresholds": {
+      "p80": 0.1806722730398178,
+      "p85": 0.21610978245735168,
+      "p90": 0.24319136142730713,
+      "p95": 0.25828465819358826,
+      "p97": 0.26917964220046997,
+      "p98": 0.27476802468299866,
+      "p99": 0.29430729150772095
+    },
+    "holdout_thresholds": {
+      "p80": 0.3178480386561657,
+      "p85": 0.3354209710743802,
+      "p90": 0.3451937747940189,
+      "p95": 0.3663771078180889,
+      "p97": 0.4074702886247878,
+      "p98": 0.4288150042625747,
+      "p99": 0.4609286523216308
+    },
+    "recommended": {
+      "threshold_source": "holdout_percentile_value",
+      "quantile": 99.0,
+      "threshold": 0.4609286523216308,
+      "train_precision": 0.0,
+      "holdout_precision": 0.0,
+      "train_signal_rate": 0.0,
+      "holdout_signal_rate": 0.0113314447592068,
+      "holdout_profit_factor": 0.0,
+      "selection_reason": "fallback_best_available"
+    },
+    "baseline": {
+      "threshold_source": "train_percentile_value",
+      "quantile": 99.0,
+      "threshold": 0.29430729150772095,
+      "train_precision": 0.0,
+      "holdout_precision": 0.0,
+      "train_signal_rate": 0.011423498076353952,
+      "holdout_signal_rate": 0.4643684926971046,
+      "holdout_profit_factor": 0.0
+    }
+  }
+}

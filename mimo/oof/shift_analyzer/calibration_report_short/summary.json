@@ -1,0 +1,66 @@
+{
+  "input": "/mnt/c/Users/Usuario/Documents/Proyectos/TradingCo_s2_v28/artifacts/200372/oof/train_only/data/calibration_dataset_200372_short.parquet",
+  "resolved_columns": {
+    "score": "oof_proba_cal",
+    "target": "signal",
+    "state": "state",
+    "time": "time",
+    "side": "side",
+    "pnl": null,
+    "decision": null,
+    "reason": null
+  },
+  "period_col": "period",
+  "rows_total": 434428,
+  "rows_known_period": 434428,
+  "overall_periods": [
+    {
+      "period": "holdout",
+      "n": 80536,
+      "pos_rate": 0.20554782954206816,
+      "auc_roc": 0.5767179262696388,
+      "auc_pr": 0.2467733885775516,
+      "brier": 0.17130420203784083,
+      "log_loss": 0.5246765548998813,
+      "ece": 0.10128433492652972,
+      "mce": 0.11446293128466786,
+      "score_mean": 0.30683216446859785,
+      "score_std": 0.06210502114255709,
+      "score_p50": 0.3164454806312769,
+      "score_p90": 0.36148310102942516,
+      "score_p95": 0.36349453978159124
+    },
+    {
+      "period": "train",
+      "n": 293387,
+      "pos_rate": 0.27057776929448135,
+      "auc_roc": 0.6055788033804699,
+      "auc_pr": 0.333215559654014,
+      "brier": 0.1929312580545234,
+      "log_loss": 0.5700278688668974,
+      "ece": 0.048077550741037096,
+      "mce": 0.05739216201383254,
+      "score_mean": 0.22250021855344426,
+      "score_std": 0.0810040621411929,
+      "score_p50": 0.24557919800281525,
+      "score_p90": 0.30766624212265015,
+      "score_p95": 0.3230888247489929
+    },
+    {
+      "period": "validation",
+      "n": 1308,
+      "pos_rate": 0.21483180428134557,
+      "auc_roc": 0.620871695537221,
+      "auc_pr": 0.2988505878284896,
+      "brier": 0.16817918409721233,
+      "log_loss": 0.529966223746092,
+      "ece": 0.06317782945594883,
+      "mce": 0.07931271993166425,
+      "score_mean": 0.15165397482539672,
+      "score_std": 0.0839021693892495,
+      "score_p50": 0.1634398177266121,
+      "score_p90": 0.24557919800281525,
+      "score_p95": 0.2596862211823462
+    }
+  ]
+}

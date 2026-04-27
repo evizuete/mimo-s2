@@ -1,0 +1,81 @@
+Fase 01. Descubrir los parametros que mejoran el modelo a partir de la dimensión de conv1d, lstm y head
+Fase 02. Elaborar context y time
+Fase 03.
+
+Grid A1 (screening: 6–9 combos)
+
+Mantén dropout_lstm fijo inicialmente (p.ej. 0.10) y barre dropout_seq + dropout_dense.
+
+grid_reg_A1 = {
+  "dropout_seq":   [0.10, 0.20],
+  "dropout_lstm":  [0.10],
+  "dropout_dense": [0.15, 0.25],
+  "l2_reg":        [0.0, 1e-6, 1e-5],   # añade 0.0 (muy útil como control)
+}
+
+Grid A2 (refine: 6–12 combos)
+
+Con el mejor A1, ahora sí barres dropout_lstm:
+
+grid_reg_A2 = {
+  "dropout_seq":   [best_seq-0.05, best_seq, best_seq+0.05],   # discretiza a tus valores
+  "dropout_lstm":  [0.05, 0.10, 0.15],                         # añade 0.05 si puedes
+  "dropout_dense": [best_dense, best_dense+0.05],
+  "l2_reg":        [best_l2, 1e-5],
+}
+
+
+Sugerencias adicionales (muy prácticas):
+
+Añade l2_reg = 0.0 aunque sea una sola vez: te dice si el modelo ya está “bien” solo con dropout.
+
+Si tu dataset es enorme (lo es), a menudo baja regularización funciona mejor de lo que parece.
+
+2) Optimización (learning_rate + batch_size)
+
+Con series temporales y CNN+LSTM, lo más sensible suele ser LR y batch.
+
+Grid B (12 combos, limpio)
+grid_opt_B = {
+  "learning_rate": [2e-4, 5e-4, 1e-3],    # añade 2e-4
+  "batch_size":    [1024, 2048, 4096, 8192],  # si puedes; si no, quita 8192
+}
+
+
+Regla empírica:
+
+batch más grande suele necesitar LR algo mayor, pero no siempre.
+
+Si usas Adam, 2e-4–1e-3 suele cubrir bien.
+
+Si tienes inestabilidad (val loss oscilante): baja LR antes que subir dropout.
+
+3) Loss para imbalance (Focal alpha/gamma)
+
+Esto afecta mucho a PR-AUC y al “calibrado” posterior.
+
+Tu grid actual es muy corto; ampliaría un poco:
+
+Grid C (8–12 combos)
+grid_focal_C = {
+  "focal_alpha": [0.10, 0.20, 0.30],   # añade 0.10 y 0.30
+  "focal_gamma": [0.0, 0.75, 1.0, 1.5],# añade 0.0 (equivale a CE) y 1.5
+}
+
+
+Por qué meter gamma=0.0: para comprobar si focal realmente ayuda o solo mete ruido y empeora calibración.
+
+4) Attention y Gate (ablation, no “optimización”)
+
+Aquí no haría un grid grande. Haría una ablación:
+
+Grid D (2–4 runs)
+grid_ablate_D = [
+  {"use_attention": False, "use_gate": False},
+  {"use_attention": True,  "use_gate": False},
+  {"use_attention": False, "use_gate": True},
+  {"use_attention": True,  "use_gate": True},
+]
+
+
+Súper importante: evalúa esto con la misma regularización/LR ya “buenos”, si no, el resultado se contamina.

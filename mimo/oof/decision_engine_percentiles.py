@@ -1,0 +1,46 @@
+gate_by_action_and_state = {
+    "training": {
+        "long": {
+            "trend_up": 95,
+            "trend_down": 97,
+            "breakout_wait_up": 99,
+            "breakout_wait_down": 99,
+            "range": 95,
+            "transition_up": 97,
+            "transition_down": 95,
+            "_global": 95,
+        },
+        "short": {
+            "trend_up": 98,
+            "trend_down": 97,
+            "breakout_wait_up": 99,
+            "breakout_wait_down": 99,
+            "range": 98,
+            "transition_up": 99,
+            "transition_down": 97,
+            "_global": 98,
+        },
+    },
+    "production": {
+        "long": {
+            "trend_up": 97,
+            "trend_down": 99,
+            "breakout_wait_up": 99,
+            "breakout_wait_down": 99,
+            "range": 95,
+            "transition_up": 99,
+            "transition_down": 95,
+            "_global": 97,
+        },
+        "short": {
+            "trend_up": 99,
+            "trend_down": 99,
+            "breakout_wait_up": 99,
+            "breakout_wait_down": 99,
+            "range": 99,
+            "transition_up": 99,
+            "transition_down": 99,
+            "_global": 99,
+        },
+    },
+}

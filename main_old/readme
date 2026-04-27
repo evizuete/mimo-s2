@@ -1,0 +1,80 @@
+Mode    train. Threshold: 0.52. Trades:  2806. PNL: 5550.11. PNL (%): 0.5550. WinRate: 0.3054. ProfitFactor: 1.0879. Drawdown: 1621.35. Drawdown (%): -0.1295
+Mode     eval. Threshold: 0.474. Trades:   655. PNL: 1953.27. PNL (%): 0.1953. WinRate: 0.3206. ProfitFactor: 1.1921. Drawdown: 736.74. Drawdown (%): -0.0704
+Mode     eval. Threshold: 0.47409999999999997. Trades:   652. PNL: 2006.95. PNL (%): 0.2007. WinRate: 0.3206. ProfitFactor: 1.1985. Drawdown: 770.79. Drawdown (%): -0.0736
+Mode     eval. Threshold: 0.47419999999999995. Trades:   647. PNL: 2059.39. PNL (%): 0.2059. WinRate: 0.3215. ProfitFactor: 1.2050. Drawdown: 702.38. Drawdown (%): -0.0671
+Mode     eval. Threshold: 0.4743. Trades:   642. PNL: 2224.09. PNL (%): 0.2224. WinRate: 0.3255. ProfitFactor: 1.2204. Drawdown: 560.17. Drawdown (%): -0.0534
+Mode     eval. Threshold: 0.4744. Trades:   639. PNL: 2195.56. PNL (%): 0.2196. WinRate: 0.3255. ProfitFactor: 1.2203. Drawdown: 499.29. Drawdown (%): -0.0478
+Mode     eval. Threshold: 0.4745. Trades:   636. PNL: 2030.65. PNL (%): 0.2031. WinRate: 0.3239. ProfitFactor: 1.2057. Drawdown: 564.23. Drawdown (%): -0.0539
+Mode     eval. Threshold: 0.47459999999999997. Trades:   634. PNL: 2077.97. PNL (%): 0.2078. WinRate: 0.3249. ProfitFactor: 1.2111. Drawdown: 533.23. Drawdown (%): -0.0510
+Mode     eval. Threshold: 0.47469999999999996. Trades:   633. PNL: 2087.66. PNL (%): 0.2088. WinRate: 0.3254. ProfitFactor: 1.2125. Drawdown: 504.20. Drawdown (%): -0.0483
+Mode     eval. Threshold: 0.4748. Trades:   632. PNL: 2098.49. PNL (%): 0.2098. WinRate: 0.3259. ProfitFactor: 1.2138. Drawdown: 493.36. Drawdown (%): -0.0472
+Mode     eval. Threshold: 0.4749. Trades:   631. PNL: 1988.07. PNL (%): 0.1988. WinRate: 0.3249. ProfitFactor: 1.2038. Drawdown: 527.22. Drawdown (%): -0.0505
+Mode     eval. Threshold: 0.475. Trades:   630. PNL: 1934.30. PNL (%): 0.1934. WinRate: 0.3238. ProfitFactor: 1.1995. Drawdown: 586.29. Drawdown (%): -0.0561
+Mode     eval. Threshold: 0.47509999999999997. Trades:   625. PNL: 2003.54. PNL (%): 0.2004. WinRate: 0.3248. ProfitFactor: 1.2088. Drawdown: 532.17. Drawdown (%): -0.0512
+Mode     eval. Threshold: 0.47519999999999996. Trades:   623. PNL: 2093.78. PNL (%): 0.2094. WinRate: 0.3258. ProfitFactor: 1.2184. Drawdown: 535.61. Drawdown (%): -0.0512
+Mode     eval. Threshold: 0.4753. Trades:   621. PNL: 1821.78. PNL (%): 0.1822. WinRate: 0.3221. ProfitFactor: 1.1907. Drawdown: 535.61. Drawdown (%): -0.0512
+Mode     eval. Threshold: 0.4754. Trades:   615. PNL: 1705.26. PNL (%): 0.1705. WinRate: 0.3203. ProfitFactor: 1.1815. Drawdown: 521.90. Drawdown (%): -0.0499
+
+THRESHOLDS = {
+    "TREND_UP":    {"long": "p90", "short": None},
+    "TREND_DOWN":  {"long": None,  "short": "p90"},
+    "TRANSITION":  {"long": "p95", "short": "p95"},
+    "RANGE":       {"long": "p95", "short": "p95"},
+    "BREAKOUT":    {"long": "p97", "short": "p97"},
+    "VOLATILE":    {"long": "p99", "short": "p99"},
+}
+
+
+            "long": {
+                "breakout_wait_up": 97,
+                "breakout_wait_down": 99,
+                "range": 98,
+                "transition_up": 98,
+                "transition_down": 99,
+                "trend_up": 90,
+                "trend_down": 99,
+                "volatile": 99,
+                "_global": 98,
+            },
+            "short": {
+                "breakout_wait_down": 95,
+                "breakout_wait_up": 99,
+                "range": 97,
+                "transition_down": 97,
+                "transition_up": 98,
+                "trend_down": 95,
+                "trend_up": 98,
+                "volatile": 99,
+                "_global": 97,
+
+
+
+--release 200290
+--from 2024-01-01
+--to 2025-12-31
+--max_daily_loss_pct 0.0570
+--sizing_equity_mode fixed
+--compound False
+--debug
+--policy_init ./artifacts/rl_opt_200290/trial_0026/rl_policy.npz
+--policy_out ./artifacts/rl_policies/mimo_gate_200290_live.npz
+
+rl_take_threshold=0.6075
+win_rate=0.3455
+profit_factor=1.3427
+net_pnl=3584
+
+--release 200291
+--from 2024-01-01
+--to 2025-12-31
+--max_daily_loss_pct 0.0580
+--sizing_equity_mode balance
+--compound True
+--debug
+--policy_init ./artifacts/rl_opt_200291/trial_0018/rl_policy.npz
+--policy_out ./artifacts/rl_policies/mimo_gate_200291_live.npz
+
+rl_take_threshold=0.60
+win_rate=0.3550
+profit_factor=1.3896
+net_pnl=4923

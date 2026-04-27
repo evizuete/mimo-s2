@@ -1,0 +1,50 @@
+{
+  "input": "/mnt/c/Users/Usuario/Documents/Proyectos/TradingCo_s2_v28/artifacts/200371/oof/train_only/oof_200371_long.parquet",
+  "resolved_columns": {
+    "score": "oof_proba_cal",
+    "target": "signal",
+    "state": "state",
+    "time": "time",
+    "side": null,
+    "pnl": null,
+    "decision": null,
+    "reason": null
+  },
+  "period_col": "period",
+  "rows_total": 353892,
+  "rows_known_period": 353892,
+  "overall_periods": [
+    {
+      "period": "train",
+      "n": 293387,
+      "pos_rate": 0.269449566613381,
+      "auc_roc": 0.6090606719435053,
+      "auc_pr": 0.33832140126864707,
+      "brier": 0.18963172016681465,
+      "log_loss": 0.5600602640261988,
+      "ece": 0.0002330895938464957,
+      "mce": 0.0005171026615762089,
+      "score_mean": 0.2696741644868501,
+      "score_std": 0.0847779919111328,
+      "score_p50": 0.2976316809654236,
+      "score_p90": 0.34267961978912354,
+      "score_p95": 0.3548983335494995
+    },
+    {
+      "period": "validation",
+      "n": 1308,
+      "pos_rate": 0.26146788990825687,
+      "auc_roc": 0.6252769605172351,
+      "auc_pr": 0.32180283317038394,
+      "brier": 0.18455225591169686,
+      "log_loss": 0.5396123721301239,
+      "ece": 0.05228266363895129,
+      "mce": 0.4152151346206665,
+      "score_mean": 0.21108988285013433,
+      "score_std": 0.10657458362519212,
+      "score_p50": 0.25836995244026184,
+      "score_p90": 0.3099362552165985,
+      "score_p95": 0.31384357810020447
+    }
+  ]
+}

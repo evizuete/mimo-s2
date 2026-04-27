@@ -1,0 +1,30 @@
+ENTRENAMIENTO DEL MODELO SUPERVISADO
+
+python3 ./main_oof_regime_weights.py --release 200382 --side both --variant-long auto_soft --variant-short auto_soft
+
+python3 ./shift_analyzer/distribution_shift_analyzer.py
+python3 ./shift_analyzer/analyze_model_drift.py
+    --input /mnt/c/Users/Usuario/Documents/Proyectos/TradingCo_s2_v28/artifacts/200377/oof/train_only/data/calibration_dataset_200377_long.parquet
+    --score-col oof_proba_raw
+    --target-col signal
+    --state-col state
+    --time-col time
+    --train-end 2026-01-31
+    --holdout-start 2026-02-01
+python3 ./shift_analyzer/analyze_calibration_mimo.py
+    --input /mnt/c/Users/Usuario/Documents/Proyectos/TradingCo_s2_v28/artifacts/200377/oof/train_only/data/calibration_dataset_200377_long.parquet
+    --time-col time
+    --score-col oof_proba_raw
+    --target-col signal
+    --state-col state
+    --train-end 2026-01-31
+    --holdout-start 2026-02-01
+    --output-dir ./calibration_report_long
+
+python3 ./resume_deploy_full_v4.py --side long --skip-validation
+python3 ./resume_deploy_full_v4.py --side short --skip-validation
+python3 ./resume_deploy_full_v4.py --validate-only
+
+python3 ../checks/check_thresholds_v2.py
+python3 ../checks/upgrade_thresholds_v2.py
+python3 ../checks/recalc_and_apply_decision_percentiles.py

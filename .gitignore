@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Entornos
+.venv/
+venv/
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+*.jsonl
+*.jsonl.*
+**/logs/
+
+# Artefactos ML / datos / modelos
+artifacts/
+mimo/rl/artifacts/
+mimo/rl/cache/
+**/_optuna_cache/
+
+*.keras
+*.h5
+*.joblib
+*.pkl
+*.pickle
+*.parquet
+*.npz
+*.npy
+
+# Salidas generadas
+*.png
+*.jpg
+*.jpeg
+

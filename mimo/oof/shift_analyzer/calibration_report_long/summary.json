@@ -1,0 +1,66 @@
+{
+  "input": "/mnt/c/Users/Usuario/Documents/Proyectos/TradingCo_s2_v28/artifacts/200372/oof/train_only/data/calibration_dataset_200372_long.parquet",
+  "resolved_columns": {
+    "score": "oof_proba_cal",
+    "target": "signal",
+    "state": "state",
+    "time": "time",
+    "side": "side",
+    "pnl": null,
+    "decision": null,
+    "reason": null
+  },
+  "period_col": "period",
+  "rows_total": 434428,
+  "rows_known_period": 434428,
+  "overall_periods": [
+    {
+      "period": "holdout",
+      "n": 80536,
+      "pos_rate": 0.20249329492400914,
+      "auc_roc": 0.5972574455709042,
+      "auc_pr": 0.26656653165508504,
+      "brier": 0.16669153786001317,
+      "log_loss": 0.5219919774756852,
+      "ece": 0.09187094924577711,
+      "mce": 0.153421359934379,
+      "score_mean": 0.29394207271850975,
+      "score_std": 0.0809842723262763,
+      "score_p50": 0.30238990449025477,
+      "score_p90": 0.3663771078180889,
+      "score_p95": 0.4262607040913416
+    },
+    {
+      "period": "train",
+      "n": 293387,
+      "pos_rate": 0.269449566613381,
+      "auc_roc": 0.613296007757801,
+      "auc_pr": 0.3435404763951713,
+      "brier": 0.1894365436438489,
+      "log_loss": 0.5598579563226244,
+      "ece": 0.00020571064037342446,
+      "mce": 0.0007298415661593782,
+      "score_mean": 0.26963443457808023,
+      "score_std": 0.08594358047667092,
+      "score_p50": 0.29430729150772095,
+      "score_p90": 0.3451937735080719,
+      "score_p95": 0.3663771152496338
+    },
+    {
+      "period": "validation",
+      "n": 1308,
+      "pos_rate": 0.26146788990825687,
+      "auc_roc": 0.6138686087198673,
+      "auc_pr": 0.3176245937636366,
+      "brier": 0.1890549881816064,
+      "log_loss": 0.5619947936652121,
+      "ece": 0.04614227521162059,
+      "mce": 0.4367823771068028,
+      "score_mean": 0.22000065543019534,
+      "score_std": 0.08345102198121084,
+      "score_p50": 0.24319136142730713,
+      "score_p90": 0.3091748356819153,
+      "score_p95": 0.3192904591560364
+    }
+  ]
+}

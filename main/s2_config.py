@@ -1,0 +1,171 @@
+from dataclasses import dataclass, field
+from typing import FrozenSet
+
+TRAINING_SL_BARRIER_R = 1.5
+TRAINING_TP_BARRIER_R = 2.5
+TRAINING_LABEL_RR = TRAINING_TP_BARRIER_R / TRAINING_SL_BARRIER_R
+
+# SHORT usa label_method='adaptive' — barriers más pequeños y consistentes
+# con los movimientos bajistas reales en M1.
+# Ajustar tras analizar holdout del release actual.
+TRAINING_SL_BARRIER_R_SHORT = 0.8
+TRAINING_TP_BARRIER_R_SHORT = 1.2
+TRAINING_LABEL_RR_SHORT = TRAINING_TP_BARRIER_R_SHORT / TRAINING_SL_BARRIER_R_SHORT
+
+MIN_RR_BY_REGIME = {
+    "trend_up": 1.0,
+    "trend_down": 1.0,
+    "transition_up": 1.0,
+    "transition_down": 1.0,
+    "range": 1.0,
+    "breakout_wait_up": 1.0,
+    "breakout_wait_down": 1.0,
+    "volatile": 1.0,
+    "low_vol": 1.0,
+    "_default": 1.0,
+}
+
+MAX_RR_BY_REGIME = {
+    "trend_up": TRAINING_LABEL_RR,
+    "trend_down": TRAINING_LABEL_RR,
+    "transition_up": 1.2,
+    "transition_down": 1.2,
+    # FIX v1.1: subido de 1.0 -> TRAINING_LABEL_RR (1.667).
+    # Con rr_max=1.0 el TP quedaba simetrico al vSL (1:1). El trailing
+    # BE_ARMED (trigger=40pts) interrumpia sistematicamente los ganadores
+    # antes de llegar al TP, cerrandolos a avg +0.22R mientras los
+    # perdedores completaban -1.05R. EV observado: -0.25R por operacion.
+    # El modelo propone consistentemente 1.665-1.668R (training label exacto)
+    # -> dejarlo correr hasta ese nivel alinea inferencia con ejecucion.
+    "range": TRAINING_LABEL_RR,
+    "breakout_wait_up": 1.2,
+    "breakout_wait_down": 1.2,
+    "volatile": 0.8,
+    # FIX v1.1: idem para low_vol (mismo razonamiento que range).
+    "low_vol": 1.2,
+    "_default": 1.0,
+}
+
+MIN_RR_BY_REGIME_SHORT = {
+    "trend_up":           0.8,   # contra-tendencia SHORT — RR mínimo más permisivo
+    "trend_down":         1.0,
+    "transition_up":      0.8,
+    "transition_down":    1.0,
+    "range":              1.0,
+    "breakout_wait_up":   0.8,
+    "breakout_wait_down": 1.0,
+    "volatile":           0.8,   # más permisivo en volatilidad
+    "low_vol":            1.0,
+    "_default":           1.0,
+}
+
+MAX_RR_BY_REGIME_SHORT = {
+    "trend_up":           TRAINING_LABEL_RR_SHORT,
+    "trend_down":         TRAINING_LABEL_RR_SHORT,
+    "transition_up":      1.0,
+    "transition_down":    1.0,
+    "range":              TRAINING_LABEL_RR_SHORT,
+    "breakout_wait_up":   1.0,
+    "breakout_wait_down": TRAINING_LABEL_RR_SHORT,
+    "volatile":           0.8,
+    "low_vol":            1.0,
+    "_default":           TRAINING_LABEL_RR_SHORT,
+}
+
+
+# ============================================================================
+# KEEPALIVE
+# ============================================================================
+
+@dataclass
+class KeepAliveConfig:
+    interval_secs: int = 30
+    on_new_bar: bool = True
+
+
+# ============================================================================
+# COUNTER-TREND POLICY
+# ============================================================================
+
+@dataclass
+class CounterTrendConfig:
+    """Política de bloqueo/penalización de señales contra-tendencia.
+
+    block_total = True  → rechazar completamente señales contra-tendencia en
+                          los regímenes listados (no importa el score).
+    block_total = False → permitir si score >= min_score_to_trade + score_penalty.
+    """
+    block_total: bool = False       ## False or True
+    score_penalty: float = 0.25
+    regimes_short_block: FrozenSet[str] = field(
+        default_factory=lambda: frozenset({"trend_up"})
+    )
+    regimes_long_block: FrozenSet[str] = field(
+        default_factory=lambda: frozenset({"trend_down"})
+    )
+
+
+# ============================================================================
+# STRICT REVERSAL GUARDS
+# ============================================================================
+
+@dataclass
+class ReversalGuardConfig:
+    """Guardias extra para entradas contra tendencia fuerte.
+
+    No bloquea por completo el contra-trend, pero exige señales mínimas de
+    giro cuando el régimen es claramente adverso.
+    """
+    enabled: bool = True
+    long_in_trend_down: bool = True
+    short_in_trend_up: bool = True
+    long_min_rsi: float = 46.0
+    short_max_rsi: float = 54.0
+    require_macd_flip: bool = True
+    min_proba_edge: float = 0.02
+    require_indicators_present: bool = True
+
+
+# ============================================================================
+# OPEN GUARDS
+# ============================================================================
+
+@dataclass
+class OpenGuardConfig:
+    """Guards que S2 evalúa antes de enviar una orden OPEN a S3.
+
+    open_guard_secs:    cooldown mínimo entre dos envíos de OPEN (evita ráfagas
+                        si dos ticks llegan en la misma barra).
+    max_signal_age_bars: señales más viejas que N barras se descartan.
+    max_entry_gap_pts:  gap máximo (en puntos) entre model_entry y precio real
+                        (bid/ask) para aceptar la señal. Si ATR está disponible,
+                        el threshold es max(max_entry_gap_pts, atr_pts).
+    """
+    open_guard_secs: float = 5.0
+    max_signal_age_bars: int = 1
+    max_entry_gap_pts: int = 300
+
+
+# ============================================================================
+# S2 CONFIG (raíz)
+# ============================================================================
+
+@dataclass
+class S2Config:
+    keepalive: KeepAliveConfig = field(default_factory=KeepAliveConfig)
+    counter_trend: CounterTrendConfig = field(default_factory=CounterTrendConfig)
+    reversal_guard: ReversalGuardConfig = field(default_factory=ReversalGuardConfig)
+    open_guard: OpenGuardConfig = field(default_factory=OpenGuardConfig)
+
+    # ── Geometry / order builder ────────────────────────────────────────────
+    min_vsl_points: int = 20
+
+    # ── Startup ─────────────────────────────────────────────────────────────
+    # ── RSI entry filter (FIX 17/04/2026 BUG-2) ────────────────────────────
+    rsi_overbought_threshold: float = 75.0
+    rsi_oversold_threshold: float = 25.0
+
+    # ── Transition weak-signal filter (FIX 17/04/2026 BUG-3) ───────────────
+    transition_min_proba_delta: float = 0.10
+
+    startup_grace_bars: int = 1

@@ -1,0 +1,107 @@
+{
+  "devices": {
+    "10.1.21.1": {
+      "ip": "10.1.21.1",
+      "mac": "",
+      "hostname": "",
+      "type": "workstation",
+      "manufacturer": "",
+      "services": [
+        "SSH:22",
+        "Telnet:23",
+        "HTTP:80"
+      ],
+      "os": ""
+    },
+    "10.1.21.2": {
+      "ip": "10.1.21.2",
+      "mac": "",
+      "hostname": "",
+      "type": "workstation",
+      "manufacturer": "",
+      "services": [
+        "SSH:22",
+        "Telnet:23",
+        "HTTP:80"
+      ],
+      "os": ""
+    },
+    "10.1.21.15": {
+      "ip": "10.1.21.15",
+      "mac": "",
+      "hostname": "",
+      "type": "workstation",
+      "manufacturer": "",
+      "services": [
+        "HTTP:80",
+        "HTTPS:443"
+      ],
+      "os": ""
+    },
+    "10.1.21.30": {
+      "ip": "10.1.21.30",
+      "mac": "",
+      "hostname": "",
+      "type": "workstation",
+      "manufacturer": "",
+      "services": [
+        "HTTP:80",
+        "RDP:3389"
+      ],
+      "os": ""
+    },
+    "10.1.21.66": {
+      "ip": "10.1.21.66",
+      "mac": "",
+      "hostname": "",
+      "type": "workstation",
+      "manufacturer": "",
+      "services": [
+        "HTTP:80",
+        "HTTPS:443"
+      ],
+      "os": ""
+    },
+    "10.1.21.70": {
+      "ip": "10.1.21.70",
+      "mac": "",
+      "hostname": "",
+      "type": "workstation",
+      "manufacturer": "",
+      "services": [],
+      "os": ""
+    },
+    "10.1.21.135": {
+      "ip": "10.1.21.135",
+      "mac": "",
+      "hostname": "",
+      "type": "workstation",
+      "manufacturer": "",
+      "services": [],
+      "os": ""
+    },
+    "10.1.21.160": {
+      "ip": "10.1.21.160",
+      "mac": "",
+      "hostname": "",
+      "type": "workstation",
+      "manufacturer": "",
+      "services": [],
+      "os": ""
+    },
+    "10.1.21.175": {
+      "ip": "10.1.21.175",
+      "mac": "",
+      "hostname": "",
+      "type": "workstation",
+      "manufacturer": "",
+      "services": [
+        "SSH:22",
+        "HTTP:80",
+        "HTTPS:443"
+      ],
+      "os": ""
+    }
+  },
+  "links": []
+}
