@@ -375,6 +375,15 @@ GRID_BY_RELEASE = {
     },
     "200396": {
         **_DEFAULT_GRID,
+    },
+    # ── 200397: h=15 + barriers simétricas pequeñas (~1 ATR)
+    # Hipótesis del barrier_sweep: con tp/sl ≈ 1 ATR en horizonte largo (12-15
+    # velas de 1m) la pos_rate sube a ~0.40-0.50 y el lift_to_breakeven cae a
+    # ~1.0-1.05x. El modelo solo necesita lift > 1.0 para ser rentable.
+    # Cambio radical respecto a la familia 200391-200395 (movimientos
+    # explosivos raros) → ahora aprende direccionalidad a corto plazo.
+    "200397": {
+        **_DEFAULT_GRID,
     }
 }
 
@@ -397,6 +406,68 @@ def _get_grid_for_release(release: str) -> dict:
 
 # Alias retrocompatible (no se usa en el flujo, mantiene compatibilidad si algún módulo lo importa)
 GRID_COMMON = _DEFAULT_GRID
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BARRIERS por release
+# ─────────────────────────────────────────────────────────────────────────────
+# Permite cambiar tp/sl por release sin tocar build_trainer cada vez.
+# Para releases sin entrada se usan los barriers default (la familia 200391-200395).
+
+_DEFAULT_BARRIERS = {
+    "tp_base": 2.5,
+    "sl_base": 1.5,
+    "regime_barriers_long": {
+        "trending": {"tp": 3.5, "sl": 1.25},
+        "ranging":  {"tp": 2.25, "sl": 1.25},
+        "low_vol":  {"tp": 2.75, "sl": 1.00},
+        "high_vol": {"tp": 3.50, "sl": 2.00},
+    },
+    "regime_barriers_short": {
+        "trending": {"tp": 3.0, "sl": 1.25},
+        "ranging":  {"tp": 2.25, "sl": 1.25},
+        "low_vol":  {"tp": 2.50, "sl": 1.00},
+        "high_vol": {"tp": 3.25, "sl": 2.00},
+    },
+}
+
+BARRIERS_BY_RELEASE = {
+    # 200397: barriers simétricas pequeñas para h=15. Decisión basada en el
+    # barrier_sweep empírico (mimo/diagnosis/barrier_sweep.py), que mostró que
+    # configs con tp/sl ≈ 1.0-1.5 ATR en h=12-15 tienen lift_to_breakeven ~1.0x
+    # — alcanzable con el lift 1.7x del modelo en h=5.
+    # SL ≥ 1.0 ATR para no caer en ruido (ATR es por definición el rango medio).
+    "200397": {
+        "tp_base": 1.5,
+        "sl_base": 1.0,
+        "regime_barriers_long": {
+            "trending": {"tp": 1.5,  "sl": 1.0},
+            "ranging":  {"tp": 1.25, "sl": 1.0},
+            "low_vol":  {"tp": 1.25, "sl": 1.0},
+            "high_vol": {"tp": 1.5,  "sl": 1.25},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 1.5,  "sl": 1.0},
+            "ranging":  {"tp": 1.25, "sl": 1.0},
+            "low_vol":  {"tp": 1.25, "sl": 1.0},
+            "high_vol": {"tp": 1.5,  "sl": 1.25},
+        },
+    },
+}
+
+
+def _get_barriers_for_release(release: str) -> dict:
+    """Devuelve los barriers para el release, con fallback a _DEFAULT_BARRIERS."""
+    release_str = str(release)
+    barriers = BARRIERS_BY_RELEASE.get(release_str, _DEFAULT_BARRIERS)
+    if release_str not in BARRIERS_BY_RELEASE:
+        print(f"🎯 [BARRIERS] release={release_str} | usando barriers default")
+    else:
+        print(f"🎯 [BARRIERS] release={release_str} | barriers especificos:")
+        print(f"             tp_base={barriers['tp_base']} sl_base={barriers['sl_base']}")
+        print(f"             long  trending={barriers['regime_barriers_long']['trending']}")
+        print(f"             short trending={barriers['regime_barriers_short']['trending']}")
+    return barriers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -881,28 +952,20 @@ def build_trainer(release: str, label_horizon_long: int, label_horizon_short: in
         save_oof_artifacts=True,
     )
 
+    barriers = _get_barriers_for_release(release)
+
     trainer = OptunaOOFTrainer(
         general_config=general,
         feature_config=FeatureConfig(
             ema_periods=[9, 21, 50],
             label_method="triple_barrier",
             label_horizon=max(label_horizon_long, label_horizon_short),
-            tp_barrier=2.5,
-            sl_barrier=1.5,
+            tp_barrier=barriers["tp_base"],
+            sl_barrier=barriers["sl_base"],
             label_method_long="triple_barrier",
-            regime_barriers_long={
-                "trending": {"tp": 3.5, "sl": 1.25},
-                "ranging": {"tp": 2.25, "sl": 1.25},
-                "low_vol": {"tp": 2.75, "sl": 1.00},
-                "high_vol": {"tp": 3.50, "sl": 2.00},
-            },
+            regime_barriers_long=barriers["regime_barriers_long"],
             label_method_short="triple_barrier",
-            regime_barriers_short={
-                "trending": {"tp": 3.0, "sl": 1.25},
-                "ranging": {"tp": 2.25, "sl": 1.25},
-                "low_vol": {"tp": 2.50, "sl": 1.00},
-                "high_vol": {"tp": 3.25, "sl": 2.00},
-            },
+            regime_barriers_short=barriers["regime_barriers_short"],
             tp_barrier_short=None,
             sl_barrier_short=None,
             feature_masks={
