@@ -147,6 +147,8 @@ class RollingRobustScaler:
     skip_features: Optional[Union[Sequence[int], np.ndarray]] = None
     min_iqr: float = 1e-4
     _skip_mask: Optional[np.ndarray] = None
+    feature_names: Optional[Sequence[str]] = None
+    name: str = ""
 
     # ═══════════════════════════════════════════════════════════════════
     # PARÁMETROS DE OPTIMIZACIÓN
@@ -372,9 +374,18 @@ class RollingRobustScaler:
             tiny_mask = scale < 1e-3
             if tiny_mask.any():
                 tiny_indices = np.where(tiny_mask)[0]
-                print(f"[SCALE_CENTER] {tiny_mask.sum()} features con scale<1e-3 (warning una sola vez por scaler):")
+                if self._skip_mask is not None and self._skip_mask.any():
+                    name_lookup = [
+                        n for i, n in enumerate(self.feature_names or [])
+                        if not self._skip_mask[i]
+                    ] if self.feature_names is not None else None
+                else:
+                    name_lookup = list(self.feature_names) if self.feature_names is not None else None
+                tag = f"[{self.name}]" if self.name else ""
+                print(f"[SCALE_CENTER]{tag} {tiny_mask.sum()} features con scale<1e-3 (warning una sola vez por scaler):")
                 for idx in tiny_indices:
-                    print(f"  → feature_idx={idx}: median={median[idx]:.6f}, scale={scale[idx]:.8f}")
+                    fname = name_lookup[idx] if (name_lookup is not None and idx < len(name_lookup)) else "?"
+                    print(f"  → idx={idx} name={fname}: median={median[idx]:.6f}, scale={scale[idx]:.8f}")
                 self._tiny_warned = True
 
         if self._skip_mask is not None and self._skip_mask.any():

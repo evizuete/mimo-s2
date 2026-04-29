@@ -769,7 +769,9 @@ class DataPipeline:
                 nan_policy='zero',
                 scale_before_warmup=True,
                 skip_features=skip,
-                min_iqr=1e-4
+                min_iqr=1e-4,
+                feature_names=list(feature_cols) if feature_cols is not None else None,
+                name=str(name),
             )
 
             data_scaled = scaler.fit_transform(data)
@@ -808,7 +810,9 @@ class DataPipeline:
                 nan_policy='zero',
                 scale_before_warmup=True,
                 skip_features=skip,
-                min_iqr=1e-4
+                min_iqr=1e-4,
+                feature_names=list(feature_cols) if feature_cols is not None else None,
+                name=str(name),
             )
             # El scaler solo necesita window_size=2880 filas representativas
             # Las cogemos con stride para cubrir toda la distribución temporal
