@@ -12,10 +12,13 @@ Cambios respecto a versión anterior:
   - Los percentiles globales (_global) se calculan EXCLUYENDO LOW_VOL.
 """
 
+import ctypes
+import gc
 from typing import Dict, Any, Iterable, Tuple
 
 import numpy as np
 import pandas as pd
+import tensorflow as tf
 from pandas import DataFrame
 from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import TimeSeriesSplit
@@ -284,6 +287,21 @@ class ProbsCalibration:
             val_row_positions = (L - 1) + np.arange(val_start, val_end, dtype=np.int32)
             oof_raw[val_row_positions] = y_pred_val
             oof_y[val_row_positions]   = y_val
+
+            # Liberar memoria entre folds: el modelo + tensores del fold
+            # anterior + buffers del scaler suman varios GB y disparaban
+            # OOM (exit 137) en folds tardíos con datasets más grandes.
+            del tm, history
+            del data_train, data_val
+            del X_train, X_val, X_train_aug
+            del y_train, y_val, w_train, y_pred_val
+            del pipeline_fold
+            tf.keras.backend.clear_session()
+            gc.collect()
+            try:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
 
         # ── Calibración isotónica ──────────────────────────────────────
         mask = np.isfinite(oof_raw) & np.isfinite(oof_y) & (oof_y >= 0)

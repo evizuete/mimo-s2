@@ -744,8 +744,8 @@ class FeatureEngineer:
 
             ema21_dist_bps = (agg['close'] - ema21) / (atr_tf_safe + 1e-10) * 10_000.0
             ema50_dist_bps = (agg['close'] - ema50) / (atr_tf_safe + 1e-10) * 10_000.0
-            ema21_slope_bps = ema21.pct_change(5) * 10_000.0
-            ema50_slope_bps = ema50.pct_change(5) * 10_000.0
+            ema21_slope_bps = (ema21.diff(5) / (atr_tf_safe + 1e-10)) * 10_000.0
+            ema50_slope_bps = (ema50.diff(5) / (atr_tf_safe + 1e-10)) * 10_000.0
 
             try:
                 rsi_tf = ta.rsi(agg['close'], length=14)

@@ -172,6 +172,7 @@ class RollingRobustScaler:
 
     recompute_every: int = 32
     _update_counter: int = 0
+    _tiny_warned: bool = False
 
     def __post_init__(self):
         if self.use_fast_buffer:
@@ -192,6 +193,7 @@ class RollingRobustScaler:
         self.n_features = None
         self.median_ = None
         self.scale_ = None
+        self._tiny_warned = False
 
     def fit(self, X: np.ndarray) -> "RollingRobustScaler":
         """
@@ -366,12 +368,14 @@ class RollingRobustScaler:
             median = self.median_
             scale = self.scale_
 
-        tiny_mask = scale < 1e-3
-        if tiny_mask.any():
-            tiny_indices = np.where(tiny_mask)[0]
-            print(f"[SCALE_CENTER] {tiny_mask.sum()} features con scale<1e-3:")
-            for idx in tiny_indices:
-                print(f"  → feature_idx={idx}: median={median[idx]:.6f}, scale={scale[idx]:.8f}")
+        if not self._tiny_warned:
+            tiny_mask = scale < 1e-3
+            if tiny_mask.any():
+                tiny_indices = np.where(tiny_mask)[0]
+                print(f"[SCALE_CENTER] {tiny_mask.sum()} features con scale<1e-3 (warning una sola vez por scaler):")
+                for idx in tiny_indices:
+                    print(f"  → feature_idx={idx}: median={median[idx]:.6f}, scale={scale[idx]:.8f}")
+                self._tiny_warned = True
 
         if self._skip_mask is not None and self._skip_mask.any():
             X[:, mask_scale] = (X[:, mask_scale] - median) / scale
