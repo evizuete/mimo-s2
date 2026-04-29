@@ -52,7 +52,9 @@ class DataPipeline:
             'seq_short': { 'doji', 'hammer', 'shooting_star'},
             'seq_long': { 'trend_dir' },
             'context': { 'is_chop', 'is_exhaustion', 'ema_bull', 'ema_bear',
-                         'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative'}
+                         'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative',
+                         'is_month_end', 'is_friday',
+                         'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour'}
         }
 
         self._last_live_time = None
@@ -412,7 +414,9 @@ class DataPipeline:
         # Features binarias que NO se escalan
         no_scale = {
             'is_chop', 'is_exhaustion', 'ema_bull', 'ema_bear',
-            'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative'
+            'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative',
+            'is_month_end', 'is_friday',
+            'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour'
         }
 
         scale_mask = np.array([c not in no_scale for c in context_cols])
@@ -662,7 +666,9 @@ class DataPipeline:
             if hasattr(scaler, 'stats_'):
                 n_features_saved = scaler.stats_['center'].shape[0]
                 no_scale = {'is_chop', 'is_exhaustion', 'ema_bull', 'ema_bear',
-                            'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative'}
+                            'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative',
+                            'is_month_end', 'is_friday',
+                            'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour'}
                 context_cols = feature_cols.get('context', [])
                 n_features_to_scale = sum(1 for c in context_cols if c not in no_scale)
 
@@ -942,7 +948,9 @@ class DataPipeline:
             'seq_short': ['doji', 'hammer', 'shooting_star'],
             'seq_long': ['trend_dir'],
             'context': ['is_chop', 'is_exhaustion', 'ema_bull', 'ema_bear', 'rsi_oversold', 'rsi_overbought',
-                        'macd_positive', 'macd_negative']
+                        'macd_positive', 'macd_negative',
+                        'is_month_end', 'is_friday',
+                        'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour']
         }
 
         # Calcular columnas escalables del contexto (sin no_scale) para auditoría
