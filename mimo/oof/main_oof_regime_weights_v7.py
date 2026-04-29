@@ -393,6 +393,17 @@ GRID_BY_RELEASE = {
     # bajar break-even de 0.26 a ~0.36, manteniendo SL >= 1 ATR.
     "200398": {
         **_DEFAULT_GRID,
+    },
+    # ── 200399: misma config que 200398 + auto_soft sample weighting
+    # Ultimo experimento de la rama "barriers/horizon/weights" para agotar la
+    # palanca de regime weights con las barriers de 200398. auto_soft ajusta
+    # weight = 1 + 0.35*(pos_rate_state/pos_rate_global - 1) clipeado a
+    # [0.85, 1.20], adaptandose automaticamente a los nuevos pos_rates por
+    # estado (e.g. LOW_VOL ahora alto, VOLATILE bajo). Si esto da +>=4pp
+    # AUC-ROC vs 200398, weights aporta. Si da <2pp, confirmado que el techo
+    # esta en features y toca pivotar a microstructure/orderflow.
+    "200399": {
+        **_DEFAULT_GRID,
     }
 }
 
@@ -469,6 +480,25 @@ BARRIERS_BY_RELEASE = {
     # exigida para subir pos_rate y bajar break-even.
     # BE objetivos: trending 0.355, ranging 0.386, low_vol 0.364, high_vol 0.400.
     "200398": {
+        "tp_base": 2.0,
+        "sl_base": 1.10,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 1.10},
+            "ranging":  {"tp": 1.75, "sl": 1.10},
+            "low_vol":  {"tp": 1.75, "sl": 1.00},
+            "high_vol": {"tp": 2.25, "sl": 1.50},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 1.10},
+            "ranging":  {"tp": 1.75, "sl": 1.10},
+            "low_vol":  {"tp": 1.75, "sl": 1.00},
+            "high_vol": {"tp": 2.25, "sl": 1.50},
+        },
+    },
+    # 200399: hereda los barriers de 200398. Solo cambia el sample weighting
+    # via --variant-long auto_soft --variant-short auto_soft en la linea de
+    # comandos.
+    "200399": {
         "tp_base": 2.0,
         "sl_base": 1.10,
         "regime_barriers_long": {
