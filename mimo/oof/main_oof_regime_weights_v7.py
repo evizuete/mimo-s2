@@ -244,6 +244,18 @@ LONG_VARIANTS: Dict[str, Dict[str, Any]] = {
         "VOLATILE":           0.0,
         "LOW_VOL":            0.0,
     },
+    "no_trade_zero": {
+        "TREND_UP": 1.0,
+        "TREND_DOWN": 1.0,
+        "TRANSITION_UP": 1.0,
+        "TRANSITION_DOWN": 1.0,
+        "BREAKOUT_WAIT_UP": 1.0,
+        "BREAKOUT_WAIT_DOWN": 1.0,
+        "RANGE": 1.0,
+        "VOLATILE": 1.0,
+        "LOW_VOL": 0.0,             # alinea con NO_TRADE_STATES en probs_calibration
+
+    }
 }
 
 SHORT_VARIANTS: Dict[str, Dict[str, Any]] = {
@@ -352,6 +364,18 @@ GRID_BY_RELEASE = {
         "learning_rate": [5e-4],
         "patience":      [18],
     },
+    "200394": {
+        **_DEFAULT_GRID,
+        "focal_alpha": [0.50],
+        "focal_gamma": [2.50],
+    },
+    "200395": {
+        **_DEFAULT_GRID,
+        #"ranking_loss_weight": [0.35],
+    },
+    "200396": {
+        **_DEFAULT_GRID,
+    }
 }
 
 

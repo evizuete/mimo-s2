@@ -39,8 +39,7 @@ import numpy as np
 import pandas as pd
 
 DEFAULT_DIR = Path(
-    r"C:\Users\Usuario\Documents\Proyectos\TradingCo_s2_v28\artifacts\200393\oof"
-    r"\rw_both_Lbaseline_h10_Strend_robustness_v1_h10\data"
+    r"/mnt/c/Users/Usuario/Documents/Proyectos/TradingCo_s2/data_sample"
 )
 DEFAULT_RELEASE = "200393"
 THRESHOLD_PCTLS = [70, 80, 90, 95]
