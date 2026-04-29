@@ -384,6 +384,15 @@ GRID_BY_RELEASE = {
     # explosivos raros) → ahora aprende direccionalidad a corto plazo.
     "200397": {
         **_DEFAULT_GRID,
+    },
+    # ── 200398: h=5 (mantiene horizonte de 200395) + barriers reducidos
+    # Tras descubrir en 200397 que pos_rate ~0.4 mata la learnability del modelo
+    # (val_auc_roc cae de 0.66 a 0.52), volvemos a h=5 — donde el modelo SI
+    # extraía señal — pero con tp/sl mas pequeños que las originales (3.5/1.25
+    # → 2.0/1.10) para subir pos_rate de 0.065 a un rango operable (~0.15) y
+    # bajar break-even de 0.26 a ~0.36, manteniendo SL >= 1 ATR.
+    "200398": {
+        **_DEFAULT_GRID,
     }
 }
 
@@ -451,6 +460,28 @@ BARRIERS_BY_RELEASE = {
             "ranging":  {"tp": 1.25, "sl": 1.0},
             "low_vol":  {"tp": 1.25, "sl": 1.0},
             "high_vol": {"tp": 1.5,  "sl": 1.25},
+        },
+    },
+    # 200398: h=5 + barriers reducidos pero NO en zona de ruido. SL >= 1 ATR
+    # siempre. tp/sl medio entre los originales (3.5/1.25) y los de 200397
+    # (1.5/1.0). Preserva la naturaleza del problema (movimientos
+    # significativos a 5 min) que era aprendible — solo baja la magnitud
+    # exigida para subir pos_rate y bajar break-even.
+    # BE objetivos: trending 0.355, ranging 0.386, low_vol 0.364, high_vol 0.400.
+    "200398": {
+        "tp_base": 2.0,
+        "sl_base": 1.10,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 1.10},
+            "ranging":  {"tp": 1.75, "sl": 1.10},
+            "low_vol":  {"tp": 1.75, "sl": 1.00},
+            "high_vol": {"tp": 2.25, "sl": 1.50},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 1.10},
+            "ranging":  {"tp": 1.75, "sl": 1.10},
+            "low_vol":  {"tp": 1.75, "sl": 1.00},
+            "high_vol": {"tp": 2.25, "sl": 1.50},
         },
     },
 }
