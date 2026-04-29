@@ -2,31 +2,32 @@
 """
 analyze_metamodel_signal.py
 
-Analisis exploratorio sobre los calibration_dataset_*.parquet generados por
-main_oof_regime_weights_v7.py para valorar si un metamodelo de discriminacion
-de falsos positivos aporta senal.
+Analisis exploratorio para valorar si un metamodelo de discriminacion de falsos
+positivos aporta senal sobre la salida de main_oof_regime_weights_v7.py.
 
-Lee:
-    <dir>/calibration_dataset_<release>_long.parquet
-    <dir>/calibration_dataset_<release>_short.parquet
+Acepta dos formatos de entrada (autodeteccion):
 
-Produce por pantalla:
-    - Resumen global y por (source, state)
-    - Calibracion por decil de oof_proba_cal (en OOF y en holdout)
-    - Heatmap pos_rate por (state x decil)
-    - Punto de operacion en umbrales p70/p80/p90/p95 (precision, recall, fp/tp)
-    - Desglose por estado en holdout para cada umbral
-    - Dispersion de precision entre estados (la senal clave para el meta)
-    - Lectura rapida con recomendacion
+  1) calibration_dataset_<release>_<side>.parquet  (preferido)
+        col: time, state, signal, oof_proba_raw, oof_proba_cal, source
+        source ∈ {oof_train, holdout}  -> permite contraste OOF vs holdout
 
-Y un CSV junto a cada parquet:
-    meta_signal_state_decile_<side>.csv
+  2) oof_<release>_<side>.parquet  (fallback)
+        col: time, state, signal, oof_proba_raw, oof_proba_cal
+        sin holdout: se sintetiza source='oof_train' y se omiten secciones de
+        holdout. Suficiente para el diagnostico primario de heterogeneidad.
 
-Uso (Windows, valores por defecto apuntan a tu artifact):
-    python analyze_metamodel_signal.py
-    python analyze_metamodel_signal.py --release 200393
-    python analyze_metamodel_signal.py --dir "C:\\ruta\\al\\data"
-    python analyze_metamodel_signal.py --long ".\\cal_long.parquet" --short ".\\cal_short.parquet"
+Resolucion de paths (en este orden):
+  - --long / --short si se pasan
+  - <dir>/calibration_dataset_<release>_<side>.parquet
+  - <dir>/oof_<release>_<side>.parquet
+  - <dir>/../oof_<release>_<side>.parquet  (la raiz del experiment_tag)
+
+Uso (Windows):
+    python -m mimo.oof.analyze_metamodel_signal
+    python -m mimo.oof.analyze_metamodel_signal --release 200393
+    python -m mimo.oof.analyze_metamodel_signal --dir "C:\\ruta"
+    python -m mimo.oof.analyze_metamodel_signal --long oof_200393_long.parquet ^
+                                                --short oof_200393_short.parquet
 """
 
 from __future__ import annotations
@@ -61,13 +62,31 @@ def section(title: str) -> None:
     print("=" * 78)
 
 
+def resolve_input_path(explicit: str | None, base: Path, release: str, side: str) -> Path | None:
+    if explicit:
+        p = Path(explicit)
+        return p if p.exists() else None
+    candidates = [
+        base / f"calibration_dataset_{release}_{side}.parquet",
+        base / f"oof_{release}_{side}.parquet",
+        base.parent / f"oof_{release}_{side}.parquet",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
 def load_dataset(path: Path) -> pd.DataFrame:
     df = pd.read_parquet(path)
-    required = {"signal", "oof_proba_cal", "state", "source"}
+    required = {"signal", "oof_proba_cal", "state"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"{path.name}: faltan columnas {missing}")
     df = df.copy()
+    if "source" not in df.columns:
+        df["source"] = "oof_train"
+        print(f"  [info] {path.name} sin columna 'source'. Asumido source='oof_train'.")
     df["signal"] = pd.to_numeric(df["signal"], errors="coerce")
     df = df.dropna(subset=["signal", "oof_proba_cal", "state", "source"])
     df["signal"] = df["signal"].astype(int)
@@ -310,23 +329,24 @@ def analyze_side(side: str, path: Path) -> None:
 def main() -> None:
     args = parse_args()
     base = Path(args.dir)
-    long_path = (
-        Path(args.long)
-        if args.long
-        else base / f"calibration_dataset_{args.release}_long.parquet"
-    )
-    short_path = (
-        Path(args.short)
-        if args.short
-        else base / f"calibration_dataset_{args.release}_short.parquet"
-    )
 
     pd.set_option("display.width", 200)
     pd.set_option("display.max_columns", 50)
     pd.set_option("display.max_rows", 200)
 
-    analyze_side("long", long_path)
-    analyze_side("short", short_path)
+    for side, explicit in (("long", args.long), ("short", args.short)):
+        path = resolve_input_path(explicit, base, args.release, side)
+        if path is None:
+            section(f"SIDE = {side.upper()}  |  (sin parquet)")
+            print(
+                f"  no se encontro parquet en candidatos:\n"
+                f"    {base / f'calibration_dataset_{args.release}_{side}.parquet'}\n"
+                f"    {base / f'oof_{args.release}_{side}.parquet'}\n"
+                f"    {base.parent / f'oof_{args.release}_{side}.parquet'}\n"
+                f"  pasa la ruta con --{side} <path>."
+            )
+            continue
+        analyze_side(side, path)
 
 
 if __name__ == "__main__":
