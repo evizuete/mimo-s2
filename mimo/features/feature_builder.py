@@ -159,6 +159,12 @@ class FeatureEngineer:
 
         df = self.add_price_invariant_features(df, window=200)
 
+        # 8. Multi-timeframe features (5m / 15m / 1h)
+        df = self._add_multi_timeframe_features(df)
+
+        # 9. Calendar / session features extendidas
+        df = self._add_extended_calendar_features(df)
+
         # Definir qué features van en cada input del modelo
         self._assign_features_to_inputs()
 
@@ -678,6 +684,151 @@ class FeatureEngineer:
 
         return df
 
+    def _add_multi_timeframe_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Features derivadas de timeframes agregados (5m, 15m, 1h) reindexadas
+        al timeframe base 1m con forward-fill. Cada barra 1m ve los valores
+        del último cierre completado en el TF correspondiente.
+
+        Sin lookahead: se usa label='right', closed='right' al resamplear y
+        despues reindex con method='ffill'. Para una barra 1m a tiempo T se
+        usa el ultimo bar 5m/15m/1h cuyo cierre fue <= T.
+
+        Indicadores por TF:
+          - EMA21 distancia (close - ema21) / atr * 10000  → bps por ATR
+          - EMA50 distancia
+          - EMA21 slope (pct change rolling 5)
+          - EMA50 slope
+          - RSI(14) normalizado [-1, +1]
+          - MACD hist normalizado por ATR del TF
+          - BB position [0, 1]
+          - ADX(14) normalizado [0, 1]
+          - DM diff (dmp - dmn) / 100
+
+        Total: 9 indicadores x 3 TFs = 27 columnas nuevas.
+        """
+        if 'time' not in df.columns:
+            return df
+
+        df = df.copy()
+        df_idx = pd.to_datetime(df['time'])
+
+        df_tf_src = df[['open', 'high', 'low', 'close']].copy()
+        df_tf_src.index = df_idx
+        df_tf_src = df_tf_src[~df_tf_src.index.duplicated(keep='last')]
+
+        tfs = {
+            '5m':  '5min',
+            '15m': '15min',
+            '1h':  '1h',
+        }
+        new_cols = {}
+
+        for tf_label, tf_rule in tfs.items():
+            agg = df_tf_src.resample(tf_rule, label='right', closed='right').agg(
+                {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}
+            ).dropna()
+            if len(agg) < 60:
+                continue
+
+            ema21 = agg['close'].ewm(span=21, adjust=False).mean()
+            ema50 = agg['close'].ewm(span=50, adjust=False).mean()
+
+            tr = pd.concat([
+                agg['high'] - agg['low'],
+                (agg['high'] - agg['close'].shift(1)).abs(),
+                (agg['low']  - agg['close'].shift(1)).abs(),
+            ], axis=1).max(axis=1)
+            atr_tf = tr.rolling(14, min_periods=1).mean()
+            atr_tf_safe = atr_tf.replace(0, np.nan)
+
+            ema21_dist_bps = (agg['close'] - ema21) / (atr_tf_safe + 1e-10) * 10_000.0
+            ema50_dist_bps = (agg['close'] - ema50) / (atr_tf_safe + 1e-10) * 10_000.0
+            ema21_slope_bps = ema21.pct_change(5) * 10_000.0
+            ema50_slope_bps = ema50.pct_change(5) * 10_000.0
+
+            try:
+                rsi_tf = ta.rsi(agg['close'], length=14)
+            except Exception:
+                rsi_tf = pd.Series(50.0, index=agg.index)
+            rsi_norm = (rsi_tf - 50.0) / 50.0
+
+            try:
+                macd_df_tf = ta.macd(agg['close'], fast=12, slow=26, signal=9)
+                macd_hist_tf = macd_df_tf['MACDh_12_26_9']
+            except Exception:
+                macd_hist_tf = pd.Series(0.0, index=agg.index)
+            macd_hist_atr = (macd_hist_tf / (atr_tf_safe + 1e-10)).clip(-10, 10)
+
+            try:
+                bb_tf = ta.bbands(agg['close'], length=20, std=2)
+                bb_pos = (
+                    (agg['close'] - bb_tf['BBL_20_2.0'])
+                    / (bb_tf['BBU_20_2.0'] - bb_tf['BBL_20_2.0'] + 1e-10)
+                ).clip(-0.5, 1.5)
+            except Exception:
+                bb_pos = pd.Series(0.5, index=agg.index)
+
+            try:
+                adx_df_tf = ta.adx(agg['high'], agg['low'], agg['close'], length=14)
+                adx_tf = adx_df_tf['ADX_14'] / 100.0
+                dm_diff_tf = (
+                    adx_df_tf['DMP_14'] - adx_df_tf['DMN_14']
+                ) / 100.0
+            except Exception:
+                adx_tf = pd.Series(0.0, index=agg.index)
+                dm_diff_tf = pd.Series(0.0, index=agg.index)
+
+            tf_feats = pd.DataFrame({
+                f'ema21_dist_{tf_label}_bps':  ema21_dist_bps,
+                f'ema50_dist_{tf_label}_bps':  ema50_dist_bps,
+                f'ema21_slope_{tf_label}_bps': ema21_slope_bps,
+                f'ema50_slope_{tf_label}_bps': ema50_slope_bps,
+                f'rsi_{tf_label}_norm':        rsi_norm,
+                f'macd_hist_{tf_label}_atr':   macd_hist_atr,
+                f'bb_position_{tf_label}':     bb_pos,
+                f'adx_{tf_label}_norm':        adx_tf,
+                f'dm_diff_{tf_label}_norm':    dm_diff_tf,
+            })
+
+            tf_feats_1m = tf_feats.reindex(df_idx, method='ffill')
+            for col in tf_feats_1m.columns:
+                new_cols[col] = tf_feats_1m[col].to_numpy()
+
+        if new_cols:
+            df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+        return df
+
+    def _add_extended_calendar_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Features de calendario adicionales no cubiertas por
+        _add_temporal_features. Foco en granularidad sub-hora y posicion
+        relativa dentro de la sesion.
+        """
+        if 'time' not in df.columns:
+            return df
+
+        df = df.copy()
+        t = pd.to_datetime(df['time'])
+
+        minute_of_day = t.dt.hour * 60 + t.dt.minute
+        df['minute_of_day_sin'] = np.sin(2 * np.pi * minute_of_day / 1440.0)
+        df['minute_of_day_cos'] = np.cos(2 * np.pi * minute_of_day / 1440.0)
+
+        df['day_of_month'] = t.dt.day
+        df['is_month_end'] = (t.dt.day >= 28).astype(int)
+        df['is_friday'] = (t.dt.dayofweek == 4).astype(int)
+
+        hour = t.dt.hour
+        minute = t.dt.minute
+        df['is_eu_first_hour'] = ((hour == 8) & (minute < 60)).astype(int)
+        df['is_us_first_hour'] = ((hour == 13) & (minute < 60)).astype(int)
+        df['is_us_last_hour']  = ((hour == 20) & (minute < 60)).astype(int)
+        df['is_lunch_eu']      = ((hour == 12)).astype(int)
+
+        return df
+
     def _assign_features_to_inputs(self):
         """Define qué features van a cada input del modelo"""
 
@@ -693,6 +844,8 @@ class FeatureEngineer:
         ]
 
         # Features para secuencia larga (tendencia)
+        # Incluye multi-TF (5m, 15m) que aportan contexto a escalas mayores
+        # sin que el modelo tenga que inferirlo desde la secuencia 1m.
         self.feature_columns['sequence_long'] = [
             'close_norm', 'range_hl_rel',
             'ema_21_dist_bps', 'ema_50_dist_bps',
@@ -701,23 +854,41 @@ class FeatureEngineer:
             'rsi_norm', 'adx_norm', 'macd_hist_atr_log',
             'ret_20_bps', 'ret_60_bps',
             'realized_vol_20_bps_z', 'efficiency_20',
-            'direction_bias_20'
+            'direction_bias_20',
+            # Multi-TF 5m
+            'ema21_dist_5m_bps', 'ema50_dist_5m_bps',
+            'ema21_slope_5m_bps', 'rsi_5m_norm',
+            'macd_hist_5m_atr', 'bb_position_5m',
+            'adx_5m_norm', 'dm_diff_5m_norm',
+            # Multi-TF 15m
+            'ema21_dist_15m_bps', 'ema50_dist_15m_bps',
+            'ema21_slope_15m_bps', 'rsi_15m_norm',
+            'macd_hist_15m_atr', 'adx_15m_norm', 'dm_diff_15m_norm',
         ]
 
         # Features de contexto (estado actual del mercado)
+        # Incluye 1h multi-TF y calendario extendido para macro-context.
         self.feature_columns['context'] = [
             'atr_norm_bps_z', 'adx_norm', 'adx_smooth_norm', 'dm_diff_norm',
             'bb_width_bps_z', 'range_expansion',
             'dist_high_60', 'dist_low_60', 'position_range_240',
             'chop_score', 'exhaustion_score', 'is_chop', 'is_exhaustion',
             'ema_bull', 'ema_bear', 'rsi_oversold', 'rsi_overbought',
-            'macd_positive', 'macd_negative'
+            'macd_positive', 'macd_negative',
+            # Multi-TF 1h (contexto largo)
+            'ema21_dist_1h_bps', 'ema50_dist_1h_bps',
+            'rsi_1h_norm', 'adx_1h_norm', 'dm_diff_1h_norm',
+            'bb_position_1h',
+            # Calendario extendido
+            'is_month_end', 'is_friday',
+            'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour',
         ]
 
         # Features temporales
         self.feature_columns['time'] = [
             'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
-            'is_asia', 'is_london', 'is_ny', 'is_overlap'
+            'is_asia', 'is_london', 'is_ny', 'is_overlap',
+            'minute_of_day_sin', 'minute_of_day_cos',
         ]
 
         for k, cols in self.feature_columns.items():

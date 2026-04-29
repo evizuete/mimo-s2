@@ -404,6 +404,14 @@ GRID_BY_RELEASE = {
     # esta en features y toca pivotar a microstructure/orderflow.
     "200399": {
         **_DEFAULT_GRID,
+    },
+    # ── 200400: mismas barriers que 200398 + features multi-timeframe (5m/15m/1h)
+    # y calendario extendido. Primera prueba de la palanca "features" tras
+    # confirmar que (h, tp, sl) y weights estan agotados.
+    # Cambios respecto a 200398: solo features. Mismos barriers, mismo grid.
+    # Esperado: +2-4 pp AUC-ROC si las features multi-TF aportan contexto util.
+    "200400": {
+        **_DEFAULT_GRID,
     }
 }
 
@@ -499,6 +507,24 @@ BARRIERS_BY_RELEASE = {
     # via --variant-long auto_soft --variant-short auto_soft en la linea de
     # comandos.
     "200399": {
+        "tp_base": 2.0,
+        "sl_base": 1.10,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 1.10},
+            "ranging":  {"tp": 1.75, "sl": 1.10},
+            "low_vol":  {"tp": 1.75, "sl": 1.00},
+            "high_vol": {"tp": 2.25, "sl": 1.50},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 1.10},
+            "ranging":  {"tp": 1.75, "sl": 1.10},
+            "low_vol":  {"tp": 1.75, "sl": 1.00},
+            "high_vol": {"tp": 2.25, "sl": 1.50},
+        },
+    },
+    # 200400: hereda los barriers de 200398. El cambio efectivo viene de
+    # feature_builder.py (multi-TF + calendario extendido).
+    "200400": {
         "tp_base": 2.0,
         "sl_base": 1.10,
         "regime_barriers_long": {
