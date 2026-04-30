@@ -26,6 +26,7 @@ Uso:
     python -m mimo.diagnosis.barrier_sweep --per-state
     python -m mimo.diagnosis.barrier_sweep --rates-parquet rates.parquet
     python -m mimo.diagnosis.barrier_sweep --horizons 3,5,8,10 --assumed-lift 1.75
+    python -m mimo.diagnosis.barrier_sweep --tie-policy sl_first   # desempate conservador
 """
 
 from __future__ import annotations
@@ -47,10 +48,16 @@ SIDES = ["long", "short"]
 
 
 @jit(nopython=True, cache=True)
-def triple_barrier_outcomes(close, high, low, atr, horizon, tp_mult, sl_mult, side_is_long):
+def triple_barrier_outcomes(close, high, low, atr, horizon, tp_mult, sl_mult, side_is_long, tie_policy):
     """
     Como triple_barrier_fixed_numba pero distingue TIMEOUT de SL.
     Devuelve outcome[i] in {1: TP first, -1: SL first, 0: timeout, 99: skip (atr inv)}.
+
+    tie_policy:
+      0 = tp_first: si TP y SL se tocan en la misma vela/minuto, gana TP.
+      1 = sl_first: si TP y SL se tocan en la misma vela/minuto, gana SL.
+          Esta es la opcion conservadora para OHLC de 1m, porque no conocemos
+          el orden intrabar real.
     """
     n = len(close)
     outcome = np.full(n, 99, dtype=np.int8)
@@ -87,7 +94,19 @@ def triple_barrier_outcomes(close, high, low, atr, horizon, tp_mult, sl_mult, si
             if hit_tp != -1 and hit_sl != -1:
                 break
 
-        if hit_tp != -1 and (hit_sl == -1 or hit_tp <= hit_sl):
+        if hit_tp != -1 and hit_sl != -1:
+            if hit_tp < hit_sl:
+                outcome[i] = 1
+            elif hit_sl < hit_tp:
+                outcome[i] = -1
+            else:
+                # Empate dentro de la misma vela/minuto.
+                # OHLC no permite saber que barrera se toco primero.
+                if tie_policy == 0:
+                    outcome[i] = 1
+                else:
+                    outcome[i] = -1
+        elif hit_tp != -1:
             outcome[i] = 1
         elif hit_sl != -1:
             outcome[i] = -1
@@ -111,6 +130,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--min-tp-sl-ratio", type=float, default=0.8)
     ap.add_argument("--assumed-lift", type=float, default=1.75,
                     help="Lift asumido del modelo en operating region (default 1.75 ≈ LONG h=5).")
+    ap.add_argument("--tie-policy", choices=["tp_first", "sl_first"], default="sl_first",
+                    help=("Como resolver una vela donde TP y SL se tocan en el mismo minuto. "
+                          "tp_first reproduce el criterio optimista anterior; "
+                          "sl_first es conservador y recomendado para validacion."))
     ap.add_argument("--top-n", type=int, default=15)
     ap.add_argument("--per-state", action="store_true")
     ap.add_argument("--out", default="barrier_sweep_results.csv")
@@ -211,11 +234,13 @@ def aggregate_outcome(outcome: np.ndarray) -> dict:
 
 def sweep(df: pd.DataFrame, horizons: List[int], tp_mults: List[float],
           sl_mults: List[float], min_sl: float,
-          min_ratio: float, max_ratio: float) -> pd.DataFrame:
+          min_ratio: float, max_ratio: float, tie_policy_name: str) -> pd.DataFrame:
     close = df["close"].to_numpy(np.float64)
     high = df["high"].to_numpy(np.float64)
     low = df["low"].to_numpy(np.float64)
     atr = df["atr"].to_numpy(np.float64)
+
+    tie_policy = 0 if tie_policy_name == "tp_first" else 1
 
     rows = []
     configs = []
@@ -233,10 +258,11 @@ def sweep(df: pd.DataFrame, horizons: List[int], tp_mults: List[float],
     print(f"[sweep] {len(configs)} configs en {len(close):,} filas")
     for idx, (side, h, tp, sl) in enumerate(configs, 1):
         is_long = side == "long"
-        outcome = triple_barrier_outcomes(close, high, low, atr, h, tp, sl, is_long)
+        outcome = triple_barrier_outcomes(close, high, low, atr, h, tp, sl, is_long, tie_policy)
         agg = aggregate_outcome(outcome)
         rows.append({
             "side": side, "h": h, "tp": tp, "sl": sl,
+            "tie_policy": tie_policy_name,
             "tp_sl_ratio": tp / sl,
             "BE": sl / (tp + sl),
             **agg,
@@ -269,7 +295,7 @@ def add_economic_metrics(df: pd.DataFrame, assumed_lift: float) -> pd.DataFrame:
 
 
 def per_state_for_top(df: pd.DataFrame, top_configs: pd.DataFrame,
-                      min_n: int = 200) -> pd.DataFrame:
+                      min_n: int = 200, tie_policy_name: str = "sl_first") -> pd.DataFrame:
     if "state" not in df.columns:
         print("[per-state] columna 'state' no existe en rates — skip")
         return pd.DataFrame()
@@ -280,12 +306,14 @@ def per_state_for_top(df: pd.DataFrame, top_configs: pd.DataFrame,
     atr = df["atr"].to_numpy(np.float64)
     states = df["state"].astype(str).to_numpy()
 
+    tie_policy = 0 if tie_policy_name == "tp_first" else 1
+
     rows = []
     for _, c in top_configs.iterrows():
         is_long = c["side"] == "long"
         h = int(c["h"])
         outcome = triple_barrier_outcomes(close, high, low, atr, h, float(c["tp"]),
-                                          float(c["sl"]), is_long)
+                                          float(c["sl"]), is_long, tie_policy)
         valid = outcome != 99
         for s in np.unique(states):
             mask = valid & (states == s)
@@ -297,6 +325,7 @@ def per_state_for_top(df: pd.DataFrame, top_configs: pd.DataFrame,
             n_sl = int((sub == -1).sum())
             rows.append({
                 "side": c["side"], "h": h, "tp": float(c["tp"]), "sl": float(c["sl"]),
+                "tie_policy": tie_policy_name,
                 "BE": float(c["BE"]),
                 "state": s, "n": n,
                 "pos_rate": n_tp / n,
@@ -339,8 +368,9 @@ def main() -> None:
     if args.per_state and "state" not in df.columns:
         df = add_state_to_df(df)
 
+    print(f"[config] tie_policy={args.tie_policy}")
     raw = sweep(df, horizons, tp_mults, sl_mults, args.min_sl,
-                args.min_tp_sl_ratio, args.max_tp_sl_ratio)
+                args.min_tp_sl_ratio, args.max_tp_sl_ratio, args.tie_policy)
     out = add_economic_metrics(raw, args.assumed_lift)
 
     print("\n" + "=" * 90)
@@ -366,7 +396,7 @@ def main() -> None:
                .groupby(["side", "h"], as_index=False, group_keys=False)
                .head(3)
         )
-        ps = per_state_for_top(df, top_for_states)
+        ps = per_state_for_top(df, top_for_states, tie_policy_name=args.tie_policy)
         if not ps.empty:
             print(ps.round(4).to_string(index=False))
             ps_path = Path(args.out).with_name(Path(args.out).stem + "_per_state.csv")
@@ -382,12 +412,12 @@ def main() -> None:
     print("=" * 90)
     if not long_top.empty:
         best_long = long_top.iloc[0]
-        print(f"  Mejor LONG : h={int(best_long['h'])} tp={best_long['tp']} sl={best_long['sl']}")
+        print(f"  Mejor LONG : h={int(best_long['h'])} tp={best_long['tp']} sl={best_long['sl']} tie={best_long['tie_policy']}")
         print(f"               BE={best_long['BE']:.3f}  pos_rate={best_long['pos_rate']:.3f}")
         print(f"               lift_to_breakeven={best_long['lift_to_breakeven']:.2f}x")
     if not short_top.empty:
         best_short = short_top.iloc[0]
-        print(f"  Mejor SHORT: h={int(best_short['h'])} tp={best_short['tp']} sl={best_short['sl']}")
+        print(f"  Mejor SHORT: h={int(best_short['h'])} tp={best_short['tp']} sl={best_short['sl']} tie={best_short['tie_policy']}")
         print(f"               BE={best_short['BE']:.3f}  pos_rate={best_short['pos_rate']:.3f}")
         print(f"               lift_to_breakeven={best_short['lift_to_breakeven']:.2f}x")
 

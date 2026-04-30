@@ -28,3 +28,7 @@ python3 ./resume_deploy_full_v4.py --validate-only
 python3 ../checks/check_thresholds_v2.py
 python3 ../checks/upgrade_thresholds_v2.py
 python3 ../checks/recalc_and_apply_decision_percentiles.py
+
+
+1. main_oof_regime_weights_v7
+2. barrier_sweep
