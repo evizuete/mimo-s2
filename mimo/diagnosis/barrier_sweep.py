@@ -355,12 +355,17 @@ def main() -> None:
 
     if args.per_state:
         print("\n" + "=" * 90)
-        print("PER-STATE BREAKDOWN (top 5 de cada side)")
+        print("PER-STATE BREAKDOWN (top 3 por (side, h) — cubre todos los horizontes)")
         print("=" * 90)
-        top_for_states = pd.concat([
-            out[out["side"] == "long"].nsmallest(5, "lift_to_breakeven"),
-            out[out["side"] == "short"].nsmallest(5, "lift_to_breakeven"),
-        ])
+        # Tomar top-K por (side, h) en vez de top-K global, así obtenemos
+        # representación de TODOS los horizontes (no solo el dominante h=60)
+        # y se puede comparar el spread por estado entre horizontes cortos
+        # y largos para localizar el "sweet spot" donde el estado aporta info.
+        top_for_states = (
+            out.sort_values("lift_to_breakeven")
+               .groupby(["side", "h"], as_index=False, group_keys=False)
+               .head(3)
+        )
         ps = per_state_for_top(df, top_for_states)
         if not ps.empty:
             print(ps.round(4).to_string(index=False))
