@@ -123,6 +123,27 @@ def parse_csv_list(s: Optional[str], default: List) -> List[float]:
     return [float(x) for x in s.split(",")]
 
 
+def add_state_to_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula la columna 'state' usando FeatureEngineer + add_mimo_state,
+    reproduciendo el mismo régimen que ve el pipeline de producción.
+    Caro (recomputa indicadores sobre todo el df), por eso solo se llama
+    cuando --per-state está activo.
+    """
+    from mimo.features.feature_builder import FeatureEngineer, FeatureConfig
+    from mimo.states_manager.state_detector import add_mimo_state
+
+    print("[state] computando features e indicadores para detector de régimen...")
+    fe = FeatureEngineer(FeatureConfig())
+    df_feat = fe.generate_all_features(df)
+    print(f"[state] features OK ({len(df_feat):,} filas tras dropna)")
+
+    df_state = add_mimo_state(df_feat, set_market_condition=False)
+    print(f"[state] estados detectados: "
+          f"{df_state['state'].value_counts().to_dict()}")
+    return df_state
+
+
 def load_rates(args: argparse.Namespace) -> pd.DataFrame:
     if args.rates_parquet:
         print(f"[load] reading parquet {args.rates_parquet}")
@@ -314,6 +335,9 @@ def main() -> None:
     df = load_rates(args)
     nan_atr = float(df["atr"].isna().mean())
     print(f"[load] {len(df):,} filas | atr nan-rate: {nan_atr:.4f}")
+
+    if args.per_state and "state" not in df.columns:
+        df = add_state_to_df(df)
 
     raw = sweep(df, horizons, tp_mults, sl_mults, args.min_sl,
                 args.min_tp_sl_ratio, args.max_tp_sl_ratio)
