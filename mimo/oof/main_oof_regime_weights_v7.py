@@ -650,6 +650,26 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.75, "sl": 1.25},
         },
     },
+    # 200701: mismas barriers que 200700 (tp=2.5/sl=1.0). Diferencia: base_tf=1min
+    # con horizon=25 barras (= mismos 25 min de horizonte que 200700 a 5m h=5).
+    # Hipótesis: granularidad sub-5min preserva spikes de volumen que 200700 perdía
+    # al agregar (sum) volumen en velas de 5m. 5x más muestras (~464k vs 93k).
+    "200701": {
+        "tp_base": 2.5,
+        "sl_base": 1.00,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.50, "sl": 1.00},
+            "ranging":  {"tp": 2.25, "sl": 1.00},
+            "low_vol":  {"tp": 2.25, "sl": 1.00},
+            "high_vol": {"tp": 2.75, "sl": 1.25},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.50, "sl": 1.00},
+            "ranging":  {"tp": 2.25, "sl": 1.00},
+            "low_vol":  {"tp": 2.25, "sl": 1.00},
+            "high_vol": {"tp": 2.75, "sl": 1.25},
+        },
+    },
 }
 
 

@@ -495,19 +495,32 @@ class FeatureEngineer:
         Cuatro features escala-invariantes, todas sobre log(1+volume):
           vol_z_1h      z-score rolling 1h
           vol_pct_1h    percentile rank rolling 1h (robusto a colas)
-          vol_spike     desviación de la EMA(12) (aceleración local)
+          vol_spike     desviación de la EMA local (aceleración)
           vol_trend_1h  pendiente normalizada en 1h
+
+        n_per_h se detecta del propio df.time (mediana del Δt) para que la
+        semántica "1h" se mantenga independientemente del base_tf (1m / 5m / etc).
 
         Si la columna no existe, se rellenan con valores neutros para
         retro-compatibilidad con datasets sin volumen.
         """
-        n_per_h = 12  # 12 bars ≈ 1h sobre base 5min; semántica análoga en otras tf.
         if "ticks_volume" not in df.columns:
             df["vol_z_1h"] = 0.0
             df["vol_pct_1h"] = 0.5
             df["vol_spike"] = 0.0
             df["vol_trend_1h"] = 0.0
             return df
+
+        # Detecta resolución del df: mediana del Δt en segundos → barras/hora.
+        if "time" in df.columns and len(df) > 1:
+            dt_med = (
+                pd.to_datetime(df["time"]).diff().dropna().dt.total_seconds().median()
+            )
+            n_per_h = int(round(3600.0 / max(dt_med, 1.0))) if dt_med and dt_med > 0 else 12
+        else:
+            n_per_h = 12
+        n_per_h = max(4, n_per_h)
+        ema_span = max(6, n_per_h)  # EMA local: ~1h (en lugar de 12 fijo)
 
         v = df["ticks_volume"].astype(float).clip(lower=0)
         log_v = np.log1p(v)
@@ -521,7 +534,7 @@ class FeatureEngineer:
             log_v.rolling(n_per_h, min_periods=mp).rank(pct=True)
         )
 
-        df["vol_spike"] = (log_v - log_v.ewm(span=12, adjust=False).mean()).clip(-3, 3)
+        df["vol_spike"] = (log_v - log_v.ewm(span=ema_span, adjust=False).mean()).clip(-3, 3)
 
         df["vol_trend_1h"] = (log_v - log_v.shift(n_per_h)) / float(n_per_h)
 
