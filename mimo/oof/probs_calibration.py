@@ -293,7 +293,9 @@ class ProbsCalibration:
                 best_epoch = int(np.argmin(vals_loss)) + 1
                 best_val = -float(np.min(vals_loss))
             else:
-                vals = history["val_auc_pr"]
+                # binary → val_auc_pr; triple_class → val_auc_pr_tp (P(TP) vs is_TP).
+                auc_key = "val_auc_pr_tp" if is_triple_class else "val_auc_pr"
+                vals = history[auc_key]
                 best_epoch = int(np.argmax(vals)) + 1
                 best_val = float(np.max(vals))
             best_epochs[fold] = {"epoch": best_epoch, "val": best_val}

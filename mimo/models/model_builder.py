@@ -682,6 +682,10 @@ class TradingModel:
 
         # Callbacks
         is_quantile_callbacks = (self.model_config.target_type == "quantile")
+        is_triple_class_callbacks = (self.model_config.target_type == "triple_class")
+        # Para triple_class, las métricas binarias usan sufijo '_tp'.
+        train_auc_metric = "auc_pr_tp" if is_triple_class_callbacks else "auc_pr"
+        val_auc_metric = f"val_{train_auc_metric}"
 
         if for_production:
             callbacks = [
@@ -723,21 +727,21 @@ class TradingModel:
         else:
             callbacks = [
                 EarlyStopping(
-                    monitor='val_auc_pr' if X_val is not None else 'auc_pr',
+                    monitor=val_auc_metric if X_val is not None else train_auc_metric,
                     patience=self.model_config.patience,
                     restore_best_weights=True,
                     mode='max',
                     verbose=verbose
                 ),
-                ReduceLROnPlateau(monitor='val_auc_pr' if X_val is not None else 'auc_pr',
+                ReduceLROnPlateau(monitor=val_auc_metric if X_val is not None else train_auc_metric,
                                   factor=0.5,
                                   patience=self.model_config.patience // 3,  # más reactivo que ES
                                   min_lr=1e-6,
                                   mode='max',  # ← obligatorio cuando monitor es AUC
                                   verbose=verbose),
                 GeneralizationGapStopping(
-                    monitor_train='auc_pr',
-                    monitor_val='val_auc_pr',
+                    monitor_train=train_auc_metric,
+                    monitor_val=val_auc_metric,
                     mode='max',
                     max_gap=0.03,
                     min_epochs=8,
