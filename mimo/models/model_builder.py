@@ -938,6 +938,7 @@ class ClippedBinaryFocalCrossentropy(tf.keras.losses.Loss):
         return cfg
 
 
+@register_keras_serializable(package="mimo_old")
 class PinballLoss(tf.keras.losses.Loss):
     """
     Quantile regression loss (pinball / check loss) para regresión cuantílica
@@ -972,6 +973,7 @@ class PinballLoss(tf.keras.losses.Loss):
         return cfg
 
 
+@register_keras_serializable(package="mimo_old")
 class QuantileMAE(tf.keras.metrics.Metric):
     """MAE sobre uno de los cuantiles predichos (típicamente q50)."""
 
@@ -996,6 +998,7 @@ class QuantileMAE(tf.keras.metrics.Metric):
         self.count.assign(0.0)
 
 
+@register_keras_serializable(package="mimo_old")
 class QuantileCoverage(tf.keras.metrics.Metric):
     """
     Cobertura empírica del intervalo [q_low, q_high]. Para q=(0.25,0.75) la
