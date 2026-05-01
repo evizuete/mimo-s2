@@ -255,7 +255,26 @@ LONG_VARIANTS: Dict[str, Dict[str, Any]] = {
         "VOLATILE": 1.0,
         "LOW_VOL": 0.0,             # alinea con NO_TRADE_STATES en probs_calibration
 
-    }
+    },
+    # vol_boost (LONG): contrapeso al doble downweight de VOLATILE.
+    # state_weight (state_detector) = 0.1 y label_generator multiplica por 0.3
+    # → base efectivo VOLATILE = 0.03 (vs TREND = 1.0).
+    # Con variant=10 el peso efectivo de VOLATILE pasa a ~0.30 (relativo a
+    # TREND tras renorm), recuperando masa para que el modelo aprenda en
+    # estados volátiles. Diseñado tras observar que el holdout reciente
+    # tiene 33% VOLATILE pero el train apenas lo ve, causando colapso de
+    # SHORT 201000/201100 a AUC-ROC ~0.50 en holdout.
+    "vol_boost": {
+        "TREND_UP": 1.0,
+        "TREND_DOWN": 1.0,
+        "TRANSITION_UP": 1.0,
+        "TRANSITION_DOWN": 1.0,
+        "BREAKOUT_WAIT_UP": 1.0,
+        "BREAKOUT_WAIT_DOWN": 1.0,
+        "RANGE": 1.0,
+        "VOLATILE": 10.0,
+        "LOW_VOL": 1.0,
+    },
 }
 
 SHORT_VARIANTS: Dict[str, Dict[str, Any]] = {
@@ -308,6 +327,21 @@ SHORT_VARIANTS: Dict[str, Dict[str, Any]] = {
         "RANGE":              0.80,
         "VOLATILE":           0.0,
         "LOW_VOL":            0.0,
+    },
+    # vol_boost (SHORT): equivalente al LONG. VOLATILE × 10 para compensar
+    # el doble downweight (state_weight 0.1 × label_generator 0.3 = 0.03).
+    # Crítico para SHORT porque el colapso en holdout fue más severo en
+    # SHORT 201000 (AUC-ROC 0.499) y 201100 (0.500).
+    "vol_boost": {
+        "TREND_UP": 1.0,
+        "TREND_DOWN": 1.0,
+        "TRANSITION_UP": 1.0,
+        "TRANSITION_DOWN": 1.0,
+        "BREAKOUT_WAIT_UP": 1.0,
+        "BREAKOUT_WAIT_DOWN": 1.0,
+        "RANGE": 1.0,
+        "VOLATILE": 10.0,
+        "LOW_VOL": 1.0,
     },
 }
 
@@ -731,6 +765,29 @@ BARRIERS_BY_RELEASE = {
     # red no estaba viendo. Test A/B contra 200900 para medir lift adicional
     # sobre la misma framing de barriers.
     "201000": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
+    # 201200: barriers idénticas a 200900 (tp=2.0/sl=0.8, BE=0.286). La novedad
+    # es lanzar con --variant-{long,short}=vol_boost para subir el peso
+    # efectivo de VOLATILE de 0.03 a ~0.30 (compensa el doble downweight
+    # de state_detector × label_generator). Hipótesis tras 201000/201100:
+    # el holdout tiene 33% VOLATILE pero train lo veía con peso 0.03 →
+    # SHORT colapsa a AUC-ROC=0.50 al evaluar en holdout. Con vol_boost
+    # el modelo aprende a discriminar también en VOLATILE.
+    "201200": {
         "tp_base": 2.0,
         "sl_base": 0.80,
         "regime_barriers_long": {
