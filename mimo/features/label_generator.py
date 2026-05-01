@@ -4,6 +4,7 @@ import pandas as pd
 from mimo.features.feature_builder import FeatureConfig
 from mimo.models.numba_utils import (
     triple_barrier_fixed_numba,
+    triple_barrier_3class_numba,
     triple_barrier_adaptive_numba,
     fast_rolling_max,
     fast_rolling_quantile, fast_rolling_min,
@@ -63,6 +64,8 @@ class LabelGenerator:
             df = self._quantile_return_labels(df, side)
         elif self.config.label_method == 'magnitude_binary':
             df = self._magnitude_binary_labels(df, side)
+        elif self.config.label_method == 'triple_class':
+            df = self._triple_class_labels(df, side)
         else:
             raise ValueError(f"Método {self.config.label_method} no reconocido")
 
@@ -344,6 +347,58 @@ class LabelGenerator:
 
 
         out['signal'] = signal
+        return out
+
+    def _triple_class_labels(self, df: pd.DataFrame, side: str) -> pd.DataFrame:
+        """
+        Triple barrier labeling 3-class. Devuelve clases {0=SL, 1=TIMEOUT, 2=TP}.
+
+        Mismo recorrido temporal que _triple_barrier_labels (binario) pero
+        distingue los tres outcomes. La cabeza del modelo correspondiente es
+        softmax(3) y la loss SparseCategoricalCrossentropy. Downstream:
+        P(TP) = softmax[..., 2] se usa como "signal" para calibración y
+        umbrales (compatible con el flujo binario).
+
+        Soporta regime_barriers igual que el binario.
+        """
+        horizon      = int(self.config.label_horizon)
+        out          = df.copy()
+        close        = out['close'].values
+        high         = out['high'].values
+        low          = out['low'].values
+        atr          = out['atr'].values
+        side_is_long = (side == 'long')
+
+        rb = self.config.regime_barriers or {}
+
+        if not rb:
+            tp_mult = float(self.config.tp_barrier)
+            sl_mult = float(self.config.sl_barrier)
+            signal  = triple_barrier_3class_numba(
+                close, high, low, atr, horizon, tp_mult, sl_mult, side_is_long
+            )
+        else:
+            tp_arr, sl_arr = self._get_barrier_arrays(out)
+            print(f"[DEBUG TB-3CLASS] side={side} rb={self.config.regime_barriers} "
+                  f"tp_unique={np.unique(tp_arr)}")
+
+            pairs = np.stack([tp_arr, sl_arr], axis=1)
+            unique_pairs = np.unique(pairs, axis=0)
+
+            signal = np.ones(len(out), dtype=np.int32)  # default TIMEOUT (1)
+
+            for tp_val, sl_val in unique_pairs:
+                group_mask = (tp_arr == tp_val) & (sl_arr == sl_val)
+                idx        = np.where(group_mask)[0]
+                if len(idx) == 0:
+                    continue
+                partial = triple_barrier_3class_numba(
+                    close, high, low, atr, horizon,
+                    float(tp_val), float(sl_val), side_is_long
+                )
+                signal[idx] = partial[idx]
+
+        out['signal'] = signal.astype(np.int32)
         return out
 
     def _triple_barrier_labels_debug(self, df: pd.DataFrame, side: str) -> pd.DataFrame:

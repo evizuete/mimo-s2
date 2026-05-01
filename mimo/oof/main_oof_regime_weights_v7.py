@@ -746,6 +746,32 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.20, "sl": 1.00},
         },
     },
+    # 201100: barriers idénticas a 200900 (tp=2.0/sl=0.8, BE=0.286). La novedad
+    # es target-type=triple_class (cabeza softmax(3) sobre {SL, TIMEOUT, TP}
+    # con SparseCategoricalCrossentropy). Lanzar con --target-type=triple_class.
+    # Hipótesis tras el techo de 200900 y el regreso de 201000 SHORT:
+    # el target binario {TP, no-TP} colapsa SL y TIMEOUT bajo una sola clase,
+    # diluyendo gradiente. Separarlos en 3 clases puede:
+    #   1. Dar gradiente más rico al modelo (3 fuentes vs 2).
+    #   2. Permitir gating doble (P_TP alto Y P_SL bajo) en operativa.
+    #   3. Romper el techo AUC-ROC ~0.60 que vemos consistentemente en binario.
+    # Si triple_class no rompe, el techo está realmente en la arquitectura.
+    "201100": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
 }
 
 
@@ -785,12 +811,14 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--notes", type=str, default="")
     ap.add_argument(
         "--target-type",
-        choices=["binary", "quantile", "magnitude"],
+        choices=["binary", "quantile", "magnitude", "triple_class"],
         default="binary",
         help=(
             "Tipo de target: 'binary' (triple-barrier, default), 'quantile' "
-            "(regresión cuantílica con pinball) o 'magnitude' (clasificación "
-            "binaria direction-agnostic: ¿habrá excursión >= M·ATR en h barras?)."
+            "(regresión cuantílica con pinball), 'magnitude' (clasificación "
+            "binaria direction-agnostic: ¿habrá excursión >= M·ATR en h barras?) "
+            "o 'triple_class' (3-way: SL=0 / TIMEOUT=1 / TP=2 con softmax+SCCE; "
+            "el modelo expone P(TP) para gating y aprende implícitamente P(SL))."
         ),
     )
     ap.add_argument(
@@ -1291,20 +1319,24 @@ def build_trainer(
 
     barriers = _get_barriers_for_release(release)
 
-    # quantile  → cabeza pinball multi-output, ignora barriers
-    # magnitude → cabeza binary direction-agnostic, ignora barriers regime-based
-    # binary    → triple-barrier clásico con barriers por régimen
+    # quantile     → cabeza pinball multi-output, ignora barriers
+    # magnitude    → cabeza binary direction-agnostic, ignora barriers regime-based
+    # triple_class → cabeza softmax(3) con SCCE, mismas barriers que binary
+    # binary       → triple-barrier clásico con barriers por régimen
     is_quantile = target_type == "quantile"
     is_magnitude = target_type == "magnitude"
+    is_triple_class = target_type == "triple_class"
     if is_quantile:
         label_method_active = "quantile_return"
     elif is_magnitude:
         label_method_active = "magnitude_binary"
+    elif is_triple_class:
+        label_method_active = "triple_class"
     else:
         label_method_active = "triple_barrier"
 
     # ranking_loss conceptualmente solo aplica a binario direccional
-    ranking_loss = 0.0 if (is_quantile or is_magnitude) else 0.2
+    ranking_loss = 0.0 if (is_quantile or is_magnitude or is_triple_class) else 0.2
     # target_type del modelo: magnitude usa cabeza binary igual que el direccional
     model_target_type = "binary" if is_magnitude else target_type
 

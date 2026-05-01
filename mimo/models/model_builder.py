@@ -114,6 +114,17 @@ class TradingModel:
                 bias_initializer='zeros',
             )(x)
 
+        if self.model_config.target_type == "triple_class":
+            # Softmax(3) sobre clases {0=SL, 1=TIMEOUT, 2=TP}.
+            # Downstream usa signal[..., 2] como P(TP) para calibración y umbrales.
+            return layers.Dense(
+                3,
+                activation='softmax',
+                name='signal',
+                kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+                bias_initializer='zeros',
+            )(x)
+
         # Camino original (binario): logits + sigmoid
         signal_logit = layers.Dense(
             1,
@@ -557,6 +568,20 @@ class TradingModel:
             metrics = [
                 QuantileMAE(quantile_idx=mid_idx, name=f"mae_q{int(qs[mid_idx]*100)}"),
                 QuantileCoverage(low_idx=0, high_idx=len(qs) - 1, name="coverage"),
+            ]
+            self.model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
+            return
+
+        if self.model_config.target_type == "triple_class":
+            # ── Triple barrier 3-class ────────────────────────────────────────
+            # SparseCategoricalCrossentropy sobre {0=SL, 1=TIMEOUT, 2=TP}.
+            # focal_alpha/gamma y ranking_loss_weight se ignoran. La métrica
+            # AUC se computa sobre P(TP) vs no-TP (binarización implícita).
+            loss = tf.keras.losses.SparseCategoricalCrossentropy()
+            metrics = [
+                tf.keras.metrics.SparseCategoricalAccuracy(name='acc'),
+                TripleClassTPAUC(name='auc_pr_tp', curve='PR'),
+                TripleClassTPAUC(name='auc_roc_tp', curve='ROC'),
             ]
             self.model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
             return
@@ -1028,3 +1053,18 @@ class QuantileCoverage(tf.keras.metrics.Metric):
     def reset_state(self):
         self.inside.assign(0.0)
         self.count.assign(0.0)
+
+
+@register_keras_serializable(package="mimo_old")
+class TripleClassTPAUC(tf.keras.metrics.AUC):
+    """
+    AUC sobre P(TP) = softmax[..., 2] vs binarización (clase==2) para
+    target_type='triple_class'. Permite trackear discriminación TP vs no-TP
+    durante el entrenamiento 3-class.
+    """
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true_int = tf.cast(tf.reshape(y_true, (-1,)), tf.int32)
+        y_true_tp = tf.cast(tf.equal(y_true_int, 2), tf.float32)
+        p_tp = y_pred[:, 2]
+        return super().update_state(y_true_tp, p_tp, sample_weight=sample_weight)

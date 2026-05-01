@@ -26,8 +26,11 @@ class Helper:
 
     def predict_proba_keras(self, model: Model, X: np.ndarray, batch_size: int = 4096) -> np.ndarray:
         X = np.asarray(X, dtype=np.float32)
-        p = model.predict(X, batch_size=batch_size, verbose=0).reshape(-1)
-        return p
+        raw = model.predict(X, batch_size=batch_size, verbose=0)
+        # triple_class: output (N, 3) softmax → P(TP) = col 2.
+        if raw.ndim == 2 and raw.shape[-1] == 3:
+            return raw[:, 2]
+        return raw.reshape(-1)
 
     def load_model(self, side: str):
         model = load_model(f'{self.path}/model_{self.general_config.release}_{side}.keras')

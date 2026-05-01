@@ -376,6 +376,10 @@ class OptunaOOFTrainer:
                   f"coverage={coverage:.3f} (target={target_coverage:.3f}) score={score:.4f}")
         else:
             y = df_oof.loc[m, "signal"].to_numpy().astype(int)
+            # triple_class: labels son {0,1,2}; binarizamos a is_TP para
+            # métricas binarias (P(TP) ya está en oof_proba_cal).
+            if target_type == 'triple_class':
+                y = (y == 2).astype(int)
             p_cal = df_oof.loc[m, "oof_proba_cal"].to_numpy().astype(float)
 
             # AUC-PR como core
@@ -691,6 +695,8 @@ class OptunaOOFTrainer:
             }
         else:
             y_oof = df_oof.loc[m, "signal"].to_numpy().astype(int)
+            if target_type == 'triple_class':
+                y_oof = (y_oof == 2).astype(int)
             p_cal = df_oof.loc[m, "oof_proba_cal"].to_numpy().astype(float)
 
             oof_eval = self.evaluator.evaluate_predictions(
@@ -729,6 +735,13 @@ class OptunaOOFTrainer:
             y_all = data_all["labels"].astype(np.float32)
             init_bias = 0.0
             print(f'[BIAS] target=quantile → init_bias=0.0 (cabeza lineal)')
+        elif target_type == 'triple_class':
+            # Cabeza softmax(3); init_bias del flujo binario no aplica.
+            # Mantener labels como int {0,1,2} para SparseCategoricalCrossentropy.
+            y_all = data_all["labels"].astype(int)
+            init_bias = 0.0
+            tp_rate = float(np.mean(y_all == 2))
+            print(f'[BIAS] target=triple_class → init_bias=0.0 | TP_rate={tp_rate:.4f}')
         else:
             y_all = data_all["labels"]
             pos_rate = float(np.nanmean(y_all))
@@ -847,6 +860,10 @@ class OptunaOOFTrainer:
             y_true = data['labels'].astype(np.float32)
         else:
             y_true = data['labels'].astype(int)
+            # triple_class: labels son {0,1,2}. Para métricas binarias y
+            # calibrador (que es binario), usamos is_TP = (label == 2).
+            if target_type == 'triple_class':
+                y_true = (y_true == 2).astype(int)
 
         keras_model = tf.keras.models.load_model(artifacts.model_path)
 
@@ -855,6 +872,16 @@ class OptunaOOFTrainer:
             y_pred_raw = keras_model.predict(x_list, verbose=0, batch_size=4096).astype(np.float32)
             if y_pred_raw.ndim == 1:
                 y_pred_raw = y_pred_raw.reshape(-1, 1)
+        elif target_type == 'triple_class':
+            # Output (N, 3) softmax. Extraemos P(TP) para downstream binario.
+            y_pred_raw = keras_model.predict(
+                x_list, verbose=0, batch_size=4096
+            ).astype(np.float32)
+            if y_pred_raw.ndim != 2 or y_pred_raw.shape[-1] != 3:
+                raise RuntimeError(
+                    f"triple_class holdout predict: shape {y_pred_raw.shape} inesperado"
+                )
+            y_pred_raw = y_pred_raw[:, 2]
         else:
             y_pred_raw = keras_model.predict(x_list, verbose=0, batch_size=4096).reshape(-1)
 
@@ -946,6 +973,9 @@ class OptunaOOFTrainer:
 
         X = {k: v for k, v in data.items() if k not in ['labels', 'weights']}
         y_true = data['labels'].astype(int)
+        target_type = getattr(self.base_model_config, 'target_type', 'binary')
+        if target_type == 'triple_class':
+            y_true = (y_true == 2).astype(int)
 
         helper = Helper(general_config=self.general_config, path=path)
         model = helper.load_model(side=side)
@@ -954,7 +984,15 @@ class OptunaOOFTrainer:
         # helper.load_model() puede devolver un TradingModel wrapper o un Keras model.
         _keras_model = getattr(model, 'model', model)  # TradingModel.model o el modelo mismo
         _x_list = [X['seq_short'], X['seq_long'], X['context'], X['time']]
-        y_pred = _keras_model.predict(_x_list, verbose=0, batch_size=4096).reshape(-1)
+        if target_type == 'triple_class':
+            _raw = _keras_model.predict(_x_list, verbose=0, batch_size=4096).astype(np.float32)
+            if _raw.ndim != 2 or _raw.shape[-1] != 3:
+                raise RuntimeError(
+                    f"triple_class predict shape {_raw.shape} inesperado"
+                )
+            y_pred = _raw[:, 2]
+        else:
+            y_pred = _keras_model.predict(_x_list, verbose=0, batch_size=4096).reshape(-1)
 
         cal_path = os.path.join(path, f'oof_calibrator_{self.general_config.release}_{side}.joblib')
         calibrator = joblib.load(cal_path)

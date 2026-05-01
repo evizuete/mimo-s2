@@ -155,15 +155,17 @@ class ProbsCalibration:
 
         n_samples = row_index.size
 
-        # ── Detección de modo quantile (vs binary clásico) ──────────────────
+        # ── Detección de modo quantile / triple_class (vs binary clásico) ──
         target_type = getattr(self.model_config, 'target_type', 'binary')
         is_quantile = (target_type == 'quantile')
+        is_triple_class = (target_type == 'triple_class')
         if is_quantile:
             quantile_levels = tuple(self.model_config.quantile_levels)
             n_q = len(quantile_levels)
             oof_raw = np.full((len(df), n_q), np.nan, dtype=np.float32)
             oof_y = np.full(len(df), np.nan, dtype=np.float32)
         else:
+            # binary y triple_class comparten storage: oof_raw=P(TP), oof_y=is_TP.
             oof_raw = np.full(len(df), np.nan, dtype=np.float32)
             oof_y = np.full(len(df), -1, dtype=np.int8)
 
@@ -215,6 +217,9 @@ class ProbsCalibration:
                 y_train = data_train["labels"].astype(np.float32)
                 y_val = data_val["labels"].astype(np.float32)
             else:
+                # binary: labels son {0, 1}.
+                # triple_class: labels son {0=SL, 1=TIMEOUT, 2=TP}. Se pasan
+                # tal cual a SparseCategoricalCrossentropy en TradingModel.
                 y_train = data_train["labels"].astype(int)
                 y_val = data_val["labels"].astype(int)
 
@@ -227,6 +232,10 @@ class ProbsCalibration:
             if is_quantile:
                 # En quantile mode no hay prior-bias informativo (la cabeza es
                 # lineal y debe aprender la mediana del return desde los datos).
+                init_bias = 0.0
+            elif is_triple_class:
+                # Cabeza softmax(3); el bias en la última Dense es zero por
+                # diseño. El init_bias del flujo binario no aplica.
                 init_bias = 0.0
             else:
                 pos_rate = float(np.clip(np.nanmean(y_train), 1e-4, 1 - 1e-4))
@@ -318,6 +327,18 @@ class ProbsCalibration:
                         f"Desalineación fold {fold + 1}: val_count={val_count} "
                         f"!= pred.shape[0]={y_pred_val.shape[0]}"
                     )
+            elif is_triple_class:
+                # Shape esperado: (val_count, 3) softmax. Extraemos P(TP)=col 2.
+                if y_pred_val.ndim != 2 or y_pred_val.shape[-1] != 3:
+                    raise RuntimeError(
+                        f"triple_class fold {fold + 1}: pred shape {y_pred_val.shape} "
+                        f"inesperado (se esperaba (N, 3))."
+                    )
+                y_pred_val = y_pred_val[:, 2].astype(np.float32)
+                if len(y_pred_val) != val_count:
+                    raise RuntimeError(
+                        f"Desalineación fold {fold + 1}: val_count={val_count} != len(pred)={len(y_pred_val)}"
+                    )
             else:
                 y_pred_val = y_pred_val.reshape(-1)
                 if len(y_pred_val) != val_count:
@@ -327,7 +348,12 @@ class ProbsCalibration:
 
             val_row_positions = (L - 1) + np.arange(val_start, val_end, dtype=np.int32)
             oof_raw[val_row_positions] = y_pred_val
-            oof_y[val_row_positions]   = y_val
+            if is_triple_class:
+                # Binarizamos label para el calibrador y métricas binarias
+                # downstream: 1=TP (clase 2), 0=no-TP (clases 0 y 1).
+                oof_y[val_row_positions] = (np.asarray(y_val) == 2).astype(np.int8)
+            else:
+                oof_y[val_row_positions]   = y_val
 
             # Liberar memoria entre folds: el modelo + tensores del fold
             # anterior + buffers del scaler suman varios GB y disparaban
