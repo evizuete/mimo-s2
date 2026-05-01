@@ -579,6 +579,56 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.25, "sl": 1.50},
         },
     },
+    # 200602: 5m base + barriers asimétricos tp=2.5 / sl=1.0 (BE=0.286).
+    # Hipótesis tras la saga 200400→200601: el modelo logra precision ~0.27-0.30
+    # a percentiles altos sobre BE=0.355 (no cruza). Bajando BE a 0.286
+    # mediante TP/SL más asimétricos, esa misma precision SÍ cruzaría margen
+    # positivo. SL=1.0 ATR como suelo en todos los regímenes para evitar
+    # ejecuciones por slippage.
+    #
+    # Breakeven por régimen (sl/(tp+sl)):
+    #   trending: 1.0/(2.5+1.0) = 0.286
+    #   ranging:  1.0/(2.25+1.0) = 0.308
+    #   low_vol:  1.0/(2.25+1.0) = 0.308
+    #   high_vol: 1.25/(2.75+1.25) = 0.313
+    "200602": {
+        "tp_base": 2.5,
+        "sl_base": 1.00,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.50, "sl": 1.00},
+            "ranging":  {"tp": 2.25, "sl": 1.00},
+            "low_vol":  {"tp": 2.25, "sl": 1.00},
+            "high_vol": {"tp": 2.75, "sl": 1.25},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.50, "sl": 1.00},
+            "ranging":  {"tp": 2.25, "sl": 1.00},
+            "low_vol":  {"tp": 2.25, "sl": 1.00},
+            "high_vol": {"tp": 2.75, "sl": 1.25},
+        },
+    },
+    # 200603: idéntico a 200602 en barriers. La diferencia es que se ejecutará
+    # con --target-type=quantile en vez del modo binario. Permite evaluar
+    # quantile regression bajo el target asimétrico operativo (no aplicable a
+    # entrenamiento — barriers se ignoran en quantile_return — pero el campo
+    # existe para mantener consistencia con el flujo si más adelante quieres
+    # comparar precision binaria sobre el mismo dataset).
+    "200603": {
+        "tp_base": 2.5,
+        "sl_base": 1.00,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.50, "sl": 1.00},
+            "ranging":  {"tp": 2.25, "sl": 1.00},
+            "low_vol":  {"tp": 2.25, "sl": 1.00},
+            "high_vol": {"tp": 2.75, "sl": 1.25},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.50, "sl": 1.00},
+            "ranging":  {"tp": 2.25, "sl": 1.00},
+            "low_vol":  {"tp": 2.25, "sl": 1.00},
+            "high_vol": {"tp": 2.75, "sl": 1.25},
+        },
+    },
 }
 
 
