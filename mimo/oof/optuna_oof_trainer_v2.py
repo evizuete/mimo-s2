@@ -331,7 +331,7 @@ class OptunaOOFTrainer:
             # muy poca muestra útil => descarta trial
             raise optuna.exceptions.TrialPruned()
 
-        target_type = getattr(self.model_config, 'target_type', 'binary')
+        target_type = getattr(self.base_model_config, 'target_type', 'binary')
 
         if target_type == 'quantile':
             # En modo quantile no aplican AUC-PR ni precision binaria.
@@ -339,7 +339,7 @@ class OptunaOOFTrainer:
             # más una bonificación por correlación de Spearman entre q50 y
             # los returns reales (mide capacidad de ranking, que es lo que
             # alimenta el percentile-by-state downstream).
-            qs = list(self.model_config.quantile_levels)
+            qs = list(self.base_model_config.quantile_levels)
             y_ret = df_oof.loc[m, "signal"].to_numpy().astype(float)
             q_cal = np.stack([
                 df_oof.loc[m, f"oof_q{int(round(q*100))}_cal"].to_numpy().astype(float)
@@ -650,10 +650,10 @@ class OptunaOOFTrainer:
 
         # 3) Evaluación OOF SIEMPRE (auditoría)
         m = mask_oof(df_oof, "oof_proba_cal")
-        target_type = getattr(self.model_config, 'target_type', 'binary')
+        target_type = getattr(self.base_model_config, 'target_type', 'binary')
 
         if target_type == 'quantile':
-            qs = list(self.model_config.quantile_levels)
+            qs = list(self.base_model_config.quantile_levels)
             y_ret = df_oof.loc[m, "signal"].to_numpy().astype(float)
             q_cal = np.stack([
                 df_oof.loc[m, f"oof_q{int(round(q*100))}_cal"].to_numpy().astype(float)
@@ -841,7 +841,7 @@ class OptunaOOFTrainer:
             )
 
         X = {k: v for k, v in data.items() if k not in ['labels', 'weights']}
-        target_type = getattr(self.model_config, 'target_type', 'binary')
+        target_type = getattr(self.base_model_config, 'target_type', 'binary')
 
         if target_type == 'quantile':
             y_true = data['labels'].astype(np.float32)
@@ -862,7 +862,7 @@ class OptunaOOFTrainer:
 
         if target_type == 'quantile':
             # calibrator es un dict con shifts conformes por cuantil.
-            quantile_levels = list(calibrator.get("quantiles", self.model_config.quantile_levels))
+            quantile_levels = list(calibrator.get("quantiles", self.base_model_config.quantile_levels))
             shifts = list(calibrator.get("shifts", [0.0] * len(quantile_levels)))
             y_pred_cal = y_pred_raw.copy()
             for i, sh in enumerate(shifts):

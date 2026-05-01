@@ -1220,7 +1220,7 @@ def run_side(
 
     print(f"\n[HOLDOUT] Evaluando {side.upper()}...")
     is_quantile_mode = (
-        getattr(trainer.model_config, "target_type", "binary") == "quantile"
+        getattr(trainer.base_model_config, "target_type", "binary") == "quantile"
     )
     with holdout_eval_context():
         if is_quantile_mode:
