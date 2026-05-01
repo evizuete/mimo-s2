@@ -1035,6 +1035,9 @@ class OptunaOOFTrainer:
         if artifacts is None:
             raise ValueError("artifacts no puede ser None")
 
+        target_type = getattr(self.base_model_config, 'target_type', 'binary')
+        is_triple_class = (target_type == 'triple_class')
+
         if side not in ("long", "short"):
             raise ValueError(f"side inválido: {side}")
 
@@ -1088,11 +1091,21 @@ class OptunaOOFTrainer:
                 data["time"],
             ]
 
-            y_true = int(labels_last[0])
+            y_true_raw = int(labels_last[0])
+            y_true = int(y_true_raw == 2) if is_triple_class else y_true_raw
 
             # Más ligero que predict() en loops largos
             y_raw_tensor = keras_model(X_last, training=False)
-            y_raw = float(np.asarray(y_raw_tensor).reshape(-1)[0])
+            y_raw_np = np.asarray(y_raw_tensor)
+            if is_triple_class:
+                # Output (1, 3) softmax → P(TP).
+                if y_raw_np.ndim != 2 or y_raw_np.shape[-1] != 3:
+                    raise RuntimeError(
+                        f"triple_class fast eval predict shape {y_raw_np.shape} inesperado"
+                    )
+                y_raw = float(y_raw_np[0, 2])
+            else:
+                y_raw = float(y_raw_np.reshape(-1)[0])
 
             if hasattr(calibrator, "predict"):
                 y_cal = float(calibrator.predict(np.array([y_raw]))[0])
@@ -1510,6 +1523,9 @@ class OptunaOOFTrainer:
         if artifacts is None:
             raise ValueError("artifacts no puede ser None")
 
+        target_type = getattr(self.base_model_config, 'target_type', 'binary')
+        is_triple_class = (target_type == 'triple_class')
+
         if side not in ("long", "short"):
             raise ValueError(f"side inválido: {side}")
 
@@ -1570,7 +1586,16 @@ class OptunaOOFTrainer:
             ]
 
             y_raw_batch = keras_model(X_batch, training=False)
-            y_raw_batch = np.asarray(y_raw_batch).reshape(-1)
+            y_raw_batch = np.asarray(y_raw_batch)
+            if is_triple_class:
+                # Output (B, 3) softmax → P(TP).
+                if y_raw_batch.ndim != 2 or y_raw_batch.shape[-1] != 3:
+                    raise RuntimeError(
+                        f"triple_class walk-forward predict shape {y_raw_batch.shape} inesperado"
+                    )
+                y_raw_batch = y_raw_batch[:, 2].astype(np.float32)
+            else:
+                y_raw_batch = y_raw_batch.reshape(-1)
 
             if hasattr(calibrator, "predict"):
                 y_cal_batch = calibrator.predict(y_raw_batch)
@@ -1609,10 +1634,15 @@ class OptunaOOFTrainer:
                 continue
 
             row_last = df_prep.iloc[end_idx - 1]
+            # triple_class: binarizamos label {0,1,2} → is_TP={0,1} para que
+            # downstream (precision_recall_curve, evaluator) trate y_true como
+            # binario; y_pred ya es P(TP) extraído de softmax.
+            _y_true_raw = int(labels_last[0])
+            _y_true = int(_y_true_raw == 2) if is_triple_class else _y_true_raw
             meta = {
                 "time": row_last["time"] if "time" in row_last else None,
                 "state": row_last["state"] if "state" in row_last else None,
-                "y_true": int(labels_last[0]),
+                "y_true": _y_true,
             }
 
             batch_seq_short.append(data["seq_short"])
