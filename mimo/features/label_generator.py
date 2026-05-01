@@ -61,6 +61,8 @@ class LabelGenerator:
             df = self._triple_barrier_labels(df, side)
         elif self.config.label_method == 'quantile_return':
             df = self._quantile_return_labels(df, side)
+        elif self.config.label_method == 'magnitude_binary':
+            df = self._magnitude_binary_labels(df, side)
         else:
             raise ValueError(f"Método {self.config.label_method} no reconocido")
 
@@ -460,4 +462,58 @@ class LabelGenerator:
             ret = (close - fwd_close) / atr_safe
 
         out['signal'] = ret.astype(np.float32)
+        return out
+
+    def _magnitude_binary_labels(self, df: pd.DataFrame, side: str) -> pd.DataFrame:
+        """
+        Magnitude binary labeling (direction-agnostic).
+
+            label[t] = 1 si max(|high[t+k]-close[t]|, |close[t]-low[t+k]|) / atr[t]
+                          >= magnitude_threshold  para algún k en 1..h
+                       0 en caso contrario.
+
+        El mismo label se devuelve para LONG y SHORT — la idea es predecir
+        si va a haber un movimiento significativo en cualquier dirección
+        (intensidad), no la dirección. Diseñado para usarse como gate del
+        modelo direccional existente, no como modelo de trading directo.
+
+        Las últimas `label_horizon` filas no tienen futuro suficiente y se
+        marcan con label=0 (descartables vía dropna del fwd_close en pipeline).
+        """
+        from numpy.lib.stride_tricks import sliding_window_view
+
+        h = int(self.config.label_horizon)
+        m_thr = float(self.config.magnitude_threshold)
+        out = df.copy()
+        n = len(out)
+        close = out['close'].values.astype(np.float64)
+        high = out['high'].values.astype(np.float64)
+        low = out['low'].values.astype(np.float64)
+        atr = np.maximum(out['atr'].values.astype(np.float64), 1e-10)
+
+        if n <= h:
+            out['signal'] = np.zeros(n, dtype=np.int32)
+            return out
+
+        # Sliding windows: row i = high[i:i+h]. Para cada t, queremos
+        # max(high[t+1:t+1+h]) → row (t+1). t válido: 0..n-h-1.
+        high_windows = sliding_window_view(high, h)
+        low_windows = sliding_window_view(low, h)
+
+        fwd_high = np.full(n, np.nan)
+        fwd_low = np.full(n, np.nan)
+        fwd_high[:n - h] = high_windows[1:].max(axis=1)
+        fwd_low[:n - h] = low_windows[1:].min(axis=1)
+
+        excursion_up = (fwd_high - close) / atr
+        excursion_down = (close - fwd_low) / atr
+        abs_move = np.maximum(excursion_up, excursion_down)
+
+        # NaN >= m_thr → False, así que las últimas h filas quedan label=0.
+        label = (abs_move >= m_thr).astype(np.int32)
+        out['signal'] = label
+
+        pos_rate = float(label[:n - h].mean()) if n > h else 0.0
+        print(f"[MAGNITUDE] h={h} M={m_thr:.2f} ATR | "
+              f"pos_rate={pos_rate:.4f} ({label.sum():,}/{n - h:,})")
         return out

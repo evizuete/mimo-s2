@@ -670,6 +670,29 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.75, "sl": 1.25},
         },
     },
+    # 200800: magnitude binary (direction-agnostic). Lanzar con
+    # --target-type=magnitude --magnitude-m 1.5. Mismas features (incl. volumen).
+    # Las barriers no aplican al label pero se mantienen por consistencia con
+    # el flujo. Hipótesis: el volumen tiene IC contra magnitud (medido en 200700,
+    # spread Q4-Q1 de 4-6pp simétrico LONG/SHORT) → un modelo de magnitud
+    # capturará esa señal mejor que las cabezas direccionales separadas. Uso
+    # previsto: gate del modelo direccional 200602 para subir su precisión.
+    "200800": {
+        "tp_base": 2.5,
+        "sl_base": 1.00,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.50, "sl": 1.00},
+            "ranging":  {"tp": 2.25, "sl": 1.00},
+            "low_vol":  {"tp": 2.25, "sl": 1.00},
+            "high_vol": {"tp": 2.75, "sl": 1.25},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.50, "sl": 1.00},
+            "ranging":  {"tp": 2.25, "sl": 1.00},
+            "low_vol":  {"tp": 2.25, "sl": 1.00},
+            "high_vol": {"tp": 2.75, "sl": 1.25},
+        },
+    },
 }
 
 
@@ -709,11 +732,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--notes", type=str, default="")
     ap.add_argument(
         "--target-type",
-        choices=["binary", "quantile"],
+        choices=["binary", "quantile", "magnitude"],
         default="binary",
         help=(
-            "Tipo de target: 'binary' (triple-barrier, default) o 'quantile' "
-            "(regresión cuantílica sobre forward return / ATR con pinball loss)."
+            "Tipo de target: 'binary' (triple-barrier, default), 'quantile' "
+            "(regresión cuantílica con pinball) o 'magnitude' (clasificación "
+            "binaria direction-agnostic: ¿habrá excursión >= M·ATR en h barras?)."
         ),
     )
     ap.add_argument(
@@ -723,6 +747,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--quantiles", type=str, default="0.25,0.50,0.75",
         help="Lista CSV de cuantiles a predecir en modo target-type=quantile.",
+    )
+    ap.add_argument(
+        "--magnitude-m", type=float, default=1.5,
+        help=(
+            "Umbral M en unidades de ATR para target-type=magnitude. Default 1.5: "
+            "label=1 si max(|excursion|)/ATR >= 1.5 en h barras."
+        ),
     )
     ap.add_argument(
         "--base-tf", default="1min",
@@ -1195,6 +1226,7 @@ def build_trainer(
     target_type: str = "binary",
     quantile_h: int = 5,
     quantile_levels: tuple = (0.25, 0.50, 0.75),
+    magnitude_m: float = 1.5,
 ) -> OptunaOOFTrainer:
     general = Config(
         release=release,
@@ -1206,11 +1238,22 @@ def build_trainer(
 
     barriers = _get_barriers_for_release(release)
 
-    # En modo quantile usamos label_method='quantile_return' y se ignoran los
-    # barriers (los barriers solo aplican al triple-barrier binario). El
-    # ranking_loss tampoco aplica conceptualmente — la cabeza es regresión.
+    # quantile  → cabeza pinball multi-output, ignora barriers
+    # magnitude → cabeza binary direction-agnostic, ignora barriers regime-based
+    # binary    → triple-barrier clásico con barriers por régimen
     is_quantile = target_type == "quantile"
-    label_method_active = "quantile_return" if is_quantile else "triple_barrier"
+    is_magnitude = target_type == "magnitude"
+    if is_quantile:
+        label_method_active = "quantile_return"
+    elif is_magnitude:
+        label_method_active = "magnitude_binary"
+    else:
+        label_method_active = "triple_barrier"
+
+    # ranking_loss conceptualmente solo aplica a binario direccional
+    ranking_loss = 0.0 if (is_quantile or is_magnitude) else 0.2
+    # target_type del modelo: magnitude usa cabeza binary igual que el direccional
+    model_target_type = "binary" if is_magnitude else target_type
 
     trainer = OptunaOOFTrainer(
         general_config=general,
@@ -1221,13 +1264,14 @@ def build_trainer(
             tp_barrier=barriers["tp_base"],
             sl_barrier=barriers["sl_base"],
             label_method_long=label_method_active,
-            regime_barriers_long=None if is_quantile else barriers["regime_barriers_long"],
+            regime_barriers_long=None if (is_quantile or is_magnitude) else barriers["regime_barriers_long"],
             label_method_short=label_method_active,
-            regime_barriers_short=None if is_quantile else barriers["regime_barriers_short"],
+            regime_barriers_short=None if (is_quantile or is_magnitude) else barriers["regime_barriers_short"],
             tp_barrier_short=None,
             sl_barrier_short=None,
             quantile_horizon=int(quantile_h),
             quantile_levels=tuple(quantile_levels),
+            magnitude_threshold=float(magnitude_m),
             feature_masks={
                 "long": {"ema_bull": True, "rsi_oversold": True, "macd_positive": True},
                 "short": {"ema_bear": True, "rsi_overbought": True, "macd_negative": True},
@@ -1240,8 +1284,8 @@ def build_trainer(
             epochs=90,
             patience=12,
             use_hierarchical_fusion=True,
-            ranking_loss_weight=0.0 if is_quantile else 0.2,
-            target_type=target_type,
+            ranking_loss_weight=ranking_loss,
+            target_type=model_target_type,
             quantile_levels=tuple(quantile_levels),
         ),
         out_dir=str(train_dir),
@@ -1553,6 +1597,7 @@ def main() -> None:
         target_type=args.target_type,
         quantile_h=args.quantile_h,
         quantile_levels=quantile_levels_parsed,
+        magnitude_m=args.magnitude_m,
     )
 
     combined_report = {

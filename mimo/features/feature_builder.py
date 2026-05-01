@@ -53,6 +53,13 @@ class FeatureConfig:
     quantile_horizon: int = 5  # h en barras para el forward return
     quantile_levels: tuple = (0.25, 0.50, 0.75)
 
+    # Magnitude binary labeling (direction-agnostic).
+    # Si label_method == 'magnitude_binary', el label vale 1 si la mayor
+    # excursión |precio - close[t]| / ATR[t] sobre las próximas label_horizon
+    # barras supera magnitude_threshold (en unidades de ATR), 0 si no.
+    # Diseñado como gate del modelo direccional, no como trade per se.
+    magnitude_threshold: float = 1.5
+
     feature_masks: Optional[Dict[str, Dict[str, bool]]] = None
 
     # Barriers adaptativos por régimen.
