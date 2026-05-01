@@ -693,6 +693,35 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.75, "sl": 1.25},
         },
     },
+    # 200900: barriers escalados por 0.8 sobre 200602 — mantiene la estructura
+    # de BE por régimen pero con SL más ajustado. Resultado del barrier_sweep
+    # 5m (sl_first, h=5):
+    #   tp=2.0/sl=0.8 → BE=0.286, pos_rate=0.134, lift_to_BE=2.13x
+    #   tp=2.5/sl=1.0 (200602) → BE=0.286, pos_rate=0.084, lift_to_BE=3.42x
+    # Mismo BE, +60% positivos, lift requerido baja 38%. Hipótesis: el modelo
+    # actual (~1.7-2.0x lift OOF) se acerca al umbral de viabilidad.
+    #
+    # Breakeven por régimen (sl/(tp+sl), preserva 200602):
+    #   trending: 0.80/(2.0+0.80) = 0.286
+    #   ranging:  0.80/(1.8+0.80) = 0.308
+    #   low_vol:  0.80/(1.8+0.80) = 0.308
+    #   high_vol: 1.00/(2.2+1.00) = 0.313
+    "200900": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
 }
 
 
