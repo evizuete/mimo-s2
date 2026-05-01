@@ -722,6 +722,30 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.20, "sl": 1.00},
         },
     },
+    # 201000: barriers idénticas a 200900 (tp=2.0/sl=0.8, BE=0.286). La novedad
+    # está en las features: el FeatureBuilder ahora incluye VWAP rolling
+    # (vwap_dist_atr, vwap_dist_4h_atr, vwap_band_pos, vwap_slope_atr) y
+    # Volume Profile rolling 4h (poc_dist_atr, vol_concentration). Hipótesis:
+    # tras confirmarse el techo del modelo en 200900 (AUC-ROC ~0.53-0.60), las
+    # features VWAP/POC capturan zonas de imán de volumen y desviaciones que la
+    # red no estaba viendo. Test A/B contra 200900 para medir lift adicional
+    # sobre la misma framing de barriers.
+    "201000": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
 }
 
 

@@ -4,6 +4,7 @@ from typing import List, Optional, Dict
 import numpy as np
 import pandas as pd
 import pandas_ta_classic as ta
+from numba import jit
 from numpy import clip
 
 from mimo.models.numba_utils import (
@@ -16,6 +17,70 @@ from mimo.models.numba_utils import (
     rsi_numba,
     atr_numba
 )
+
+
+@jit(nopython=True, cache=True)
+def _volume_profile_numba(high, low, close, vol, window, n_bins, top_k):
+    """
+    Rolling volume profile sobre window barras.
+
+    Para cada t devuelve (poc_price[t], concentration[t]):
+      - poc_price: precio centro del bin con más volumen (Point of Control)
+      - concentration: suma de los top_k bins / total volumen ∈ [0, 1]
+    """
+    n = len(high)
+    poc_price = np.full(n, np.nan)
+    concentration = np.full(n, np.nan)
+    hist = np.empty(n_bins, dtype=np.float64)
+
+    for i in range(window - 1, n):
+        s = i - window + 1
+        rng_min = low[s]
+        rng_max = high[s]
+        for j in range(s + 1, i + 1):
+            if low[j] < rng_min:
+                rng_min = low[j]
+            if high[j] > rng_max:
+                rng_max = high[j]
+
+        if rng_max <= rng_min:
+            continue
+
+        for k in range(n_bins):
+            hist[k] = 0.0
+
+        inv_width = n_bins / (rng_max - rng_min)
+        for j in range(s, i + 1):
+            tp = (high[j] + low[j] + close[j]) / 3.0
+            idx = int((tp - rng_min) * inv_width)
+            if idx >= n_bins:
+                idx = n_bins - 1
+            elif idx < 0:
+                idx = 0
+            hist[idx] += vol[j]
+
+        total = 0.0
+        max_idx = 0
+        max_val = hist[0]
+        for k in range(n_bins):
+            total += hist[k]
+            if hist[k] > max_val:
+                max_val = hist[k]
+                max_idx = k
+
+        if total <= 0.0:
+            continue
+
+        bin_width = (rng_max - rng_min) / n_bins
+        poc_price[i] = rng_min + (max_idx + 0.5) * bin_width
+
+        sorted_hist = np.sort(hist)
+        top_sum = 0.0
+        for k in range(n_bins - top_k, n_bins):
+            top_sum += sorted_hist[k]
+        concentration[i] = top_sum / total
+
+    return poc_price, concentration
 
 @dataclass
 class FeatureConfig:
@@ -161,6 +226,12 @@ class FeatureEngineer:
 
         # 3b. Volumen (ticks_volume → z, pct, spike, trend)
         df = self._add_volume_features(df)
+
+        # 3c. VWAP (rolling 1h y 4h) — magnet de volumen y desviaciones
+        df = self._add_vwap_features(df)
+
+        # 3d. Volume profile (POC y concentración sobre 4h)
+        df = self._add_volume_profile_features(df)
 
         # 4. Patrones de velas
         df = self._add_candle_patterns(df)
@@ -547,6 +618,109 @@ class FeatureEngineer:
 
         return df
 
+    def _detect_n_per_h(self, df: pd.DataFrame, default: int = 12) -> int:
+        """Detecta barras/hora del df según mediana del Δt en 'time'."""
+        if "time" in df.columns and len(df) > 1:
+            dt_med = (
+                pd.to_datetime(df["time"]).diff().dropna().dt.total_seconds().median()
+            )
+            if dt_med and dt_med > 0:
+                return max(4, int(round(3600.0 / dt_med)))
+        return default
+
+    def _add_vwap_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Features derivadas de VWAP (rolling, no anclado a sesión).
+
+        Cuatro features escala-invariantes:
+          vwap_dist_atr      (close - vwap_1h) / atr  — desviación local
+          vwap_dist_4h_atr   (close - vwap_4h) / atr  — desviación a contexto largo
+          vwap_band_pos      (close - vwap_1h) / vwap_std_1h  — z-score VWAP-relative
+          vwap_slope_atr     pendiente VWAP_1h / atr / n_per_h
+
+        VWAP rolling = sum(typical_price * vol) / sum(vol) sobre window.
+        Si no hay 'ticks_volume' se usa el bar count (≈ TWAP) para preservar
+        retro-compatibilidad con datasets sin volumen.
+        """
+        n_per_h = self._detect_n_per_h(df)
+        w_short = max(6, n_per_h)
+        w_long = max(24, n_per_h * 4)
+
+        tp = (df["high"] + df["low"] + df["close"]) / 3.0
+        atr = df["atr"].replace(0, np.nan)
+
+        if "ticks_volume" in df.columns:
+            v = df["ticks_volume"].astype(float).clip(lower=0).replace(0, np.nan)
+        else:
+            v = pd.Series(1.0, index=df.index)
+
+        tp_v = tp * v.fillna(0)
+        v_filled = v.fillna(0)
+
+        mp_s = max(4, w_short // 2)
+        mp_l = max(8, w_long // 4)
+
+        num_s = tp_v.rolling(w_short, min_periods=mp_s).sum()
+        den_s = v_filled.rolling(w_short, min_periods=mp_s).sum().replace(0, np.nan)
+        vwap_s = num_s / den_s
+
+        num_l = tp_v.rolling(w_long, min_periods=mp_l).sum()
+        den_l = v_filled.rolling(w_long, min_periods=mp_l).sum().replace(0, np.nan)
+        vwap_l = num_l / den_l
+
+        df["vwap_dist_atr"] = ((df["close"] - vwap_s) / atr).clip(-5, 5)
+        df["vwap_dist_4h_atr"] = ((df["close"] - vwap_l) / atr).clip(-5, 5)
+
+        # Banda VWAP: std del precio típico ponderada uniformemente sobre window
+        # (proxy estable y rápida de la dispersión vs VWAP).
+        tp_std_s = tp.rolling(w_short, min_periods=mp_s).std().replace(0, np.nan)
+        df["vwap_band_pos"] = ((df["close"] - vwap_s) / tp_std_s).clip(-3, 3)
+
+        df["vwap_slope_atr"] = (
+            (vwap_s - vwap_s.shift(n_per_h)) / atr / float(n_per_h)
+        ).clip(-1, 1)
+
+        return df
+
+    def _add_volume_profile_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Volume profile rolling sobre 4h: POC (Point of Control) y concentración.
+
+        Dos features:
+          poc_dist_atr       (close - POC_4h) / atr   — distancia al imán de volumen
+          vol_concentration  top 5 bins / total       — qué tan concentrado está
+                              el volumen (alto = nivel claro; bajo = disperso)
+
+        Implementación numba: rolling histograma de 20 bins sobre 4h × n_per_h.
+        Si no hay 'ticks_volume' devuelve neutros.
+        """
+        if "ticks_volume" not in df.columns:
+            df["poc_dist_atr"] = 0.0
+            df["vol_concentration"] = 0.25  # 5/20 = uniforme
+            return df
+
+        n_per_h = self._detect_n_per_h(df)
+        window = max(24, n_per_h * 4)
+        n_bins = 20
+        top_k = 5
+
+        high = df["high"].to_numpy(np.float64)
+        low = df["low"].to_numpy(np.float64)
+        close = df["close"].to_numpy(np.float64)
+        vol = df["ticks_volume"].astype(float).clip(lower=0).to_numpy(np.float64)
+        atr = df["atr"].to_numpy(np.float64)
+
+        poc_price, concentration = _volume_profile_numba(
+            high, low, close, vol, window, n_bins, top_k
+        )
+
+        atr_safe = np.where(atr > 0, atr, np.nan)
+        poc_dist = (close - poc_price) / atr_safe
+        df["poc_dist_atr"] = pd.Series(poc_dist, index=df.index).clip(-5, 5)
+        df["vol_concentration"] = pd.Series(concentration, index=df.index).clip(0, 1)
+
+        return df
+
     def _add_candle_patterns(self, df: pd.DataFrame) -> pd.DataFrame:
         """Patrones de velas japonesas"""
         body_abs = abs(df['body'])
@@ -913,6 +1087,8 @@ class FeatureEngineer:
             'doji', 'hammer', 'shooting_star',
             # Volumen bar-a-bar: confirmación precio-volumen y bursts locales
             'vol_z_1h', 'vol_spike',
+            # VWAP / volume profile bar-a-bar (magnet de volumen)
+            'vwap_dist_atr', 'poc_dist_atr',
         ]
 
         # Features para secuencia larga (tendencia)
@@ -956,6 +1132,10 @@ class FeatureEngineer:
             'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour',
             # Volumen (ticks_volume — magnitud/convicción del movimiento)
             'vol_z_1h', 'vol_pct_1h', 'vol_spike', 'vol_trend_1h',
+            # VWAP rolling (1h corta + 4h larga, banda y pendiente)
+            'vwap_dist_atr', 'vwap_dist_4h_atr', 'vwap_band_pos', 'vwap_slope_atr',
+            # Volume profile rolling 4h (POC y concentración)
+            'poc_dist_atr', 'vol_concentration',
         ]
 
         # Features temporales
