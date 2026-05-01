@@ -540,6 +540,45 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.25, "sl": 1.50},
         },
     },
+    # 200600: A/B contra 200400 cambiando solo el timeframe base (5min).
+    # Usaba barriers default agresivos (tp=2.5/sl=1.5) → BE=0.375 inalcanzable.
+    # AUC-ROC mejoró +0.06 vs 200400 pero precision absoluta no cruzaba breakeven.
+    # Para limpiar el A/B mantenemos los barriers idénticos a 200400 (200398).
+    "200600": {
+        "tp_base": 2.0,
+        "sl_base": 1.10,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 1.10},
+            "ranging":  {"tp": 1.75, "sl": 1.10},
+            "low_vol":  {"tp": 1.75, "sl": 1.00},
+            "high_vol": {"tp": 2.25, "sl": 1.50},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 1.10},
+            "ranging":  {"tp": 1.75, "sl": 1.10},
+            "low_vol":  {"tp": 1.75, "sl": 1.00},
+            "high_vol": {"tp": 2.25, "sl": 1.50},
+        },
+    },
+    # 200601: idéntico a 200600. Reservado por si quieres correr una variante
+    # adicional (p.ej. distinto label-horizon) manteniendo el mismo set de
+    # barriers para A/B paritario contra 200400.
+    "200601": {
+        "tp_base": 2.0,
+        "sl_base": 1.10,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 1.10},
+            "ranging":  {"tp": 1.75, "sl": 1.10},
+            "low_vol":  {"tp": 1.75, "sl": 1.00},
+            "high_vol": {"tp": 2.25, "sl": 1.50},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 1.10},
+            "ranging":  {"tp": 1.75, "sl": 1.10},
+            "low_vol":  {"tp": 1.75, "sl": 1.00},
+            "high_vol": {"tp": 2.25, "sl": 1.50},
+        },
+    },
 }
 
 
