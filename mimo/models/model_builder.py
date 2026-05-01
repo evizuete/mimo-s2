@@ -656,6 +656,8 @@ class TradingModel:
         """
 
         # Callbacks
+        is_quantile_callbacks = (self.model_config.target_type == "quantile")
+
         if for_production:
             callbacks = [
                 # LR schedule: reduce a mitad cada N épocas fijas si la loss no mejora
@@ -666,6 +668,30 @@ class TradingModel:
                     min_lr=1e-6,
                     mode='min',
                     verbose=verbose
+                ),
+                TerminateOnNaN(),
+            ]
+        elif is_quantile_callbacks:
+            # En quantile mode no hay val_auc_pr; usamos val_loss (pinball) a minimizar.
+            # GeneralizationGapStopping se desactiva: val_loss es continuo y la noción
+            # de "gap" entre auc_pr de train y val no aplica directamente (la pinball
+            # de train baja monotónicamente y la "gap" es ruidosa para regresión).
+            mon = 'val_loss' if X_val is not None else 'loss'
+            callbacks = [
+                EarlyStopping(
+                    monitor=mon,
+                    patience=self.model_config.patience,
+                    restore_best_weights=True,
+                    mode='min',
+                    verbose=verbose,
+                ),
+                ReduceLROnPlateau(
+                    monitor=mon,
+                    factor=0.5,
+                    patience=self.model_config.patience // 3,
+                    min_lr=1e-6,
+                    mode='min',
+                    verbose=verbose,
                 ),
                 TerminateOnNaN(),
             ]

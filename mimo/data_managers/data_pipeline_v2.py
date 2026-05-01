@@ -398,9 +398,22 @@ class DataPipeline:
             print(f"[DIAG PRE] side={side} | regime_barriers_short set: {self.label_generator.config.regime_barriers_short is not None} | regime_barriers: {self.label_generator.config.regime_barriers}")
 
             df = self.label_generator.generate_labels(df, side)
-            print(f"[DIAG {side}] pos_rate: {df['signal'].mean():.4f} ({df['signal'].sum()} positivos de {len(df)} filas)")
-            print(f"[DIAG {side}] por régimen:")
-            print(df.groupby('state')['signal'].agg(['mean', 'sum', 'count']))
+            # En modo quantile_return el target es continuo (return en ATR),
+            # por lo que pos_rate/positivos no aplican: reportamos mean/std
+            # con etiqueta "mean_return" para evitar confusión.
+            if self.label_generator.config.label_method == 'quantile_return':
+                _s = df['signal']
+                print(
+                    f"[DIAG {side}] mean_return(ATR)={_s.mean():.4f} "
+                    f"std={_s.std():.4f} min={_s.min():.4f} max={_s.max():.4f} "
+                    f"n_finite={int(_s.notna().sum())}/{len(df)}"
+                )
+                print(f"[DIAG {side}] por régimen (mean_return / std / count):")
+                print(df.groupby('state')['signal'].agg(['mean', 'std', 'count']))
+            else:
+                print(f"[DIAG {side}] pos_rate: {df['signal'].mean():.4f} ({df['signal'].sum()} positivos de {len(df)} filas)")
+                print(f"[DIAG {side}] por régimen:")
+                print(df.groupby('state')['signal'].agg(['mean', 'sum', 'count']))
 
             df = df.dropna()
         else:
