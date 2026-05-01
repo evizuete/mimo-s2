@@ -890,7 +890,9 @@ class FeatureEngineer:
             'ema_9_dist_bps', 'ema_21_dist_bps', 'ema_9_slope_bps',
             'rsi_norm', 'macd_hist_atr_log', 'bb_position',
             'price_velocity', 'price_acceleration',
-            'doji', 'hammer', 'shooting_star'
+            'doji', 'hammer', 'shooting_star',
+            # Volumen bar-a-bar: confirmación precio-volumen y bursts locales
+            'vol_z_1h', 'vol_spike',
         ]
 
         # Features para secuencia larga (tendencia)
