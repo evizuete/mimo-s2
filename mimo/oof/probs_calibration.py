@@ -154,8 +154,18 @@ class ProbsCalibration:
             raise ValueError("No hay suficientes filas para crear secuencias con seq_len_long.")
 
         n_samples = row_index.size
-        oof_raw = np.full(len(df), np.nan, dtype=np.float32)
-        oof_y   = np.full(len(df), -1,    dtype=np.int8)
+
+        # ── Detección de modo quantile (vs binary clásico) ──────────────────
+        target_type = getattr(self.model_config, 'target_type', 'binary')
+        is_quantile = (target_type == 'quantile')
+        if is_quantile:
+            quantile_levels = tuple(self.model_config.quantile_levels)
+            n_q = len(quantile_levels)
+            oof_raw = np.full((len(df), n_q), np.nan, dtype=np.float32)
+            oof_y = np.full(len(df), np.nan, dtype=np.float32)
+        else:
+            oof_raw = np.full(len(df), np.nan, dtype=np.float32)
+            oof_y = np.full(len(df), -1, dtype=np.int8)
 
         best_epochs: Dict[int, Any] = {}
 
@@ -195,11 +205,18 @@ class ProbsCalibration:
                 data_val   = pipeline_fold.create_sequences(df_val_rows,   fit_scalers=False, train=True)
 
             X_train = {k: v for k, v in data_train.items() if k not in ["labels", "weights"]}
-            y_train = data_train["labels"].astype(int)
+            X_val = {k: v for k, v in data_val.items() if k not in ["labels", "weights"]}
             w_train = data_train["weights"]
 
-            X_val = {k: v for k, v in data_val.items() if k not in ["labels", "weights"]}
-            y_val = data_val["labels"].astype(int)
+            if is_quantile:
+                # Target continuo (forward return / atr). NaN posibles en las
+                # últimas h filas; el dropna previo en generate_all_features +
+                # el filtro de mask_oof se encargan downstream.
+                y_train = data_train["labels"].astype(np.float32)
+                y_val = data_val["labels"].astype(np.float32)
+            else:
+                y_train = data_train["labels"].astype(int)
+                y_val = data_val["labels"].astype(int)
 
             # ── Entrenar modelo del fold ───────────────────────────────
             fold_model_config = ModelConfig(**vars(self.model_config))
@@ -207,8 +224,13 @@ class ProbsCalibration:
 
             tm = TradingModel(self.general_config, fold_model_config, side=side)
 
-            pos_rate = float(np.clip(np.nanmean(y_train), 1e-4, 1 - 1e-4))
-            init_bias = float(np.log(pos_rate / (1 - pos_rate)))
+            if is_quantile:
+                # En quantile mode no hay prior-bias informativo (la cabeza es
+                # lineal y debe aprender la mediana del return desde los datos).
+                init_bias = 0.0
+            else:
+                pos_rate = float(np.clip(np.nanmean(y_train), 1e-4, 1 - 1e-4))
+                init_bias = float(np.log(pos_rate / (1 - pos_rate)))
 
             # Seleccionar arquitectura según flag del ModelConfig
             # use_hierarchical_fusion=True → v3 (fusión jerárquica market/entry)
@@ -254,9 +276,17 @@ class ProbsCalibration:
                 for_production=False,
             )
 
-            vals = history["val_auc_pr"]
-            best_epoch = int(np.argmax(vals)) + 1
-            best_val   = float(np.max(vals))
+            if is_quantile:
+                # En quantile mode la métrica que se reporta es val_loss
+                # (pinball, a minimizar). Guardamos su negativo en 'val' para
+                # mantener la convención "más alto = mejor" del best_epochs dict.
+                vals_loss = history["val_loss"]
+                best_epoch = int(np.argmin(vals_loss)) + 1
+                best_val = -float(np.min(vals_loss))
+            else:
+                vals = history["val_auc_pr"]
+                best_epoch = int(np.argmax(vals)) + 1
+                best_val = float(np.max(vals))
             best_epochs[fold] = {"epoch": best_epoch, "val": best_val}
 
             if verbose:
@@ -275,14 +305,25 @@ class ProbsCalibration:
                            X_val['context'], X_val['time']]
                 y_pred_val = _keras_model.predict(
                     _x_list, batch_size=4096, verbose=0
-                ).astype(np.float32).reshape(-1)
+                ).astype(np.float32)
             else:
-                y_pred_val = tm.predict(X_val).astype(np.float32).reshape(-1)
+                y_pred_val = tm.predict(X_val).astype(np.float32)
 
-            if len(y_pred_val) != val_count:
-                raise RuntimeError(
-                    f"Desalineación fold {fold + 1}: val_count={val_count} != len(pred)={len(y_pred_val)}"
-                )
+            if is_quantile:
+                # Shape esperado: (val_count, n_q). Mantener 2D.
+                if y_pred_val.ndim == 1:
+                    y_pred_val = y_pred_val.reshape(-1, 1)
+                if y_pred_val.shape[0] != val_count:
+                    raise RuntimeError(
+                        f"Desalineación fold {fold + 1}: val_count={val_count} "
+                        f"!= pred.shape[0]={y_pred_val.shape[0]}"
+                    )
+            else:
+                y_pred_val = y_pred_val.reshape(-1)
+                if len(y_pred_val) != val_count:
+                    raise RuntimeError(
+                        f"Desalineación fold {fold + 1}: val_count={val_count} != len(pred)={len(y_pred_val)}"
+                    )
 
             val_row_positions = (L - 1) + np.arange(val_start, val_end, dtype=np.int32)
             oof_raw[val_row_positions] = y_pred_val
@@ -303,7 +344,69 @@ class ProbsCalibration:
             except Exception:
                 pass
 
-        # ── Calibración isotónica ──────────────────────────────────────
+        if is_quantile:
+            # ── Calibración conformal por cuantil ──────────────────────────
+            # Para cada cuantil predicho q, calculamos el residuo (y - q_pred)
+            # y aplicamos un shift constante igual al q-cuantil de los residuos
+            # para que la cobertura empírica iguale q.
+            mask = np.isfinite(oof_raw).all(axis=1) & np.isfinite(oof_y)
+            if mask.sum() < 1000:
+                raise ValueError(
+                    f"No hay suficientes muestras OOF para calibrar. mask.sum()={mask.sum()}"
+                )
+
+            y_true = oof_y[mask].astype(np.float32)
+            q_raw = oof_raw[mask].astype(np.float32)  # (M, n_q)
+            quantile_levels = list(self.model_config.quantile_levels)
+
+            print(f"OOF mask.sum()={int(mask.sum())}")
+            print(f"y_true (returns/atr) min/mean/median/std/max = "
+                  f"{float(y_true.min()):.4f} / {float(y_true.mean()):.4f} / "
+                  f"{float(np.median(y_true)):.4f} / {float(y_true.std()):.4f} / "
+                  f"{float(y_true.max()):.4f}")
+
+            shifts = []
+            q_cal = q_raw.copy()
+            for i, q in enumerate(quantile_levels):
+                residuals = y_true - q_raw[:, i]
+                shift = float(np.quantile(residuals, q))
+                q_cal[:, i] = q_raw[:, i] + shift
+                shifts.append(shift)
+                pre_cov = float(np.mean(y_true <= q_raw[:, i]))
+                post_cov = float(np.mean(y_true <= q_cal[:, i]))
+                print(f"[Conformal] q={q:.2f} shift={shift:+.4f} "
+                      f"coverage pre={pre_cov:.3f} post={post_cov:.3f}")
+
+            # Calibrator es un dict con shifts (no un IsotonicRegression).
+            cal = {
+                "type": "conformal_quantile_shifts",
+                "quantiles": quantile_levels,
+                "shifts": shifts,
+            }
+
+            # Persistir TODAS las columnas (raw y calibradas) en el df.
+            # Para compat downstream, oof_proba_raw/cal apuntan al cuantil más
+            # bajo (q25 por defecto): es la salida de decisión natural — opera
+            # cuando el q25 supera el umbral económico/percentil.
+            oof_raw_all = np.full((len(df), len(quantile_levels)), np.nan, dtype=np.float32)
+            oof_cal_all = np.full((len(df), len(quantile_levels)), np.nan, dtype=np.float32)
+            oof_raw_all[mask] = q_raw
+            oof_cal_all[mask] = q_cal
+
+            for i, q in enumerate(quantile_levels):
+                qi = int(round(q * 100))
+                df[f"oof_q{qi}_raw"] = oof_raw_all[:, i]
+                df[f"oof_q{qi}_cal"] = oof_cal_all[:, i]
+
+            # Aliases para que el resto del pipeline (compute_percentiles_by_regime,
+            # holdout eval, decision engine) siga funcionando sin cambios. La
+            # decisión se toma sobre el cuantil inferior (q25) calibrado.
+            df["oof_proba_raw"] = oof_raw_all[:, 0]
+            df["oof_proba_cal"] = oof_cal_all[:, 0]
+
+            return df, cal, best_epochs
+
+        # ── Calibración isotónica (binary, comportamiento original) ────────
         mask = np.isfinite(oof_raw) & np.isfinite(oof_y) & (oof_y >= 0)
         if mask.sum() < 1000:
             raise ValueError(f"No hay suficientes muestras OOF para calibrar. mask.sum()={mask.sum()}")

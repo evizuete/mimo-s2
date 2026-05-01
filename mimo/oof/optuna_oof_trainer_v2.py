@@ -331,39 +331,83 @@ class OptunaOOFTrainer:
             # muy poca muestra útil => descarta trial
             raise optuna.exceptions.TrialPruned()
 
-        y = df_oof.loc[m, "signal"].to_numpy().astype(int)
-        p_cal = df_oof.loc[m, "oof_proba_cal"].to_numpy().astype(float)
+        target_type = getattr(self.model_config, 'target_type', 'binary')
 
-        # AUC-PR como core
-        auc_pr = float(average_precision_score(y, p_cal))
+        if target_type == 'quantile':
+            # En modo quantile no aplican AUC-PR ni precision binaria.
+            # Optimizamos por pinball loss OOF (negativa porque Optuna maximiza)
+            # más una bonificación por correlación de Spearman entre q50 y
+            # los returns reales (mide capacidad de ranking, que es lo que
+            # alimenta el percentile-by-state downstream).
+            qs = list(self.model_config.quantile_levels)
+            y_ret = df_oof.loc[m, "signal"].to_numpy().astype(float)
+            q_cal = np.stack([
+                df_oof.loc[m, f"oof_q{int(round(q*100))}_cal"].to_numpy().astype(float)
+                for q in qs
+            ], axis=1)
 
-        # Métrica operativa (umbral) con tu evaluator
-        eval_metrics = self.evaluator.evaluate_predictions(
-            y_true=y,
-            y_pred_proba=p_cal,
-            verbose=False,
-            beta_primary=0.25,
-            min_precision=0.45,
-            max_signal_rate=0.15,
-        )
+            # Pinball loss OOF (a minimizar)
+            diff = y_ret[:, None] - q_cal
+            qs_arr = np.array(qs, dtype=float)
+            pinball_per_q = np.maximum(qs_arr * diff, (qs_arr - 1.0) * diff)
+            pinball_oof = float(np.mean(pinball_per_q))
 
-        sr = float(eval_metrics.get("selected_signal_rate", np.nan))
-        prec = float(eval_metrics.get("selected_precision", 0.0))
+            # Spearman entre q50 y realized returns
+            mid_idx = len(qs) // 2
+            try:
+                from scipy.stats import spearmanr
+                spearman, _ = spearmanr(q_cal[:, mid_idx], y_ret)
+                spearman = float(spearman) if np.isfinite(spearman) else 0.0
+            except Exception:
+                spearman = 0.0
 
-        # Penalización si se va de señal
-        penalty = 0.0
-        if np.isfinite(sr) and sr > max_signal_rate_penalty:
-            penalty = (sr - max_signal_rate_penalty) * 0.5
+            # Cobertura empírica del intervalo predicho (q[0], q[-1])
+            coverage = float(np.mean((y_ret >= q_cal[:, 0]) & (y_ret <= q_cal[:, -1])))
+            target_coverage = qs[-1] - qs[0]
+            coverage_err = abs(coverage - target_coverage)
 
-        # objetivo final
-        # - prioriza AUC-PR
-        # - añade “precision” operativa
-        # score = auc_pr + 0.10 * prec - penalty
-        score = (
-                auc_pr
-                + 0.30 * prec
-                - 0.80 * max(0.0, sr - 0.12)
-        )
+            # Score: queremos MIN pinball, MAX spearman, coverage cercana al objetivo.
+            # score = -pinball + 0.5 * spearman - 0.5 * coverage_err
+            score = (-pinball_oof) + 0.5 * spearman - 0.5 * coverage_err
+            auc_pr = float("nan")  # no aplica
+            prec = float("nan")
+            sr = float("nan")
+            print(f"[QUANTILE OOF] pinball={pinball_oof:.4f} spearman={spearman:.4f} "
+                  f"coverage={coverage:.3f} (target={target_coverage:.3f}) score={score:.4f}")
+        else:
+            y = df_oof.loc[m, "signal"].to_numpy().astype(int)
+            p_cal = df_oof.loc[m, "oof_proba_cal"].to_numpy().astype(float)
+
+            # AUC-PR como core
+            auc_pr = float(average_precision_score(y, p_cal))
+
+            # Métrica operativa (umbral) con tu evaluator
+            eval_metrics = self.evaluator.evaluate_predictions(
+                y_true=y,
+                y_pred_proba=p_cal,
+                verbose=False,
+                beta_primary=0.25,
+                min_precision=0.45,
+                max_signal_rate=0.15,
+            )
+
+            sr = float(eval_metrics.get("selected_signal_rate", np.nan))
+            prec = float(eval_metrics.get("selected_precision", 0.0))
+
+            # Penalización si se va de señal
+            penalty = 0.0
+            if np.isfinite(sr) and sr > max_signal_rate_penalty:
+                penalty = (sr - max_signal_rate_penalty) * 0.5
+
+            # objetivo final
+            # - prioriza AUC-PR
+            # - añade “precision” operativa
+            # score = auc_pr + 0.10 * prec - penalty
+            score = (
+                    auc_pr
+                    + 0.30 * prec
+                    - 0.80 * max(0.0, sr - 0.12)
+            )
 
         ''' Probar esto 
         score = (
@@ -606,20 +650,60 @@ class OptunaOOFTrainer:
 
         # 3) Evaluación OOF SIEMPRE (auditoría)
         m = mask_oof(df_oof, "oof_proba_cal")
-        y_oof = df_oof.loc[m, "signal"].to_numpy().astype(int)
-        p_cal = df_oof.loc[m, "oof_proba_cal"].to_numpy().astype(float)
+        target_type = getattr(self.model_config, 'target_type', 'binary')
 
-        oof_eval = self.evaluator.evaluate_predictions(
-            y_true=y_oof,
-            y_pred_proba=p_cal,
-            verbose=True,
-            beta_primary=0.25,
-            min_precision=0.45,
-            max_signal_rate=0.15,
-        )
+        if target_type == 'quantile':
+            qs = list(self.model_config.quantile_levels)
+            y_ret = df_oof.loc[m, "signal"].to_numpy().astype(float)
+            q_cal = np.stack([
+                df_oof.loc[m, f"oof_q{int(round(q*100))}_cal"].to_numpy().astype(float)
+                for q in qs
+            ], axis=1)
 
-        # opcional: añade resumen AUC-PR explícito por claridad
-        oof_eval["auc_pr"] = float(average_precision_score(y_oof, p_cal))
+            diff = y_ret[:, None] - q_cal
+            qs_arr = np.array(qs, dtype=float)
+            pinball = float(np.mean(np.maximum(qs_arr * diff, (qs_arr - 1.0) * diff)))
+            mid_idx = len(qs) // 2
+            mae_mid = float(np.mean(np.abs(y_ret - q_cal[:, mid_idx])))
+            try:
+                from scipy.stats import spearmanr
+                spearman, _ = spearmanr(q_cal[:, mid_idx], y_ret)
+                spearman = float(spearman) if np.isfinite(spearman) else 0.0
+            except Exception:
+                spearman = 0.0
+            coverage = float(np.mean((y_ret >= q_cal[:, 0]) & (y_ret <= q_cal[:, -1])))
+
+            print("==================================================")
+            print(f"OOF QUANTILE METRICS  (n={int(m.sum())})")
+            print("==================================================")
+            print(f"pinball_loss : {pinball:.4f}")
+            print(f"mae_q{int(round(qs[mid_idx]*100))}      : {mae_mid:.4f}")
+            print(f"spearman_q{int(round(qs[mid_idx]*100))} : {spearman:.4f}")
+            print(f"coverage     : {coverage:.3f}  (target={qs[-1]-qs[0]:.3f})")
+
+            oof_eval = {
+                "pinball_loss": pinball,
+                f"mae_q{int(round(qs[mid_idx]*100))}": mae_mid,
+                f"spearman_q{int(round(qs[mid_idx]*100))}": spearman,
+                "coverage": coverage,
+                "target_coverage": float(qs[-1] - qs[0]),
+                "n": int(m.sum()),
+            }
+        else:
+            y_oof = df_oof.loc[m, "signal"].to_numpy().astype(int)
+            p_cal = df_oof.loc[m, "oof_proba_cal"].to_numpy().astype(float)
+
+            oof_eval = self.evaluator.evaluate_predictions(
+                y_true=y_oof,
+                y_pred_proba=p_cal,
+                verbose=True,
+                beta_primary=0.25,
+                min_precision=0.45,
+                max_signal_rate=0.15,
+            )
+
+            # opcional: añade resumen AUC-PR explícito por claridad
+            oof_eval["auc_pr"] = float(average_precision_score(y_oof, p_cal))
 
         # 4) Entrenar modelo final en TODO (producción)
         pipeline_prod = DataPipeline(
@@ -637,16 +721,21 @@ class OptunaOOFTrainer:
             data_all = pipeline_prod.create_sequences(df_prepared_prod, fit_scalers=True, train=True)
 
         X_all = {k: v for k, v in data_all.items() if k not in ["labels", "weights"]}
-        y_all = data_all["labels"]
         w_all = data_all["weights"]
 
         tm = TradingModel(self.general_config, model_config, side=side)
 
-        pos_rate = float(np.nanmean(y_all))
-        pos_rate = np.clip(pos_rate, 0.05, 0.50)
-        init_bias = float(np.log(pos_rate / (1 - pos_rate)))
-        init_bias = np.clip(init_bias, -2.0, 2.0)
-        print(f'[BIAS] pos_rate={pos_rate:.4f}, init_bias={init_bias:.4f}')
+        if target_type == 'quantile':
+            y_all = data_all["labels"].astype(np.float32)
+            init_bias = 0.0
+            print(f'[BIAS] target=quantile → init_bias=0.0 (cabeza lineal)')
+        else:
+            y_all = data_all["labels"]
+            pos_rate = float(np.nanmean(y_all))
+            pos_rate = np.clip(pos_rate, 0.05, 0.50)
+            init_bias = float(np.log(pos_rate / (1 - pos_rate)))
+            init_bias = np.clip(init_bias, -2.0, 2.0)
+            print(f'[BIAS] pos_rate={pos_rate:.4f}, init_bias={init_bias:.4f}')
 
         # Seleccionar arquitectura según flag del ModelConfig
         # use_hierarchical_fusion=True → v3 (fusión jerárquica market/entry)
@@ -752,14 +841,69 @@ class OptunaOOFTrainer:
             )
 
         X = {k: v for k, v in data.items() if k not in ['labels', 'weights']}
-        y_true = data['labels'].astype(int)
+        target_type = getattr(self.model_config, 'target_type', 'binary')
+
+        if target_type == 'quantile':
+            y_true = data['labels'].astype(np.float32)
+        else:
+            y_true = data['labels'].astype(int)
 
         keras_model = tf.keras.models.load_model(artifacts.model_path)
 
         x_list = [X['seq_short'], X['seq_long'], X['context'], X['time']]
-        y_pred = keras_model.predict(x_list, verbose=0, batch_size=4096).reshape(-1)
+        if target_type == 'quantile':
+            y_pred_raw = keras_model.predict(x_list, verbose=0, batch_size=4096).astype(np.float32)
+            if y_pred_raw.ndim == 1:
+                y_pred_raw = y_pred_raw.reshape(-1, 1)
+        else:
+            y_pred_raw = keras_model.predict(x_list, verbose=0, batch_size=4096).reshape(-1)
 
         calibrator = joblib.load(artifacts.calibrator_path)
+
+        if target_type == 'quantile':
+            # calibrator es un dict con shifts conformes por cuantil.
+            quantile_levels = list(calibrator.get("quantiles", self.model_config.quantile_levels))
+            shifts = list(calibrator.get("shifts", [0.0] * len(quantile_levels)))
+            y_pred_cal = y_pred_raw.copy()
+            for i, sh in enumerate(shifts):
+                y_pred_cal[:, i] = y_pred_raw[:, i] + float(sh)
+
+            m_finite = np.isfinite(y_true) & np.isfinite(y_pred_cal).all(axis=1)
+            yv = y_true[m_finite]
+            qcal = y_pred_cal[m_finite]
+
+            qs_arr = np.array(quantile_levels, dtype=float)
+            diff = yv[:, None] - qcal
+            pinball = float(np.mean(np.maximum(qs_arr * diff, (qs_arr - 1.0) * diff)))
+            mid_idx = len(quantile_levels) // 2
+            mae_mid = float(np.mean(np.abs(yv - qcal[:, mid_idx])))
+            try:
+                from scipy.stats import spearmanr
+                spearman, _ = spearmanr(qcal[:, mid_idx], yv)
+                spearman = float(spearman) if np.isfinite(spearman) else 0.0
+            except Exception:
+                spearman = 0.0
+            coverage = float(np.mean((yv >= qcal[:, 0]) & (yv <= qcal[:, -1])))
+
+            print("==================================================")
+            print(f"HOLDOUT QUANTILE METRICS  (n={int(m_finite.sum())})")
+            print("==================================================")
+            print(f"pinball_loss : {pinball:.4f}")
+            print(f"mae_q{int(round(quantile_levels[mid_idx]*100))}      : {mae_mid:.4f}")
+            print(f"spearman     : {spearman:.4f}")
+            print(f"coverage     : {coverage:.3f}  (target={quantile_levels[-1]-quantile_levels[0]:.3f})")
+
+            return {
+                "pinball_loss": pinball,
+                f"mae_q{int(round(quantile_levels[mid_idx]*100))}": mae_mid,
+                "spearman": spearman,
+                "coverage": coverage,
+                "target_coverage": float(quantile_levels[-1] - quantile_levels[0]),
+                "n": int(m_finite.sum()),
+            }
+
+        # ── Camino binario (original) ─────────────────────────────────────
+        y_pred = y_pred_raw
         y_cal = calibrator.predict(y_pred) if hasattr(calibrator, 'predict') else calibrator.transform(y_pred)
 
         m = np.isfinite(y_cal) & np.isfinite(y_true)

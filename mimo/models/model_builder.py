@@ -68,6 +68,15 @@ class ModelConfig:
     # no solo a clasificarlas — mejora directamente la calidad de los percentiles.
     ranking_loss_weight: float = 0.0
 
+    # Tipo de target/output:
+    #   "binary"   → clasificación binaria con sigmoid + focal/hybrid loss (default)
+    #   "quantile" → regresión cuantílica con cabeza lineal y pinball loss.
+    # En modo quantile el modelo predice len(quantile_levels) cuantiles del
+    # forward return normalizado por ATR; ranking_loss y focal_alpha/gamma se
+    # ignoran. La calibración en probs_calibration aplica un shift conformal.
+    target_type: str = "binary"
+    quantile_levels: tuple = (0.25, 0.50, 0.75)
+
 class TradingModel:
     """Modelo de deep learning con arquitectura multi-scale"""
 
@@ -77,6 +86,42 @@ class TradingModel:
         self.side = side
         self.model = None
         self.history = None
+
+    def _build_output_head(self, x, init_bias: float):
+        """
+        Construye la cabeza de salida según self.model_config.target_type.
+
+        target_type='binary' (default):
+            Dense(1) → sigmoid → 'signal' (probabilidad).
+            init_bias se aplica al bias del Dense para acelerar convergencia
+            con clases desbalanceadas.
+
+        target_type='quantile':
+            Dense(N_q, linear) → 'signal' (vector de cuantiles del return).
+            init_bias se ignora (los cuantiles arrancan con bias 0; el modelo
+            debería aprender la mediana del return desde los datos).
+
+        En ambos casos la layer de salida se llama 'signal' para mantener
+        compatibilidad con el resto del pipeline (loaders, predicción, etc.).
+        """
+        if self.model_config.target_type == "quantile":
+            n_q = len(self.model_config.quantile_levels)
+            return layers.Dense(
+                n_q,
+                activation='linear',
+                name='signal',
+                kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+                bias_initializer='zeros',
+            )(x)
+
+        # Camino original (binario): logits + sigmoid
+        signal_logit = layers.Dense(
+            1,
+            name='signal_logit',
+            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+            bias_initializer=tf.keras.initializers.Constant(init_bias),
+        )(x)
+        return layers.Activation('sigmoid', name='signal')(signal_logit)
 
     def build_model(self,
                     shape_short: Tuple[int, int],
@@ -196,16 +241,7 @@ class TradingModel:
         x = layers.Dropout(config.dropout_dense)(x)
 
         # === OUTPUT ===
-        # Capa de logits para poder extraerlos si es necesario
-        signal_logit = layers.Dense(
-            1,
-            name='signal_logit',
-            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
-            bias_initializer=tf.keras.initializers.Constant(init_bias)
-        )(x)
-
-        # Activación sigmoid para probabilidad
-        signal_output = layers.Activation('sigmoid', name='signal')(signal_logit)
+        signal_output = self._build_output_head(x, init_bias)
 
         # === CREAR MODELO ===
         model = Model(
@@ -333,16 +369,7 @@ class TradingModel:
         x = layers.Dropout(config.dropout_dense)(x)
 
         # === OUTPUT ===
-        # Capa de logits para poder extraerlos si es necesario
-        signal_logit = layers.Dense(
-            1,
-            name='signal_logit',
-            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
-            bias_initializer=tf.keras.initializers.Constant(init_bias)
-        )(x)
-
-        # Activación sigmoid para probabilidad
-        signal_output = layers.Activation('sigmoid', name='signal')(signal_logit)
+        signal_output = self._build_output_head(x, init_bias)
 
         # === CREAR MODELO ===
         model = Model(
@@ -498,14 +525,7 @@ class TradingModel:
         x = layers.Dropout(config.dropout_dense)(x)
 
         # === OUTPUT ===
-        signal_logit = layers.Dense(
-            1,
-            name='signal_logit',
-            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
-            bias_initializer=tf.keras.initializers.Constant(init_bias)
-        )(x)
-
-        signal_output = layers.Activation('sigmoid', name='signal')(signal_logit)
+        signal_output = self._build_output_head(x, init_bias)
 
         model = Model(
             inputs=[input_short, input_long, input_context, input_time],
@@ -517,6 +537,30 @@ class TradingModel:
         return model
 
     def compile_model(self, class_weight: Dict[int, float] = None):
+        optimizer = Adam(
+            learning_rate=self.model_config.learning_rate,
+            clipnorm=1.0,
+            beta_1=0.9,
+            beta_2=0.999,
+            epsilon=1e-8
+        )
+
+        if self.model_config.target_type == "quantile":
+            # ── Quantile regression ───────────────────────────────────────────
+            # Pinball loss multi-output. focal_alpha/gamma y ranking_loss_weight
+            # se ignoran (no aplican). Métricas: MAE sobre el cuantil mediano y
+            # cobertura empírica del intervalo predicho.
+            qs = self.model_config.quantile_levels
+            loss = PinballLoss(quantiles=qs)
+
+            mid_idx = len(qs) // 2  # típicamente 1 para (0.25, 0.50, 0.75)
+            metrics = [
+                QuantileMAE(quantile_idx=mid_idx, name=f"mae_q{int(qs[mid_idx]*100)}"),
+                QuantileCoverage(low_idx=0, high_idx=len(qs) - 1, name="coverage"),
+            ]
+            self.model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
+            return
+
         # ── Hybrid loss: focal + ranking (ListNet) ────────────────────────────
         # Si ranking_loss_weight=0.0 → solo focal (retrocompatible con v1/v2).
         # Si ranking_loss_weight>0.0 → focal + ListNet ponderado.
@@ -563,15 +607,6 @@ class TradingModel:
             tf.keras.metrics.Recall(name='recall_40', thresholds=0.40),
         ]
 
-        # Optimizador
-        optimizer = Adam(
-            learning_rate=self.model_config.learning_rate,
-            clipnorm=1.0,
-            beta_1=0.9,
-            beta_2=0.999,
-            epsilon=1e-8
-        )
-
         # loss ya definida arriba: focal puro (ranking_loss_weight=0) o hybrid (>0)
         self.model.compile(
             optimizer=optimizer,
@@ -580,7 +615,13 @@ class TradingModel:
         )
 
     def get_logits(self, X: Dict[str, np.ndarray]) -> np.ndarray:
-        """Extrae los logits antes de la activación sigmoid"""
+        """Extrae los logits antes de la activación sigmoid (solo modo binary)."""
+        if self.model_config.target_type == "quantile":
+            raise NotImplementedError(
+                "get_logits() no aplica en modo quantile: la cabeza es lineal "
+                "y no hay layer 'signal_logit'. Usa model.predict() directamente "
+                "para obtener los cuantiles."
+            )
         logit_model = Model(
             inputs=self.model.inputs,
             outputs=self.model.get_layer('signal_logit').output
@@ -869,3 +910,92 @@ class ClippedBinaryFocalCrossentropy(tf.keras.losses.Loss):
             "from_logits": self.from_logits,
         })
         return cfg
+
+
+class PinballLoss(tf.keras.losses.Loss):
+    """
+    Quantile regression loss (pinball / check loss) para regresión cuantílica
+    multi-output.
+
+    y_true: shape (batch, 1) o (batch,) — target continuo (forward return).
+    y_pred: shape (batch, n_quantiles) — predicciones para cada cuantil.
+
+    pinball_q(e) = max(q*e, (q-1)*e),  donde e = y_true - y_pred
+
+    Promedia sobre cuantiles y batch. Si todos los cuantiles fueran q=0.5
+    coincide con MAE (Mean Absolute Error).
+    """
+
+    def __init__(self, quantiles=(0.25, 0.50, 0.75),
+                 reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE,
+                 name="pinball"):
+        super().__init__(reduction=reduction, name=name)
+        self.quantiles = tuple(float(q) for q in quantiles)
+
+    def call(self, y_true, y_pred):
+        # y_true puede venir (batch,) o (batch, 1); broadcast a (batch, 1)
+        y_true = tf.cast(tf.reshape(y_true, (-1, 1)), y_pred.dtype)
+        q = tf.constant(self.quantiles, dtype=y_pred.dtype)
+        diff = y_true - y_pred  # (batch, n_q)
+        loss = tf.maximum(q * diff, (q - 1.0) * diff)
+        return tf.reduce_mean(loss)
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({"quantiles": list(self.quantiles)})
+        return cfg
+
+
+class QuantileMAE(tf.keras.metrics.Metric):
+    """MAE sobre uno de los cuantiles predichos (típicamente q50)."""
+
+    def __init__(self, quantile_idx: int = 1, name: str = "mae_q50", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.quantile_idx = int(quantile_idx)
+        self.total = self.add_weight(name="total", initializer="zeros")
+        self.count = self.add_weight(name="count", initializer="zeros")
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(tf.reshape(y_true, (-1,)), y_pred.dtype)
+        y_pred_q = y_pred[:, self.quantile_idx]
+        ae = tf.abs(y_true - y_pred_q)
+        self.total.assign_add(tf.reduce_sum(ae))
+        self.count.assign_add(tf.cast(tf.size(ae), self.total.dtype))
+
+    def result(self):
+        return tf.math.divide_no_nan(self.total, self.count)
+
+    def reset_state(self):
+        self.total.assign(0.0)
+        self.count.assign(0.0)
+
+
+class QuantileCoverage(tf.keras.metrics.Metric):
+    """
+    Cobertura empírica del intervalo [q_low, q_high]. Para q=(0.25,0.75) la
+    cobertura ideal es 0.50; valores menores indican intervalos demasiado
+    estrechos (overconfidence), mayores indican demasiado anchos.
+    """
+
+    def __init__(self, low_idx: int = 0, high_idx: int = 2,
+                 name: str = "coverage", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.low_idx = int(low_idx)
+        self.high_idx = int(high_idx)
+        self.inside = self.add_weight(name="inside", initializer="zeros")
+        self.count = self.add_weight(name="count", initializer="zeros")
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(tf.reshape(y_true, (-1,)), y_pred.dtype)
+        lo = y_pred[:, self.low_idx]
+        hi = y_pred[:, self.high_idx]
+        inside = tf.cast((y_true >= lo) & (y_true <= hi), self.inside.dtype)
+        self.inside.assign_add(tf.reduce_sum(inside))
+        self.count.assign_add(tf.cast(tf.size(inside), self.inside.dtype))
+
+    def result(self):
+        return tf.math.divide_no_nan(self.inside, self.count)
+
+    def reset_state(self):
+        self.inside.assign(0.0)
+        self.count.assign(0.0)

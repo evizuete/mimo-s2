@@ -40,11 +40,18 @@ class FeatureConfig:
 
     # Labeling
     label_horizon: int = 10  # Horizonte de predicción (5 mins para 1-min data)
-    label_method: str = 'triple_barrier'  # 'adaptive', 'fixed', 'triple_barrier'
+    label_method: str = 'triple_barrier'  # 'adaptive', 'fixed', 'triple_barrier', 'quantile_return'
     label_method_long: str = 'triple_barrier'
     label_method_short: str = 'adaptive'
     tp_barrier: float = 2.5
     sl_barrier: float = 1.5
+
+    # Quantile regression labeling.
+    # Si label_method == 'quantile_return', el target es el forward return
+    # normalizado por ATR (continuo, no binario) y el modelo se entrena con
+    # pinball loss para predecir múltiples cuantiles simultáneamente.
+    quantile_horizon: int = 5  # h en barras para el forward return
+    quantile_levels: tuple = (0.25, 0.50, 0.75)
 
     feature_masks: Optional[Dict[str, Dict[str, bool]]] = None
 

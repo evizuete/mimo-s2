@@ -577,6 +577,23 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--skip-optuna", action="store_true", help="Saltar optimize() y reusar best_params ya existentes.")
     ap.add_argument("--holdout-only", action="store_true", help="No entrena; evalúa artifacts existentes.")
     ap.add_argument("--notes", type=str, default="")
+    ap.add_argument(
+        "--target-type",
+        choices=["binary", "quantile"],
+        default="binary",
+        help=(
+            "Tipo de target: 'binary' (triple-barrier, default) o 'quantile' "
+            "(regresión cuantílica sobre forward return / ATR con pinball loss)."
+        ),
+    )
+    ap.add_argument(
+        "--quantile-h", type=int, default=5,
+        help="Horizonte (en barras) del forward return en modo target-type=quantile.",
+    )
+    ap.add_argument(
+        "--quantiles", type=str, default="0.25,0.50,0.75",
+        help="Lista CSV de cuantiles a predecir en modo target-type=quantile.",
+    )
     return ap.parse_args()
 
 
@@ -1030,7 +1047,15 @@ def install_regime_weight_patch(regime_weights_by_side: Dict[str, Dict[str, Any]
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def build_trainer(release: str, label_horizon_long: int, label_horizon_short: int, train_dir: Path) -> OptunaOOFTrainer:
+def build_trainer(
+    release: str,
+    label_horizon_long: int,
+    label_horizon_short: int,
+    train_dir: Path,
+    target_type: str = "binary",
+    quantile_h: int = 5,
+    quantile_levels: tuple = (0.25, 0.50, 0.75),
+) -> OptunaOOFTrainer:
     general = Config(
         release=release,
         use_oof=True,
@@ -1041,20 +1066,28 @@ def build_trainer(release: str, label_horizon_long: int, label_horizon_short: in
 
     barriers = _get_barriers_for_release(release)
 
+    # En modo quantile usamos label_method='quantile_return' y se ignoran los
+    # barriers (los barriers solo aplican al triple-barrier binario). El
+    # ranking_loss tampoco aplica conceptualmente — la cabeza es regresión.
+    is_quantile = target_type == "quantile"
+    label_method_active = "quantile_return" if is_quantile else "triple_barrier"
+
     trainer = OptunaOOFTrainer(
         general_config=general,
         feature_config=FeatureConfig(
             ema_periods=[9, 21, 50],
-            label_method="triple_barrier",
+            label_method=label_method_active,
             label_horizon=max(label_horizon_long, label_horizon_short),
             tp_barrier=barriers["tp_base"],
             sl_barrier=barriers["sl_base"],
-            label_method_long="triple_barrier",
-            regime_barriers_long=barriers["regime_barriers_long"],
-            label_method_short="triple_barrier",
-            regime_barriers_short=barriers["regime_barriers_short"],
+            label_method_long=label_method_active,
+            regime_barriers_long=None if is_quantile else barriers["regime_barriers_long"],
+            label_method_short=label_method_active,
+            regime_barriers_short=None if is_quantile else barriers["regime_barriers_short"],
             tp_barrier_short=None,
             sl_barrier_short=None,
+            quantile_horizon=int(quantile_h),
+            quantile_levels=tuple(quantile_levels),
             feature_masks={
                 "long": {"ema_bull": True, "rsi_oversold": True, "macd_positive": True},
                 "short": {"ema_bear": True, "rsi_overbought": True, "macd_negative": True},
@@ -1067,7 +1100,9 @@ def build_trainer(release: str, label_horizon_long: int, label_horizon_short: in
             epochs=90,
             patience=12,
             use_hierarchical_fusion=True,
-            ranking_loss_weight=0.2,
+            ranking_loss_weight=0.0 if is_quantile else 0.2,
+            target_type=target_type,
+            quantile_levels=tuple(quantile_levels),
         ),
         out_dir=str(train_dir),
         optuna_db="mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db",
@@ -1174,17 +1209,33 @@ def run_side(
         free_memory()
 
     print(f"\n[HOLDOUT] Evaluando {side.upper()}...")
+    is_quantile_mode = (
+        getattr(trainer.model_config, "target_type", "binary") == "quantile"
+    )
     with holdout_eval_context():
-        holdout_report = {
-            "static": trainer.evaluate_holdout(artifacts, df_hold, side=side),
-            "walkforward": trainer.evaluate_holdout_walkforward_fast(
-                artifacts,
-                df_hold,
-                side=side,
-                inference_batch_size=64,
-                return_predictions=True,
-            ),
-        }
+        if is_quantile_mode:
+            # En modo quantile el walkforward eval no aplica (las métricas
+            # binarias auc_pr/precision sobre las que decide la policy no
+            # tienen sentido sobre cuantiles). Forzamos policy='static'
+            # reusando la evaluación static como walkforward para que el
+            # resto del flujo (choose_inference_policy, persist_*) funcione
+            # sin cambios.
+            static_eval = trainer.evaluate_holdout(artifacts, df_hold, side=side)
+            holdout_report = {
+                "static": static_eval,
+                "walkforward": dict(static_eval),  # alias — fuerza static via decisión
+            }
+        else:
+            holdout_report = {
+                "static": trainer.evaluate_holdout(artifacts, df_hold, side=side),
+                "walkforward": trainer.evaluate_holdout_walkforward_fast(
+                    artifacts,
+                    df_hold,
+                    side=side,
+                    inference_batch_size=64,
+                    return_predictions=True,
+                ),
+            }
 
     holdout_preds_path = train_dir / "data" / f"holdout_predictions_{release}_{side}.parquet"
     Helper.save_holdout_predictions(holdout_report, holdout_preds_path, side=side)
@@ -1337,7 +1388,24 @@ def main() -> None:
     df_hold = df_rates[df_rates.time >= holdout_from].copy()
     print(f"   Train: {len(df_train):,} | Holdout: {len(df_hold):,}")
 
-    trainer = build_trainer(args.release, label_h_long, label_h_short, train_dir)
+    quantile_levels_parsed = tuple(
+        float(x) for x in str(args.quantiles).split(",") if x.strip()
+    )
+    if args.target_type == "quantile" and len(quantile_levels_parsed) < 2:
+        raise ValueError(
+            f"--target-type=quantile requiere al menos 2 cuantiles. "
+            f"Recibido: {quantile_levels_parsed}"
+        )
+
+    trainer = build_trainer(
+        args.release,
+        label_h_long,
+        label_h_short,
+        train_dir,
+        target_type=args.target_type,
+        quantile_h=args.quantile_h,
+        quantile_levels=quantile_levels_parsed,
+    )
 
     combined_report = {
         "release": args.release,

@@ -59,6 +59,8 @@ class LabelGenerator:
             df = self._fixed_labels(df, side)
         elif self.config.label_method == 'triple_barrier':
             df = self._triple_barrier_labels(df, side)
+        elif self.config.label_method == 'quantile_return':
+            df = self._quantile_return_labels(df, side)
         else:
             raise ValueError(f"Método {self.config.label_method} no reconocido")
 
@@ -426,4 +428,36 @@ class LabelGenerator:
                 signal[idx] = partial[idx]
 
         out['signal'] = signal
+        return out
+
+    def _quantile_return_labels(self, df: pd.DataFrame, side: str) -> pd.DataFrame:
+        """
+        Target continuo: forward return normalizado por ATR.
+
+            target = (close[t+h] - close[t]) / atr[t]   (LONG)
+            target = (close[t] - close[t+h]) / atr[t]   (SHORT)
+
+        A diferencia de triple_barrier (binario), 'signal' aquí es float32
+        en unidades de ATR (típicamente -3..+3). El modelo se entrena con
+        pinball loss y predice múltiples cuantiles en lugar de una probabilidad.
+
+        Las últimas `quantile_horizon` filas no tienen futuro suficiente y se
+        marcan con NaN; el pipeline downstream filtra NaN antes de entrenar.
+        """
+        h = int(self.config.quantile_horizon)
+        out = df.copy()
+        close = out['close'].values.astype(np.float64)
+        atr = out['atr'].values.astype(np.float64)
+
+        fwd_close = np.roll(close, -h).astype(np.float64)
+        # Las últimas h filas no tienen futuro: marcar NaN
+        fwd_close[-h:] = np.nan
+
+        atr_safe = np.maximum(atr, 1e-10)
+        if side == 'long':
+            ret = (fwd_close - close) / atr_safe
+        else:
+            ret = (close - fwd_close) / atr_safe
+
+        out['signal'] = ret.astype(np.float32)
         return out
