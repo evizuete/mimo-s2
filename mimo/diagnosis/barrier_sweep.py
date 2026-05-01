@@ -47,10 +47,15 @@ SIDES = ["long", "short"]
 
 
 @jit(nopython=True, cache=True)
-def triple_barrier_outcomes(close, high, low, atr, horizon, tp_mult, sl_mult, side_is_long):
+def triple_barrier_outcomes(close, high, low, atr, horizon, tp_mult, sl_mult,
+                            side_is_long, tie_break_tp_first):
     """
     Como triple_barrier_fixed_numba pero distingue TIMEOUT de SL.
     Devuelve outcome[i] in {1: TP first, -1: SL first, 0: timeout, 99: skip (atr inv)}.
+
+    tie_break_tp_first: si TP y SL se tocan en la misma vela (ambigüedad
+    intra-bar), True asume TP primero (optimista), False asume SL primero
+    (pesimista, estándar para backtesting honesto).
     """
     n = len(close)
     outcome = np.full(n, 99, dtype=np.int8)
@@ -87,7 +92,14 @@ def triple_barrier_outcomes(close, high, low, atr, horizon, tp_mult, sl_mult, si
             if hit_tp != -1 and hit_sl != -1:
                 break
 
-        if hit_tp != -1 and (hit_sl == -1 or hit_tp <= hit_sl):
+        if hit_tp != -1 and hit_sl != -1:
+            if hit_tp < hit_sl:
+                outcome[i] = 1
+            elif hit_sl < hit_tp:
+                outcome[i] = -1
+            else:
+                outcome[i] = 1 if tie_break_tp_first else -1
+        elif hit_tp != -1:
             outcome[i] = 1
         elif hit_sl != -1:
             outcome[i] = -1
@@ -113,6 +125,17 @@ def parse_args() -> argparse.Namespace:
                     help="Lift asumido del modelo en operating region (default 1.75 ≈ LONG h=5).")
     ap.add_argument("--top-n", type=int, default=15)
     ap.add_argument("--per-state", action="store_true")
+    ap.add_argument("--base-tf", default=None,
+                    help="Si se pasa, resamplea OHLC al timeframe indicado "
+                         "(e.g. '5min', '15min') y recomputa ATR sobre las "
+                         "velas resampleadas. Por defecto opera al tf nativo.")
+    ap.add_argument("--tie-break", choices=["tp_first", "sl_first"],
+                    default="sl_first",
+                    help="Cuando TP y SL se tocan en la misma vela, qué barrier "
+                         "se asume primero. 'sl_first' = pesimista (default, "
+                         "honest backtesting). 'tp_first' = optimista.")
+    ap.add_argument("--atr-period", type=int, default=14,
+                    help="Periodo del ATR cuando se computa o recomputa.")
     ap.add_argument("--out", default="barrier_sweep_results.csv")
     return ap.parse_args()
 
@@ -144,6 +167,25 @@ def add_state_to_df(df: pd.DataFrame) -> pd.DataFrame:
     return df_state
 
 
+def resample_ohlc(df: pd.DataFrame, base_tf: str) -> pd.DataFrame:
+    """Resamplea OHLC al timeframe indicado. Drop atr — se recomputa después."""
+    agg = {"high": "max", "low": "min", "close": "last"}
+    if "open" in df.columns:
+        agg["open"] = "first"
+    for vcol in ("tick_volume", "volume", "real_volume"):
+        if vcol in df.columns:
+            agg[vcol] = "sum"
+
+    df_r = (
+        df.set_index("time")
+          .resample(base_tf, label="right", closed="right")
+          .agg(agg)
+          .dropna(subset=["close"])
+          .reset_index()
+    )
+    return df_r
+
+
 def load_rates(args: argparse.Namespace) -> pd.DataFrame:
     if args.rates_parquet:
         print(f"[load] reading parquet {args.rates_parquet}")
@@ -167,9 +209,15 @@ def load_rates(args: argparse.Namespace) -> pd.DataFrame:
     if missing:
         raise ValueError(f"faltan columnas requeridas: {missing}")
 
-    if "atr" not in df.columns:
-        print("[load] atr no encontrada — computando ATR(14)")
-        df["atr"] = compute_atr(df, period=14)
+    if args.base_tf:
+        n_before = len(df)
+        df = resample_ohlc(df, args.base_tf)
+        print(f"[resample] {n_before:,} → {len(df):,} velas a base_tf={args.base_tf}")
+        df["atr"] = compute_atr(df, period=args.atr_period)
+        print(f"[resample] ATR({args.atr_period}) recomputado sobre velas {args.base_tf}")
+    elif "atr" not in df.columns:
+        print(f"[load] atr no encontrada — computando ATR({args.atr_period})")
+        df["atr"] = compute_atr(df, period=args.atr_period)
 
     return df
 
@@ -211,7 +259,8 @@ def aggregate_outcome(outcome: np.ndarray) -> dict:
 
 def sweep(df: pd.DataFrame, horizons: List[int], tp_mults: List[float],
           sl_mults: List[float], min_sl: float,
-          min_ratio: float, max_ratio: float) -> pd.DataFrame:
+          min_ratio: float, max_ratio: float,
+          tie_break_tp_first: bool) -> pd.DataFrame:
     close = df["close"].to_numpy(np.float64)
     high = df["high"].to_numpy(np.float64)
     low = df["low"].to_numpy(np.float64)
@@ -230,10 +279,12 @@ def sweep(df: pd.DataFrame, horizons: List[int], tp_mults: List[float],
                         continue
                     configs.append((side, int(h), float(tp), float(sl)))
 
-    print(f"[sweep] {len(configs)} configs en {len(close):,} filas")
+    print(f"[sweep] {len(configs)} configs en {len(close):,} filas "
+          f"(tie_break={'tp_first' if tie_break_tp_first else 'sl_first'})")
     for idx, (side, h, tp, sl) in enumerate(configs, 1):
         is_long = side == "long"
-        outcome = triple_barrier_outcomes(close, high, low, atr, h, tp, sl, is_long)
+        outcome = triple_barrier_outcomes(close, high, low, atr, h, tp, sl,
+                                          is_long, tie_break_tp_first)
         agg = aggregate_outcome(outcome)
         rows.append({
             "side": side, "h": h, "tp": tp, "sl": sl,
@@ -269,6 +320,7 @@ def add_economic_metrics(df: pd.DataFrame, assumed_lift: float) -> pd.DataFrame:
 
 
 def per_state_for_top(df: pd.DataFrame, top_configs: pd.DataFrame,
+                      tie_break_tp_first: bool,
                       min_n: int = 200) -> pd.DataFrame:
     if "state" not in df.columns:
         print("[per-state] columna 'state' no existe en rates — skip")
@@ -285,7 +337,8 @@ def per_state_for_top(df: pd.DataFrame, top_configs: pd.DataFrame,
         is_long = c["side"] == "long"
         h = int(c["h"])
         outcome = triple_barrier_outcomes(close, high, low, atr, h, float(c["tp"]),
-                                          float(c["sl"]), is_long)
+                                          float(c["sl"]), is_long,
+                                          tie_break_tp_first)
         valid = outcome != 99
         for s in np.unique(states):
             mask = valid & (states == s)
@@ -339,8 +392,14 @@ def main() -> None:
     if args.per_state and "state" not in df.columns:
         df = add_state_to_df(df)
 
+    tie_break_tp_first = args.tie_break == "tp_first"
+
     raw = sweep(df, horizons, tp_mults, sl_mults, args.min_sl,
-                args.min_tp_sl_ratio, args.max_tp_sl_ratio)
+                args.min_tp_sl_ratio, args.max_tp_sl_ratio,
+                tie_break_tp_first)
+    raw["tie_break"] = args.tie_break
+    if args.base_tf:
+        raw["base_tf"] = args.base_tf
     out = add_economic_metrics(raw, args.assumed_lift)
 
     print("\n" + "=" * 90)
@@ -366,7 +425,7 @@ def main() -> None:
                .groupby(["side", "h"], as_index=False, group_keys=False)
                .head(3)
         )
-        ps = per_state_for_top(df, top_for_states)
+        ps = per_state_for_top(df, top_for_states, tie_break_tp_first)
         if not ps.empty:
             print(ps.round(4).to_string(index=False))
             ps_path = Path(args.out).with_name(Path(args.out).stem + "_per_state.csv")
