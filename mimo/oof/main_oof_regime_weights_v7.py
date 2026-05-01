@@ -594,6 +594,16 @@ def parse_args() -> argparse.Namespace:
         "--quantiles", type=str, default="0.25,0.50,0.75",
         help="Lista CSV de cuantiles a predecir en modo target-type=quantile.",
     )
+    ap.add_argument(
+        "--base-tf", default="1min",
+        help=(
+            "Resolución base de las velas. Default '1min' (sin resample). "
+            "Valores típicos: '5min', '15min', '1h'. Cambia el SNR del input "
+            "y reduce el número de samples; ajusta consecuentemente "
+            "label-horizon-* y, si quieres, los seq_len_short/seq_len_long "
+            "(no expuestos por CLI; defaults 64/256 son adecuados a 5min)."
+        ),
+    )
     return ap.parse_args()
 
 
@@ -1365,8 +1375,16 @@ def main() -> None:
 
     print("\n📂 Cargando datos...")
     db = Database()
-    dm = DataManager.from_database_historical_2(db, from_date=optuna_from, to_date=holdout_to)
+    # base_tf=='1min' → no resample (comportamiento original).
+    # base_tf=='5min'/'15min'/'1h' → resample en el loader; el resto del
+    # pipeline trabaja sobre la nueva resolución sin cambios adicionales.
+    resample_arg = None if str(args.base_tf).lower() in ("1min", "1m", "none", "") else args.base_tf
+    dm = DataManager.from_database_historical_2(
+        db, from_date=optuna_from, to_date=holdout_to, resample=resample_arg
+    )
     df_rates = dm.df
+    if resample_arg is not None:
+        print(f"   Base TF: {args.base_tf} ({len(df_rates):,} barras tras resample)")
 
     # FIX v5: garantizar que df_rates['time'] es datetime ANTES de cualquier
     # comparación o split. Si DataManager devuelve 'time' como string en algún
