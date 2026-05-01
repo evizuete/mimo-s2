@@ -629,6 +629,27 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.75, "sl": 1.25},
         },
     },
+    # 200700: barriers idénticas a 200602 (binario, asimétrico tp=2.5/sl=1.0,
+    # BE=0.286). La novedad está en las features: el FeatureBuilder ahora
+    # incluye 4 features de volumen (vol_z_1h, vol_pct_1h, vol_spike,
+    # vol_trend_1h) como context inputs. Test A/B contra 200602 para medir
+    # el lift del volumen sobre AUC-ROC y precisión.
+    "200700": {
+        "tp_base": 2.5,
+        "sl_base": 1.00,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.50, "sl": 1.00},
+            "ranging":  {"tp": 2.25, "sl": 1.00},
+            "low_vol":  {"tp": 2.25, "sl": 1.00},
+            "high_vol": {"tp": 2.75, "sl": 1.25},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.50, "sl": 1.00},
+            "ranging":  {"tp": 2.25, "sl": 1.00},
+            "low_vol":  {"tp": 2.25, "sl": 1.00},
+            "high_vol": {"tp": 2.75, "sl": 1.25},
+        },
+    },
 }
 
 

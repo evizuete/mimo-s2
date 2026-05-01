@@ -152,6 +152,9 @@ class FeatureEngineer:
         # 3. Microestructura (sin volumen)
         df = self._add_microstructure(df)
 
+        # 3b. Volumen (ticks_volume → z, pct, spike, trend)
+        df = self._add_volume_features(df)
+
         # 4. Patrones de velas
         df = self._add_candle_patterns(df)
 
@@ -481,6 +484,46 @@ class FeatureEngineer:
         df["consecutive_downs"] = self._consecutive_runs(down.to_numpy(dtype=bool))
 
 
+
+        return df
+
+    def _add_volume_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Volume-derived context features. Solo se computan si existe la columna
+        'ticks_volume' (presente en histórico y MT5 live tras DataManager).
+
+        Cuatro features escala-invariantes, todas sobre log(1+volume):
+          vol_z_1h      z-score rolling 1h
+          vol_pct_1h    percentile rank rolling 1h (robusto a colas)
+          vol_spike     desviación de la EMA(12) (aceleración local)
+          vol_trend_1h  pendiente normalizada en 1h
+
+        Si la columna no existe, se rellenan con valores neutros para
+        retro-compatibilidad con datasets sin volumen.
+        """
+        n_per_h = 12  # 12 bars ≈ 1h sobre base 5min; semántica análoga en otras tf.
+        if "ticks_volume" not in df.columns:
+            df["vol_z_1h"] = 0.0
+            df["vol_pct_1h"] = 0.5
+            df["vol_spike"] = 0.0
+            df["vol_trend_1h"] = 0.0
+            return df
+
+        v = df["ticks_volume"].astype(float).clip(lower=0)
+        log_v = np.log1p(v)
+
+        mp = max(8, n_per_h // 2)
+        mu_1h = log_v.rolling(n_per_h, min_periods=mp).mean()
+        sd_1h = log_v.rolling(n_per_h, min_periods=mp).std()
+        df["vol_z_1h"] = ((log_v - mu_1h) / sd_1h.replace(0, np.nan)).clip(-3, 3)
+
+        df["vol_pct_1h"] = (
+            log_v.rolling(n_per_h, min_periods=mp).rank(pct=True)
+        )
+
+        df["vol_spike"] = (log_v - log_v.ewm(span=12, adjust=False).mean()).clip(-3, 3)
+
+        df["vol_trend_1h"] = (log_v - log_v.shift(n_per_h)) / float(n_per_h)
 
         return df
 
@@ -889,6 +932,8 @@ class FeatureEngineer:
             # Calendario extendido
             'is_month_end', 'is_friday',
             'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour',
+            # Volumen (ticks_volume — magnitud/convicción del movimiento)
+            'vol_z_1h', 'vol_pct_1h', 'vol_spike', 'vol_trend_1h',
         ]
 
         # Features temporales
