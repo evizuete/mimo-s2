@@ -1305,8 +1305,20 @@ def install_regime_weight_patch(regime_weights_by_side: Dict[str, Dict[str, Any]
 
             target_df = df.iloc[-n:].copy()
             states = target_df["state"].astype(str)
-            labels_arr = np.asarray(seq["labels"], dtype=np.int32)
-            base_weights = np.asarray(seq["weights"], dtype=np.float32)
+            labels_arr_full = np.asarray(seq["labels"])
+            weights_full = np.asarray(seq["weights"], dtype=np.float32)
+
+            # Multitask: labels y weights vienen (N, 2) — col 0 = long, col 1 = short.
+            # Aplicamos regime weights solo a la columna del lado actual y
+            # reescribimos preservando la otra columna intacta.
+            is_multitask_seq = (labels_arr_full.ndim == 2 and labels_arr_full.shape[1] == 2)
+            if is_multitask_seq:
+                side_idx = 0 if side == "long" else 1
+                labels_arr = labels_arr_full[:, side_idx].astype(np.int32)
+                base_weights = weights_full[:, side_idx].astype(np.float32)
+            else:
+                labels_arr = labels_arr_full.astype(np.int32)
+                base_weights = weights_full.astype(np.float32)
 
             if len(base_weights) != n:
                 raise ValueError(
@@ -1323,7 +1335,12 @@ def install_regime_weight_patch(regime_weights_by_side: Dict[str, Dict[str, Any]
 
             seq[f"weights_base_{side}"] = base_weights
             seq[f"regime_weights_{side}"] = regime_weights_effective
-            seq["weights"] = final_weights
+            if is_multitask_seq:
+                new_weights = weights_full.copy()
+                new_weights[:, side_idx] = final_weights
+                seq["weights"] = new_weights
+            else:
+                seq["weights"] = final_weights
 
             by_state = pd.DataFrame(auto_audit.get("state_summary", []))
             if by_state.empty:
