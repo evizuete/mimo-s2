@@ -43,11 +43,14 @@ def save_json(obj: Dict[str, Any], path: str):
 
 
 def _pipeline_side(side: str) -> str:
-    """Para multitask el pipeline usa 'long' como vista canónica de features
-    (selección de columnas + scalers seq_*). Las paths de artifacts y los
-    nombres de Optuna study siguen usando el side literal del trainer
-    ('multitask') — esta traducción aplica solo al hablar con el pipeline."""
-    return 'long' if side == 'multitask' else side
+    """Para multitask el pipeline usa 'both' como vista canónica de features:
+    feature_engineer.set_side('both') desactiva el feature_mask side-specific
+    y devuelve la UNIÓN de columnas long+short. El trunk compartido ve a la
+    vez ema_bull/ema_bear, rsi_oversold/overbought, macd_positive/negative.
+    Las paths de artifacts y los nombres de Optuna study siguen usando el
+    side literal del trainer ('multitask') — esta traducción aplica solo al
+    hablar con el pipeline."""
+    return 'both' if side == 'multitask' else side
 
 
 def _extract_feature_schema(pipeline: DataPipeline, side: Optional[str] = None) -> Dict[str, Any]:

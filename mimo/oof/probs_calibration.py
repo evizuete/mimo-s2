@@ -198,10 +198,11 @@ class ProbsCalibration:
             pipeline_fold.is_fitted = False
 
             if pipeline_fold.feature_config.feature_masks is not None:
-                # Multitask usa 'long' como vista canónica para el pipeline
-                # (selección de features). Las paths de artifacts y el
-                # `side` original ('multitask') se siguen propagando aparte.
-                _side = side if side in ("long", "short") else "long"
+                # Multitask usa 'both' como vista canónica para el pipeline:
+                # feature_engineer con side='both' devuelve la UNIÓN de
+                # columnas long+short, así el trunk multitask ve features
+                # direccionales de ambos lados a la vez.
+                _side = side if side in ("long", "short") else "both"
                 sequences = pipeline_fold.create_sequences_by_side(
                     df_train_rows, sides=(_side,), fit_scalers=True, train=True
                 )
@@ -293,8 +294,9 @@ class ProbsCalibration:
             )
 
             # Para multitask el aug_skip_map se construye con la vista
-            # canónica 'long' (el modelo ve LONG features).
-            _aug_side = side if side in ("long", "short") else "long"
+            # 'both' (UNIÓN) — coherente con la unión de features que ve
+            # el modelo en multitask.
+            _aug_side = side if side in ("long", "short") else "both"
             skip_map = _build_aug_skip_map(pipeline_fold, _aug_side)
             X_train_aug = augment_train_batch(
                 X_train,
