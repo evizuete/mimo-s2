@@ -299,6 +299,22 @@ LONG_VARIANTS: Dict[str, Dict[str, Any]] = {
         "VOLATILE": 10.0,
         "LOW_VOL": 1.0,
     },
+    # vol_boost_td_down (LONG): vol_boost + downweight de TREND_DOWN.
+    # Tras 202103 multitask se observó que TREND_DOWN concentraba 25.5% del
+    # holdout con pos_rate 10.9% (vs global 13.7%) — el régimen más grande y
+    # peor para LONG. vol_boost solo tocaba VOLATILE, dejando TREND_DOWN en
+    # 1.0. Aquí se baja a 0.65 para reducir su masa relativa en el loss.
+    "vol_boost_td_down": {
+        "TREND_UP": 1.0,
+        "TREND_DOWN": 0.65,
+        "TRANSITION_UP": 1.0,
+        "TRANSITION_DOWN": 1.0,
+        "BREAKOUT_WAIT_UP": 1.0,
+        "BREAKOUT_WAIT_DOWN": 1.0,
+        "RANGE": 1.0,
+        "VOLATILE": 10.0,
+        "LOW_VOL": 1.0,
+    },
 }
 
 SHORT_VARIANTS: Dict[str, Dict[str, Any]] = {
