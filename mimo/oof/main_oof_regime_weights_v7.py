@@ -1939,20 +1939,27 @@ def _run_side_multitask(
             multitask_side_alias=lado,
         )
 
-        # Walkforward diferido para multitask → forzamos policy='static'
-        # reusando el static como walkforward (mismo truco que quantile).
-        holdout_report = {
-            "static": side_eval,
-            "walkforward": dict(side_eval),
+        # Walk-forward dual no implementado para multitask (ver
+        # OptunaOOFTrainer.evaluate_holdout_walkforward_fast: retorna {} si
+        # target_type=='multitask'). En lugar de fingir una comparación
+        # estático-vs-walkforward con el mismo dict duplicado (lo que hacía
+        # que choose_inference_policy devolviera deltas=0.0 por construcción),
+        # persistimos directamente policy='transform' (static) y omitimos
+        # tanto la comparación como el bloque walkforward del reporte.
+        selected_policy = "transform"
+        decision = {
+            "selected_policy": selected_policy,
+            "selected_mode_label": "static",
+            "is_walkforward_selected": False,
+            "reason": {
+                "note": "walk-forward dual no implementado para multitask; "
+                        "se fija static sin comparación.",
+            },
         }
-        decision = trainer.choose_inference_policy(
-            holdout_report["static"],
-            holdout_report["walkforward"],
-            min_auc_pr_gain=0.005,
-        )
+        holdout_report = {"static": side_eval}
+
         print(f"{lado.upper()} policy:", decision["selected_policy"])
         print(f"{lado.upper()} mode :", decision["selected_mode_label"])
-        print(f"{lado.upper()} reason:", decision["reason"])
 
         persist_info = trainer.persist_selected_inference_policy(
             side=lado,
