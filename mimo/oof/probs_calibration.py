@@ -198,7 +198,10 @@ class ProbsCalibration:
             pipeline_fold.is_fitted = False
 
             if pipeline_fold.feature_config.feature_masks is not None:
-                _side = "long" if side == "long" else "short"
+                # Multitask usa 'long' como vista canónica para el pipeline
+                # (selección de features). Las paths de artifacts y el
+                # `side` original ('multitask') se siguen propagando aparte.
+                _side = side if side in ("long", "short") else "long"
                 sequences = pipeline_fold.create_sequences_by_side(
                     df_train_rows, sides=(_side,), fit_scalers=True, train=True
                 )
@@ -289,7 +292,10 @@ class ProbsCalibration:
                 seed=42 + fold,
             )
 
-            skip_map = _build_aug_skip_map(pipeline_fold, side)
+            # Para multitask el aug_skip_map se construye con la vista
+            # canónica 'long' (el modelo ve LONG features).
+            _aug_side = side if side in ("long", "short") else "long"
+            skip_map = _build_aug_skip_map(pipeline_fold, _aug_side)
             X_train_aug = augment_train_batch(
                 X_train,
                 cfg=aug_cfg,

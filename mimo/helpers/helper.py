@@ -48,11 +48,30 @@ class Helper:
         return model
 
     def load_everything(self, pipeline: DataPipeline):
-        models = {}
-        calibrators = {}
-        for side in ['long', 'short']:
-            models[side] = self.load_model(side)
-            calibrators[side] = self.load_calibrator(side)
+        # Multitask: si existe `model_{release}_multitask.keras` cargamos UN
+        # solo modelo y un calibrador único (dict {'long': ..., 'short': ...}).
+        # Devolvemos models como {'long': model, 'short': model} apuntando a
+        # la misma instancia, y calibradores expandidos por lado.
+        release = self.general_config.release
+        multitask_model_path = Path(f'{self.path}/model_{release}_multitask.keras')
+        multitask_cal_path = Path(f'{self.path}/oof_calibrator_{release}_multitask.joblib')
+
+        if multitask_model_path.exists() and multitask_cal_path.exists():
+            multi_model = load_model(str(multitask_model_path))
+            cal_dict = joblib.load(str(multitask_cal_path))
+            if not isinstance(cal_dict, dict) or 'long' not in cal_dict or 'short' not in cal_dict:
+                raise ValueError(
+                    f"Calibrator multitask inválido en {multitask_cal_path}: "
+                    f"se esperaba dict con keys 'long'/'short'."
+                )
+            models = {'long': multi_model, 'short': multi_model}
+            calibrators = {'long': cal_dict['long'], 'short': cal_dict['short']}
+        else:
+            models = {}
+            calibrators = {}
+            for side in ['long', 'short']:
+                models[side] = self.load_model(side)
+                calibrators[side] = self.load_calibrator(side)
 
         scalers = pipeline.load_scalers(self.path)
         return models, calibrators, scalers

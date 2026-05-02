@@ -64,6 +64,7 @@ def build_calibration_dataset(
     holdout_preds_path: Path,
     out_path: Path,
     side: str,
+    multitask_side_alias: str | None = None,
 ):
     """
     Construye un parquet combinado para análisis de calibración:
@@ -72,6 +73,11 @@ def build_calibration_dataset(
 
     Output columns:
       time, state, signal, oof_proba_raw, oof_proba_cal, side, source
+
+    multitask_side_alias: cuando el OOF parquet es multitask (contiene
+    signal_long/signal_short y oof_proba_{long,short}_{raw,cal}), pasar
+    'long' o 'short' para extraer las columnas específicas del lado y
+    renombrarlas al esquema canónico (signal/oof_proba_raw/oof_proba_cal).
     """
     if not oof_path.exists():
         print(f"⚠️  OOF no encontrado para {side}: {oof_path}")
@@ -83,6 +89,17 @@ def build_calibration_dataset(
 
     df_oof = pd.read_parquet(oof_path).copy()
     df_hold = pd.read_parquet(holdout_preds_path).copy()
+
+    # Multitask: el OOF parquet único trae columnas dual-side. Renombramos las
+    # del lado pedido al esquema canónico antes de filtrar.
+    if multitask_side_alias in ("long", "short"):
+        suf = multitask_side_alias
+        rename_oof = {
+            f"signal_{suf}": "signal",
+            f"oof_proba_{suf}_raw": "oof_proba_raw",
+            f"oof_proba_{suf}_cal": "oof_proba_cal",
+        }
+        df_oof = df_oof.rename(columns=rename_oof)
 
     # Normalizar columnas OOF
     keep_oof = ["time", "state", "signal", "oof_proba_raw", "oof_proba_cal"]
@@ -1285,8 +1302,23 @@ def install_regime_weight_patch(regime_weights_by_side: Dict[str, Dict[str, Any]
 
         global _LAST_AUDIT
 
-        for side in sides:
-            seq = results.get(side)
+        # Multitask: detectamos si la primera seq trae labels (N, 2). En ese
+        # caso iteramos sobre AMBOS lados (long, short) aunque el pipeline
+        # solo nos haya devuelto una seq canónica (sides=('long',)). Cada
+        # iteración aplica el mapa de regime weights del lado correspondiente
+        # sobre la columna de seq['weights'][:, idx].
+        first_side = sides[0] if sides else None
+        first_seq = results.get(first_side) if first_side is not None else None
+        is_multitask_run = bool(
+            first_seq
+            and first_seq.get("labels") is not None
+            and np.asarray(first_seq["labels"]).ndim == 2
+            and np.asarray(first_seq["labels"]).shape[1] == 2
+        )
+        iter_sides = ("long", "short") if is_multitask_run else sides
+
+        for side in iter_sides:
+            seq = results.get(first_side) if is_multitask_run else results.get(side)
             weights_map = regime_weights_by_side.get(side)
             if not seq or not weights_map:
                 continue
@@ -1539,6 +1571,166 @@ def load_existing_artifacts(train_dir: Path, release: str, side: str) -> Trainer
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _run_side_multitask(
+    trainer: OptunaOOFTrainer,
+    df_train: pd.DataFrame,
+    df_hold: pd.DataFrame,
+    train_dir: Path,
+    release: str,
+    holdout_only: bool,
+    skip_optuna: bool,
+) -> Dict[str, Any]:
+    """
+    Camino multitask: una sola pasada de entrenamiento + una sola evaluación
+    de holdout que devuelve dual dict. Genera artifacts únicos
+    (model_..._multitask.keras, oof_calibrator_..._multitask.joblib,
+    oof_..._multitask.parquet) y luego derivar parquets/policy/report por
+    lado (long, short) a partir de la misma evaluación.
+    """
+    canonical_side = "multitask"
+
+    if holdout_only:
+        print(f"\n[HOLDOUT-ONLY] Cargando artifacts MULTITASK existentes desde train_dir...")
+        artifacts = load_existing_artifacts(train_dir, release, canonical_side)
+    else:
+        if skip_optuna:
+            print(f"\n⏭️  [MULTITASK] Saltando optimize(); cargando best_params desde Optuna DB...")
+            try:
+                trainer._load_best_from_storage(side=canonical_side)
+            except Exception as e:
+                raise RuntimeError(
+                    f"--skip-optuna requiere un Optuna study previo para multitask. "
+                    f"Error cargando: {type(e).__name__}: {e}"
+                )
+        else:
+            print(f"\n[TUNING] Fine tuning MULTITASK model con regime weights duales...")
+            trainer.optimize(
+                df_rates=df_train,
+                side=canonical_side,
+                n_trials=None,
+                use_grid=True,
+                grid_space=_get_grid_for_release(release),
+                load_if_exists=True,
+            )
+            free_memory()
+
+        print(f"\n[DEPLOY] Preparing production MULTITASK model based on TRAIN period")
+        artifacts = trainer.prepare_production_model(
+            df_rates=df_train,
+            side=canonical_side,
+            reuse_best_trial_oof=True,
+        )
+        free_memory()
+
+    print(f"\n[HOLDOUT] Evaluando MULTITASK (long+short en una sola pasada)...")
+    with holdout_eval_context():
+        dual_eval = trainer.evaluate_holdout(artifacts, df_hold, side=canonical_side)
+
+    if not isinstance(dual_eval, dict) or "long" not in dual_eval or "short" not in dual_eval:
+        raise RuntimeError(
+            f"multitask evaluate_holdout debe devolver dict con 'long' y 'short'. "
+            f"Recibido: {type(dual_eval).__name__}"
+        )
+
+    oof_path = Path(artifacts.oof_df_path)
+    decisions: Dict[str, Any] = {}
+    persist_infos: Dict[str, Any] = {}
+    report_paths: Dict[str, str] = {}
+
+    for lado in ("long", "short"):
+        side_eval = dual_eval[lado]
+        side_arrays = side_eval.get("_arrays", {}) if isinstance(side_eval, dict) else {}
+
+        holdout_preds_path = train_dir / "data" / f"holdout_predictions_{release}_{lado}.parquet"
+        if side_arrays:
+            multi_preds = {
+                "time": side_arrays.get("time"),
+                "state": side_arrays.get("state"),
+                "y_true": side_arrays.get("y_true"),
+                "y_pred_raw": side_arrays.get("p_raw"),
+                "y_pred_cal": side_arrays.get("p_cal"),
+            }
+            faux_report = {"walkforward": {"predictions": multi_preds}}
+            Helper.save_holdout_predictions(faux_report, holdout_preds_path, side=lado)
+        else:
+            print(f"⚠️  multitask: side_eval {lado} sin _arrays; no se guarda parquet.")
+
+        calibration_path = train_dir / "data" / f"calibration_dataset_{release}_{lado}.parquet"
+        build_calibration_dataset(
+            oof_path=oof_path,
+            holdout_preds_path=holdout_preds_path,
+            out_path=calibration_path,
+            side=lado,
+            multitask_side_alias=lado,
+        )
+
+        # Walkforward diferido para multitask → forzamos policy='static'
+        # reusando el static como walkforward (mismo truco que quantile).
+        holdout_report = {
+            "static": side_eval,
+            "walkforward": dict(side_eval),
+        }
+        decision = trainer.choose_inference_policy(
+            holdout_report["static"],
+            holdout_report["walkforward"],
+            min_auc_pr_gain=0.005,
+        )
+        print(f"{lado.upper()} policy:", decision["selected_policy"])
+        print(f"{lado.upper()} mode :", decision["selected_mode_label"])
+        print(f"{lado.upper()} reason:", decision["reason"])
+
+        persist_info = trainer.persist_selected_inference_policy(
+            side=lado,
+            selected_policy=decision["selected_policy"],
+            decision=decision,
+        )
+
+        policy_data_path = train_dir / "data" / f"inference_policy_{release}_{lado}.json"
+        dump_json_safe(
+            {
+                "release": release,
+                "side": lado,
+                "selected_policy": decision["selected_policy"],
+                "selected_mode_label": decision["selected_mode_label"],
+                "is_walkforward_selected": decision["is_walkforward_selected"],
+                "reason": decision["reason"],
+                "persist_info": persist_info,
+            },
+            policy_data_path,
+        )
+        print(f"✅ Policy final {lado.upper()} guardada en: {policy_data_path}")
+
+        report = {
+            "release": release,
+            "side": lado,
+            "audit": _LAST_AUDIT.get(lado, {}),
+            "holdout_policy": decision,
+            "holdout_report": holdout_report,
+            "persisted_policy": persist_info,
+        }
+        report_path = train_dir / "reports" / f"{lado}_regime_weight_report_{release}.json"
+        dump_json_safe(report, report_path)
+        print(f"✅ Reporte {lado.upper()} guardado: {report_path}")
+
+        if _LAST_AUDIT.get(lado, {}).get("state_summary"):
+            df_audit = pd.DataFrame(_LAST_AUDIT[lado]["state_summary"])
+            audit_csv = train_dir / "reports" / f"{lado}_regime_weight_state_summary_{release}.csv"
+            df_audit.to_csv(audit_csv, index=False)
+            print(f"✅ Auditoría por estado {lado.upper()} guardada: {audit_csv}")
+
+        decisions[lado] = decision
+        persist_infos[lado] = persist_info
+        report_paths[lado] = str(report_path)
+
+    return {
+        "artifacts": artifacts,
+        "holdout_report": {"long": dual_eval["long"], "short": dual_eval["short"]},
+        "decision": decisions,
+        "persisted_policy": persist_infos,
+        "report_path": report_paths,
+    }
+
+
 def run_side(
     trainer: OptunaOOFTrainer,
     side: str,
@@ -1549,6 +1741,17 @@ def run_side(
     holdout_only: bool,
     skip_optuna: bool,
 ) -> Dict[str, Any]:
+    if side == "multitask":
+        return _run_side_multitask(
+            trainer=trainer,
+            df_train=df_train,
+            df_hold=df_hold,
+            train_dir=train_dir,
+            release=release,
+            holdout_only=holdout_only,
+            skip_optuna=skip_optuna,
+        )
+
     if holdout_only:
         print(f"\n[HOLDOUT-ONLY] Cargando artifacts {side.upper()} existentes desde train_dir...")
         artifacts = load_existing_artifacts(train_dir, release, side)
@@ -1589,23 +1792,8 @@ def run_side(
     is_quantile_mode = (
         getattr(trainer.base_model_config, "target_type", "binary") == "quantile"
     )
-    is_multitask_mode = (
-        getattr(trainer.base_model_config, "target_type", "binary") == "multitask"
-    )
     with holdout_eval_context():
-        if is_multitask_mode:
-            # Multitask: una sola pasada por el modelo produce predicciones para
-            # ambos lados (signal_long + signal_short). evaluate_holdout devuelve
-            # un dict {'long': out_l, 'short': out_s}; cogemos el lado actual.
-            # Walkforward queda diferido a commit 2 → forzamos policy='static'
-            # reusando el static como walkforward (mismo truco que quantile).
-            dual_eval = trainer.evaluate_holdout(artifacts, df_hold, side=side)
-            side_eval = dual_eval.get(side, dual_eval) if isinstance(dual_eval, dict) and side in dual_eval else dual_eval
-            holdout_report = {
-                "static": side_eval,
-                "walkforward": dict(side_eval),
-            }
-        elif is_quantile_mode:
+        if is_quantile_mode:
             # En modo quantile el walkforward eval no aplica (las métricas
             # binarias auc_pr/precision sobre las que decide la policy no
             # tienen sentido sobre cuantiles). Forzamos policy='static'
@@ -1630,26 +1818,7 @@ def run_side(
             }
 
     holdout_preds_path = train_dir / "data" / f"holdout_predictions_{release}_{side}.parquet"
-    if is_multitask_mode:
-        # En multitask evaluate_holdout no rellena 'walkforward.predictions'
-        # (ese campo lo construye el walkforward fast). Construimos el parquet
-        # a partir de _arrays para mantener el contrato downstream
-        # (build_calibration_dataset espera el parquet de holdout preds).
-        side_arrays = side_eval.get("_arrays", {}) if isinstance(side_eval, dict) else {}
-        if side_arrays:
-            multi_preds = {
-                "time": side_arrays.get("time"),
-                "state": side_arrays.get("state"),
-                "y_true": side_arrays.get("y_true"),
-                "y_pred_raw": side_arrays.get("p_raw"),
-                "y_pred_cal": side_arrays.get("p_cal"),
-            }
-            faux_report = {"walkforward": {"predictions": multi_preds}}
-            Helper.save_holdout_predictions(faux_report, holdout_preds_path, side=side)
-        else:
-            print(f"⚠️  multitask: side_eval sin _arrays para {side}; no se guarda parquet.")
-    else:
-        Helper.save_holdout_predictions(holdout_report, holdout_preds_path, side=side)
+    Helper.save_holdout_predictions(holdout_report, holdout_preds_path, side=side)
 
     calibration_path = train_dir / "data" / f"calibration_dataset_{release}_{side}.parquet"
     oof_path = Path(artifacts.oof_df_path)
@@ -1840,7 +2009,13 @@ def main() -> None:
         "notes": args.notes,
     }
 
-    requested_sides = [args.side] if args.side in ("long", "short") else ["long", "short"]
+    # Multitask: una sola iteración entrena el modelo dual y genera artifacts
+    # únicos (model_..._multitask.keras, oof_calibrator_..._multitask.joblib)
+    # con parquets/policy/report derivados por lado dentro de _run_side_multitask.
+    if args.target_type == "multitask":
+        requested_sides = ["multitask"]
+    else:
+        requested_sides = [args.side] if args.side in ("long", "short") else ["long", "short"]
 
     for side in requested_sides:
         result = run_side(
@@ -1853,12 +2028,24 @@ def main() -> None:
             holdout_only=args.holdout_only,
             skip_optuna=args.skip_optuna,
         )
-        combined_report["results"][side] = {
-            "audit": _LAST_AUDIT.get(side, {}),
-            "decision": result["decision"],
-            "persisted_policy": result.get("persisted_policy", {}),
-            "report_path": result["report_path"],
-        }
+        if side == "multitask":
+            # _run_side_multitask devuelve dict por lado para decision /
+            # persisted_policy / report_path. Lo expandimos en combined_report
+            # para mantener la estructura "results.long" / "results.short".
+            for lado in ("long", "short"):
+                combined_report["results"][lado] = {
+                    "audit": _LAST_AUDIT.get(lado, {}),
+                    "decision": result["decision"][lado],
+                    "persisted_policy": result.get("persisted_policy", {}).get(lado, {}),
+                    "report_path": result["report_path"][lado],
+                }
+        else:
+            combined_report["results"][side] = {
+                "audit": _LAST_AUDIT.get(side, {}),
+                "decision": result["decision"],
+                "persisted_policy": result.get("persisted_policy", {}),
+                "report_path": result["report_path"],
+            }
         free_memory()
 
     combined_report_path = train_dir / "reports" / f"regime_weight_combined_report_{args.release}.json"

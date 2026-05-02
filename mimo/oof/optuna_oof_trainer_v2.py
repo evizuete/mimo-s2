@@ -42,6 +42,14 @@ def save_json(obj: Dict[str, Any], path: str):
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
+def _pipeline_side(side: str) -> str:
+    """Para multitask el pipeline usa 'long' como vista canónica de features
+    (selección de columnas + scalers seq_*). Las paths de artifacts y los
+    nombres de Optuna study siguen usando el side literal del trainer
+    ('multitask') — esta traducción aplica solo al hablar con el pipeline."""
+    return 'long' if side == 'multitask' else side
+
+
 def _extract_feature_schema(pipeline: DataPipeline, side: Optional[str] = None) -> Dict[str, Any]:
     """Extrae el esquema efectivo de features para un side concreto."""
     out: Dict[str, Any] = {}
@@ -75,11 +83,13 @@ def _snapshot_side_specific_scalers(pipeline: DataPipeline, generic_scaler_path:
         shutil.rmtree(side_dir)
     shutil.copytree(generic_scaler_path, side_dir)
 
+    # Para multitask el feature_schema se extrae con la vista canónica 'long'.
+    fe_side = _pipeline_side(side)
     schema = {
         "release": release,
         "side": side,
         "saved_at": pd.Timestamp.utcnow().isoformat(),
-        "feature_columns": _extract_feature_schema(pipeline, side=side),
+        "feature_columns": _extract_feature_schema(pipeline, side=fe_side),
     }
     save_json(schema, os.path.join(side_dir, "feature_schema.json"))
     print(f"[SCALERS] Snapshot side-specific guardado en {side_dir}")
@@ -293,12 +303,15 @@ class OptunaOOFTrainer:
         )
 
         # 3) Preparar DF + labels según side
-        df_prepared = pipeline.prepare_data(df_rates, labels=True, side=side, set_market_condition=False, ensure_regime=True)
-        pos_rate = float(np.nanmean(df_prepared['signal'], axis=0))
-        print(f'pos_rate: {pos_rate:.4f}')
+        ps = _pipeline_side(side)
+        df_prepared = pipeline.prepare_data(df_rates, labels=True, side=ps, set_market_condition=False, ensure_regime=True)
+        if 'signal' in df_prepared.columns:
+            pos_rate = float(np.nanmean(df_prepared['signal'], axis=0))
+            print(f'pos_rate: {pos_rate:.4f}')
 
         # 4) OOF + calibración isotónica (tu clase)
-        _cal_temp = self.temperature_long if side == 'long' else self.temperature_short
+        # multitask: temperature_long como canónico; ambos lados usan trunk común.
+        _cal_temp = self.temperature_short if side == 'short' else self.temperature_long
         probs_calibrator = ProbsCalibration(self.general_config, model_config, temperature=_cal_temp)
         df_oof, calibrator, best_epochs = probs_calibrator.generate_oof_predictions(
             df_prepared=df_prepared,
@@ -652,9 +665,9 @@ class OptunaOOFTrainer:
                 regime_config=self.regime_config,
             )
 
-            df_prepared = pipeline_oof.prepare_data(df_rates, labels=True, side=side, set_market_condition=False, ensure_regime=True)
+            df_prepared = pipeline_oof.prepare_data(df_rates, labels=True, side=_pipeline_side(side), set_market_condition=False, ensure_regime=True)
 
-            _cal_temp = self.temperature_long if side == 'long' else self.temperature_short
+            _cal_temp = self.temperature_short if side == 'short' else self.temperature_long
             probs_calibrator = ProbsCalibration(self.general_config, model_config, temperature=_cal_temp)
             df_oof, calibrator, best_epochs = probs_calibrator.generate_oof_predictions(
                 df_prepared=df_prepared,
@@ -783,10 +796,11 @@ class OptunaOOFTrainer:
             regime_config=self.regime_config,
         )
 
-        df_prepared_prod = pipeline_prod.prepare_data(df_rates, labels=True, side=side, set_market_condition=False, ensure_regime=True)
+        ps = _pipeline_side(side)
+        df_prepared_prod = pipeline_prod.prepare_data(df_rates, labels=True, side=ps, set_market_condition=False, ensure_regime=True)
         if pipeline_prod.feature_config.feature_masks is not None:
-            sequences_all = pipeline_prod.create_sequences_by_side(df_prepared_prod, sides=(side,), fit_scalers=True, train=True)
-            data_all = sequences_all[side]
+            sequences_all = pipeline_prod.create_sequences_by_side(df_prepared_prod, sides=(ps,), fit_scalers=True, train=True)
+            data_all = sequences_all[ps]
         else:
             data_all = pipeline_prod.create_sequences(df_prepared_prod, fit_scalers=True, train=True)
 
@@ -901,10 +915,11 @@ class OptunaOOFTrainer:
         from sklearn.metrics import average_precision_score
 
         pipeline = self._build_eval_pipeline(artifacts, side, inference_policy='transform')
+        ps = _pipeline_side(side)
         df_prep = pipeline.prepare_data(
             df_hold.copy(),
             labels=True,
-            side=side,
+            side=ps,
             set_market_condition=False,
             ensure_regime=True
         )
@@ -919,9 +934,9 @@ class OptunaOOFTrainer:
             # porque está bloqueado por _HOLDOUT_EVAL_ACTIVE (activado por
             # holdout_eval_context() que envuelve esta llamada). Doble defensa OK.
             sequences = pipeline.create_sequences_by_side(
-                df_prep, sides=(side,), fit_scalers=False, train=True
+                df_prep, sides=(ps,), fit_scalers=False, train=True
             )
-            data = sequences[side]
+            data = sequences[ps]
         else:
             data = pipeline.create_sequences(
                 df_prep, fit_scalers=False, train=True
@@ -1116,12 +1131,13 @@ class OptunaOOFTrainer:
         path = self.out_dir
         pipeline.load_scalers(base_path=path)
 
-        df_prep = pipeline.prepare_data(df_hold, labels=True, side=side, set_market_condition=False, ensure_regime=True)
+        ps = _pipeline_side(side)
+        df_prep = pipeline.prepare_data(df_hold, labels=True, side=ps, set_market_condition=False, ensure_regime=True)
         if pipeline.feature_config.feature_masks is not None:
             # FIX BUG-D: train=True para tener labels. Holdout protegido por
             # _HOLDOUT_EVAL_ACTIVE (ver evaluate_holdout para explicación completa).
-            sequences = pipeline.create_sequences_by_side(df_prep, sides=(side, ), fit_scalers=False, train=True)
-            data = sequences[side]
+            sequences = pipeline.create_sequences_by_side(df_prep, sides=(ps,), fit_scalers=False, train=True)
+            data = sequences[ps]
         else:
             data = pipeline.create_sequences(df_prep, fit_scalers=False, train=True)
 
