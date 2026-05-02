@@ -883,6 +883,42 @@ BARRIERS_BY_RELEASE = {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature masks
+# ─────────────────────────────────────────────────────────────────────────────
+# Los masks exclusivos (NEW DEFAULT) filtran features por dirección:
+#   - LONG no ve features bear (ema_bear, rsi_overbought, macd_negative).
+#   - SHORT no ve features bull (ema_bull, rsi_oversold, macd_positive).
+# En multitask, _pipeline_side='both' desactiva el filtrado y el trunk
+# compartido ve la UNIÓN completa — primera vez que multitask tiene un
+# input genuinamente más rico que single-side (justificación real del
+# experimento de trunk compartido).
+#
+# Histórico: hasta 201200 los masks eran no-exclusivos (solo entradas
+# True), lo que NO filtraba ninguna columna porque _apply_side_mask solo
+# excluye con valor False explícito → todo single-side veía la unión y
+# multitask no se beneficiaba de tener más features. Ese histórico queda
+# en los artifacts ya entrenados; cualquier re-ejecución desde este punto
+# se entrena con masks exclusivos.
+
+_DEFAULT_FEATURE_MASKS = {
+    "long":  {
+        "ema_bull": True, "rsi_oversold": True, "macd_positive": True,
+        "ema_bear": False, "rsi_overbought": False, "macd_negative": False,
+    },
+    "short": {
+        "ema_bear": True, "rsi_overbought": True, "macd_negative": True,
+        "ema_bull": False, "rsi_oversold": False, "macd_positive": False,
+    },
+}
+
+
+def _get_feature_masks_for_release(release: str) -> dict:
+    """Devuelve feature_masks. Hoy son exclusivos para todos los releases."""
+    print(f"🎭 [MASKS] release={release} | feature_masks exclusivos (long/short filtran direccionales)")
+    return _DEFAULT_FEATURE_MASKS
+
+
 def _get_barriers_for_release(release: str) -> dict:
     """Devuelve los barriers para el release, con fallback a _DEFAULT_BARRIERS."""
     release_str = str(release)
@@ -1504,10 +1540,7 @@ def build_trainer(
             quantile_horizon=int(quantile_h),
             quantile_levels=tuple(quantile_levels),
             magnitude_threshold=float(magnitude_m),
-            feature_masks={
-                "long": {"ema_bull": True, "rsi_oversold": True, "macd_positive": True},
-                "short": {"ema_bear": True, "rsi_overbought": True, "macd_negative": True},
-            },
+            feature_masks=_get_feature_masks_for_release(release),
         ),
         regime_config=StateConfig(adx_trend_threshold=25.0),
         base_model_config=ModelConfig(
