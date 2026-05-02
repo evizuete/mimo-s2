@@ -77,6 +77,15 @@ class ModelConfig:
     target_type: str = "binary"
     quantile_levels: tuple = (0.25, 0.50, 0.75)
 
+    # Multi-task LONG+SHORT (target_type='multitask'):
+    #   Dos cabezas binarias compartiendo el trunk. Cada una con su loss focal,
+    #   sus métricas (auc_pr, auc_roc) y sus sample_weights independientes.
+    #   loss_weight_long/short escalan la contribución de cada cabeza al loss
+    #   total. Útil para compensar asimetría: si SHORT pos_rate >> LONG, subir
+    #   loss_weight_long para que la cabeza débil reciba más gradient.
+    loss_weight_long: float = 1.0
+    loss_weight_short: float = 1.0
+
 class TradingModel:
     """Modelo de deep learning con arquitectura multi-scale"""
 
@@ -87,22 +96,30 @@ class TradingModel:
         self.model = None
         self.history = None
 
-    def _build_output_head(self, x, init_bias: float):
+    def _build_output_head(self, x, init_bias):
         """
         Construye la cabeza de salida según self.model_config.target_type.
 
         target_type='binary' (default):
             Dense(1) → sigmoid → 'signal' (probabilidad).
-            init_bias se aplica al bias del Dense para acelerar convergencia
-            con clases desbalanceadas.
+            init_bias (float) se aplica al bias del Dense para acelerar
+            convergencia con clases desbalanceadas.
 
         target_type='quantile':
             Dense(N_q, linear) → 'signal' (vector de cuantiles del return).
-            init_bias se ignora (los cuantiles arrancan con bias 0; el modelo
-            debería aprender la mediana del return desde los datos).
 
-        En ambos casos la layer de salida se llama 'signal' para mantener
-        compatibilidad con el resto del pipeline (loaders, predicción, etc.).
+        target_type='triple_class':
+            Dense(3, softmax) → 'signal' sobre {0=SL, 1=TIMEOUT, 2=TP}.
+
+        target_type='multitask':
+            Dos cabezas binarias compartiendo el trunk:
+              Dense(1, sigmoid) → 'signal_long'
+              Dense(1, sigmoid) → 'signal_short'
+            init_bias debe ser dict {'long': bias_l, 'short': bias_s} o
+            un float (se aplica a ambas cabezas).
+            Devuelve LISTA [p_long, p_short]; el resto de la API de Keras
+            (Model(outputs=...), compile con loss dict, fit con y dict)
+            se encarga del wiring.
         """
         if self.model_config.target_type == "quantile":
             n_q = len(self.model_config.quantile_levels)
@@ -125,12 +142,32 @@ class TradingModel:
                 bias_initializer='zeros',
             )(x)
 
+        if self.model_config.target_type == "multitask":
+            if isinstance(init_bias, dict):
+                bias_long = float(init_bias.get('long', 0.0))
+                bias_short = float(init_bias.get('short', 0.0))
+            else:
+                bias_long = bias_short = float(init_bias)
+            logit_long = layers.Dense(
+                1, name='logit_long',
+                kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+                bias_initializer=tf.keras.initializers.Constant(bias_long),
+            )(x)
+            logit_short = layers.Dense(
+                1, name='logit_short',
+                kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+                bias_initializer=tf.keras.initializers.Constant(bias_short),
+            )(x)
+            p_long = layers.Activation('sigmoid', name='signal_long')(logit_long)
+            p_short = layers.Activation('sigmoid', name='signal_short')(logit_short)
+            return [p_long, p_short]
+
         # Camino original (binario): logits + sigmoid
         signal_logit = layers.Dense(
             1,
             name='signal_logit',
             kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
-            bias_initializer=tf.keras.initializers.Constant(init_bias),
+            bias_initializer=tf.keras.initializers.Constant(float(init_bias)),
         )(x)
         return layers.Activation('sigmoid', name='signal')(signal_logit)
 
@@ -586,6 +623,49 @@ class TradingModel:
             self.model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
             return
 
+        if self.model_config.target_type == "multitask":
+            # ── Multi-task LONG + SHORT (dos cabezas binarias) ────────────────
+            # Cada cabeza tiene su propio focal loss. focal_alpha puede venir
+            # como float (mismo para ambas) o como dict {'long': ..., 'short': ...}.
+            # ranking_loss_weight se ignora (la diversidad ya viene de las dos
+            # cabezas con regimen weights independientes).
+            fa = self.model_config.focal_alpha
+            if isinstance(fa, dict):
+                alpha_long = float(fa.get('long', 0.35))
+                alpha_short = float(fa.get('short', 0.40))
+            else:
+                alpha_long = alpha_short = float(fa)
+            gamma = float(self.model_config.focal_gamma)
+
+            losses = {
+                'signal_long': ClippedBinaryFocalCrossentropy(
+                    alpha=alpha_long, gamma=gamma, from_logits=False,
+                ),
+                'signal_short': ClippedBinaryFocalCrossentropy(
+                    alpha=alpha_short, gamma=gamma, from_logits=False,
+                ),
+            }
+            metrics = {
+                'signal_long': [
+                    tf.keras.metrics.AUC(name='auc_roc', curve='ROC'),
+                    tf.keras.metrics.AUC(name='auc_pr', curve='PR'),
+                ],
+                'signal_short': [
+                    tf.keras.metrics.AUC(name='auc_roc', curve='ROC'),
+                    tf.keras.metrics.AUC(name='auc_pr', curve='PR'),
+                ],
+            }
+            # loss_weights configurables vía atributos en model_config; defaults 1.0.
+            lw_long = float(getattr(self.model_config, 'loss_weight_long', 1.0))
+            lw_short = float(getattr(self.model_config, 'loss_weight_short', 1.0))
+            self.model.compile(
+                optimizer=optimizer,
+                loss=losses,
+                loss_weights={'signal_long': lw_long, 'signal_short': lw_short},
+                metrics=metrics,
+            )
+            return
+
         # ── Hybrid loss: focal + ranking (ListNet) ────────────────────────────
         # Si ranking_loss_weight=0.0 → solo focal (retrocompatible con v1/v2).
         # Si ranking_loss_weight>0.0 → focal + ListNet ponderado.
@@ -683,8 +763,17 @@ class TradingModel:
         # Callbacks
         is_quantile_callbacks = (self.model_config.target_type == "quantile")
         is_triple_class_callbacks = (self.model_config.target_type == "triple_class")
+        is_multitask_callbacks = (self.model_config.target_type == "multitask")
         # Para triple_class, las métricas binarias usan sufijo '_tp'.
-        train_auc_metric = "auc_pr_tp" if is_triple_class_callbacks else "auc_pr"
+        # Para multitask, vigilamos el AUC-PR de la cabeza LONG (suele ser
+        # el lado con menos pos_rate y por tanto más informativo); el SHORT
+        # entrena en paralelo con su propia loss.
+        if is_triple_class_callbacks:
+            train_auc_metric = "auc_pr_tp"
+        elif is_multitask_callbacks:
+            train_auc_metric = "signal_long_auc_pr"
+        else:
+            train_auc_metric = "auc_pr"
         val_auc_metric = f"val_{train_auc_metric}"
 
         if for_production:
@@ -750,12 +839,38 @@ class TradingModel:
                 ), TerminateOnNaN(),
             ]
 
+        # Multitask: y_train/y_val esperados como np.ndarray (N, 2) con columnas
+        # [is_long_TP, is_short_TP]. sample_weight esperado como (N, 2) con la
+        # misma convención. Convertimos a dict para Keras multi-output.
+        if is_multitask_callbacks:
+            def _split_dual(arr, name=''):
+                if arr is None:
+                    return None
+                a = np.asarray(arr)
+                if a.ndim != 2 or a.shape[-1] != 2:
+                    raise ValueError(
+                        f"multitask {name}: shape {a.shape} inesperado, "
+                        f"se requiere (N, 2) con columnas [long, short]."
+                    )
+                return {
+                    'signal_long': a[:, 0].astype(np.float32),
+                    'signal_short': a[:, 1].astype(np.float32),
+                }
+
+            y_train_in = _split_dual(y_train, 'y_train')
+            y_val_in = _split_dual(y_val, 'y_val')
+            sw_in = _split_dual(sample_weight, 'sample_weight')
+        else:
+            y_train_in = y_train
+            y_val_in = y_val
+            sw_in = sample_weight
+
         # Datos de validación
         validation_data = None
-        if X_val is not None and y_val is not None:
+        if X_val is not None and y_val_in is not None:
             validation_data = (
                 [X_val['seq_short'], X_val['seq_long'], X_val['context'], X_val['time']],
-                y_val
+                y_val_in
             )
         else:
             validation_data = None
@@ -763,11 +878,11 @@ class TradingModel:
         # Entrenar
         self.history = self.model.fit(
             x=[X_train['seq_short'], X_train['seq_long'], X_train['context'], X_train['time']],
-            y=y_train,
+            y=y_train_in,
             batch_size=self.model_config.batch_size,
             epochs=self.model_config.epochs,
             validation_data=validation_data,
-            sample_weight=sample_weight,
+            sample_weight=sw_in,
             callbacks=callbacks,
             verbose=verbose,
             shuffle=False  # Importante para series temporales

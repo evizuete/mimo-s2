@@ -66,6 +66,11 @@ class LabelGenerator:
             df = self._magnitude_binary_labels(df, side)
         elif self.config.label_method == 'triple_class':
             df = self._triple_class_labels(df, side)
+        elif self.config.label_method == 'triple_barrier_dual':
+            # Multi-task: genera signal_long Y signal_short en una sola llamada.
+            # 'side' se ignora; downstream (data_pipeline + model_builder) detecta
+            # ambas columnas y construye el target (N, 2).
+            df = self._dual_triple_barrier_labels(df)
         else:
             raise ValueError(f"Método {self.config.label_method} no reconocido")
 
@@ -399,6 +404,84 @@ class LabelGenerator:
                 signal[idx] = partial[idx]
 
         out['signal'] = signal.astype(np.int32)
+        return out
+
+    def _dual_triple_barrier_labels(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Genera AMBAS etiquetas (signal_long y signal_short) en una sola pasada.
+        Pensado para target_type='multitask': el modelo predice las dos cabezas
+        simultáneamente, así que necesitamos los dos labels alineados por fila.
+
+        Usa regime_barriers_long para LONG y regime_barriers_short para SHORT
+        (mismo patrón que _triple_barrier_labels original).
+
+        Devuelve:
+          out['signal_long'], out['signal_short'] ∈ {0, 1}
+          out['signal'] = signal_long como alias por compatibilidad con
+                          downstream que aún lee 'signal' (placeholder).
+        """
+        horizon = int(self.config.label_horizon)
+        out = df.copy()
+        close = out['close'].values
+        high = out['high'].values
+        low = out['low'].values
+        atr = out['atr'].values
+
+        rb_long = self.config.regime_barriers_long
+        rb_short = self.config.regime_barriers_short
+
+        def _compute_one_side(side_is_long: bool, rb: dict) -> np.ndarray:
+            if not rb:
+                tp_mult = float(self.config.tp_barrier)
+                sl_mult = float(
+                    self.config.sl_barrier_short if (not side_is_long and self.config.sl_barrier_short is not None)
+                    else self.config.sl_barrier
+                )
+                return triple_barrier_fixed_numba(
+                    close, high, low, atr, horizon, tp_mult, sl_mult, side_is_long
+                )
+            # Camino con regime_barriers — agrupamos por (tp, sl) único.
+            # _get_barrier_arrays usa self.config.regime_barriers, así que
+            # lo seteamos temporalmente al diccionario del lado correcto.
+            saved_rb = self.config.regime_barriers
+            self.config.regime_barriers = rb
+            try:
+                tp_arr, sl_arr = self._get_barrier_arrays(out)
+            finally:
+                self.config.regime_barriers = saved_rb
+
+            pairs = np.stack([tp_arr, sl_arr], axis=1)
+            unique_pairs = np.unique(pairs, axis=0)
+            sig = np.zeros(len(out), dtype=np.int32)
+            for tp_val, sl_val in unique_pairs:
+                group_mask = (tp_arr == tp_val) & (sl_arr == sl_val)
+                idx = np.where(group_mask)[0]
+                if len(idx) == 0:
+                    continue
+                partial = triple_barrier_fixed_numba(
+                    close, high, low, atr, horizon,
+                    float(tp_val), float(sl_val), side_is_long
+                )
+                sig[idx] = partial[idx]
+            return sig
+
+        signal_long = _compute_one_side(side_is_long=True, rb=rb_long or {})
+        signal_short = _compute_one_side(side_is_long=False, rb=rb_short or {})
+
+        out['signal_long'] = signal_long.astype(np.int32)
+        out['signal_short'] = signal_short.astype(np.int32)
+        # Placeholder: downstream que aún lee 'signal' verá el LONG.
+        # El pipeline multitask lo ignora y usa signal_long/signal_short.
+        out['signal'] = out['signal_long']
+
+        n_long = int((out['signal_long'] == 1).sum())
+        n_short = int((out['signal_short'] == 1).sum())
+        n_both = int(((out['signal_long'] == 1) & (out['signal_short'] == 1)).sum())
+        n_neither = int(((out['signal_long'] == 0) & (out['signal_short'] == 0)).sum())
+        print(f"[DUAL TB] n_long_TP={n_long:,} ({n_long / len(out):.4f}) "
+              f"n_short_TP={n_short:,} ({n_short / len(out):.4f}) "
+              f"n_both={n_both:,} n_neither={n_neither:,}")
+
         return out
 
     def _triple_barrier_labels_debug(self, df: pd.DataFrame, side: str) -> pd.DataFrame:

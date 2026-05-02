@@ -27,6 +27,17 @@ class Helper:
     def predict_proba_keras(self, model: Model, X: np.ndarray, batch_size: int = 4096) -> np.ndarray:
         X = np.asarray(X, dtype=np.float32)
         raw = model.predict(X, batch_size=batch_size, verbose=0)
+        # multitask: output dict/list con [signal_long, signal_short].
+        # Devolvemos shape (N, 2) — col 0=P_long, col 1=P_short.
+        if isinstance(raw, dict):
+            if 'signal_long' in raw and 'signal_short' in raw:
+                p_l = np.asarray(raw['signal_long']).reshape(-1)
+                p_s = np.asarray(raw['signal_short']).reshape(-1)
+                return np.stack([p_l, p_s], axis=-1)
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            p_l = np.asarray(raw[0]).reshape(-1)
+            p_s = np.asarray(raw[1]).reshape(-1)
+            return np.stack([p_l, p_s], axis=-1)
         # triple_class: output (N, 3) softmax → P(TP) = col 2.
         if raw.ndim == 2 and raw.shape[-1] == 3:
             return raw[:, 2]

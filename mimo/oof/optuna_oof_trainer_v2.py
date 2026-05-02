@@ -89,7 +89,20 @@ def load_json(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 def mask_oof(df: pd.DataFrame, proba_col: str = "oof_proba_cal") -> np.ndarray:
-    return np.isfinite(df[proba_col].to_numpy()) & np.isfinite(df["signal"].to_numpy())
+    """
+    Máscara de filas con predicción y label válidos para evaluación OOF.
+
+    Para multitask (presencia de 'signal_long' y 'signal_short'), exige
+    ambos labels finitos. En el resto de modos exige 'signal' finito.
+    """
+    proba_finite = np.isfinite(df[proba_col].to_numpy())
+    if 'signal_long' in df.columns and 'signal_short' in df.columns:
+        return (
+            proba_finite
+            & np.isfinite(df['signal_long'].to_numpy())
+            & np.isfinite(df['signal_short'].to_numpy())
+        )
+    return proba_finite & np.isfinite(df["signal"].to_numpy())
 
 
 @dataclass
@@ -374,6 +387,28 @@ class OptunaOOFTrainer:
             sr = float("nan")
             print(f"[QUANTILE OOF] pinball={pinball_oof:.4f} spearman={spearman:.4f} "
                   f"coverage={coverage:.3f} (target={target_coverage:.3f}) score={score:.4f}")
+        elif target_type == 'multitask':
+            # Multi-task: AUC-PR media de las dos cabezas.
+            y_long = df_oof.loc[m, "signal_long"].to_numpy().astype(int)
+            y_short = df_oof.loc[m, "signal_short"].to_numpy().astype(int)
+            p_long = df_oof.loc[m, "oof_proba_long_cal"].to_numpy().astype(float)
+            p_short = df_oof.loc[m, "oof_proba_short_cal"].to_numpy().astype(float)
+            try:
+                auc_pr_long = float(average_precision_score(y_long, p_long))
+            except Exception:
+                auc_pr_long = float("nan")
+            try:
+                auc_pr_short = float(average_precision_score(y_short, p_short))
+            except Exception:
+                auc_pr_short = float("nan")
+
+            print(f"[MULTITASK OOF] AUC-PR long={auc_pr_long:.4f} "
+                  f"AUC-PR short={auc_pr_short:.4f}")
+
+            auc_pr = float(np.nanmean([auc_pr_long, auc_pr_short]))
+            score = auc_pr
+            prec = float("nan")
+            sr = float("nan")
         else:
             y = df_oof.loc[m, "signal"].to_numpy().astype(int)
             # triple_class: labels son {0,1,2}; binarizamos a is_TP para
@@ -693,6 +728,35 @@ class OptunaOOFTrainer:
                 "target_coverage": float(qs[-1] - qs[0]),
                 "n": int(m.sum()),
             }
+        elif target_type == 'multitask':
+            # OOF audit dual: una métrica binaria por cabeza.
+            y_long = df_oof.loc[m, "signal_long"].to_numpy().astype(int)
+            y_short = df_oof.loc[m, "signal_short"].to_numpy().astype(int)
+            p_long = df_oof.loc[m, "oof_proba_long_cal"].to_numpy().astype(float)
+            p_short = df_oof.loc[m, "oof_proba_short_cal"].to_numpy().astype(float)
+
+            try:
+                auc_pr_l = float(average_precision_score(y_long, p_long))
+            except Exception:
+                auc_pr_l = float("nan")
+            try:
+                auc_pr_s = float(average_precision_score(y_short, p_short))
+            except Exception:
+                auc_pr_s = float("nan")
+
+            print("==================================================")
+            print(f"OOF MULTITASK METRICS (n={int(m.sum())})")
+            print("==================================================")
+            print(f"AUC-PR long  : {auc_pr_l:.4f}  (base_rate={float(y_long.mean()):.4f})")
+            print(f"AUC-PR short : {auc_pr_s:.4f}  (base_rate={float(y_short.mean()):.4f})")
+
+            oof_eval = {
+                "auc_pr_long": auc_pr_l,
+                "auc_pr_short": auc_pr_s,
+                "n": int(m.sum()),
+                "pos_rate_long": float(y_long.mean()),
+                "pos_rate_short": float(y_short.mean()),
+            }
         else:
             y_oof = df_oof.loc[m, "signal"].to_numpy().astype(int)
             if target_type == 'triple_class':
@@ -742,6 +806,16 @@ class OptunaOOFTrainer:
             init_bias = 0.0
             tp_rate = float(np.mean(y_all == 2))
             print(f'[BIAS] target=triple_class → init_bias=0.0 | TP_rate={tp_rate:.4f}')
+        elif target_type == 'multitask':
+            # Labels (N, 2). init_bias dict por cabeza.
+            y_all = data_all["labels"].astype(np.float32)
+            pr_long = float(np.clip(np.nanmean(y_all[:, 0]), 0.05, 0.50))
+            pr_short = float(np.clip(np.nanmean(y_all[:, 1]), 0.05, 0.50))
+            bl = float(np.clip(np.log(pr_long / (1 - pr_long)), -2.0, 2.0))
+            bs = float(np.clip(np.log(pr_short / (1 - pr_short)), -2.0, 2.0))
+            init_bias = {'long': bl, 'short': bs}
+            print(f'[BIAS] target=multitask | long: pos_rate={pr_long:.4f} bias={bl:.4f}'
+                  f' | short: pos_rate={pr_short:.4f} bias={bs:.4f}')
         else:
             y_all = data_all["labels"]
             pos_rate = float(np.nanmean(y_all))
@@ -858,6 +932,9 @@ class OptunaOOFTrainer:
 
         if target_type == 'quantile':
             y_true = data['labels'].astype(np.float32)
+        elif target_type == 'multitask':
+            # Labels (N, 2). Mantener tal cual; la evaluación se hace por lado.
+            y_true = data['labels'].astype(int)
         else:
             y_true = data['labels'].astype(int)
             # triple_class: labels son {0,1,2}. Para métricas binarias y
@@ -882,6 +959,20 @@ class OptunaOOFTrainer:
                     f"triple_class holdout predict: shape {y_pred_raw.shape} inesperado"
                 )
             y_pred_raw = y_pred_raw[:, 2]
+        elif target_type == 'multitask':
+            # Predict devuelve list/dict (signal_long, signal_short).
+            _raw = keras_model.predict(x_list, verbose=0, batch_size=4096)
+            if isinstance(_raw, dict):
+                p_l = np.asarray(_raw['signal_long']).reshape(-1)
+                p_s = np.asarray(_raw['signal_short']).reshape(-1)
+            elif isinstance(_raw, (list, tuple)) and len(_raw) == 2:
+                p_l = np.asarray(_raw[0]).reshape(-1)
+                p_s = np.asarray(_raw[1]).reshape(-1)
+            else:
+                raise RuntimeError(
+                    f"multitask holdout predict: estructura {type(_raw)} inesperada"
+                )
+            y_pred_raw = np.stack([p_l, p_s], axis=-1).astype(np.float32)
         else:
             y_pred_raw = keras_model.predict(x_list, verbose=0, batch_size=4096).reshape(-1)
 
@@ -928,6 +1019,69 @@ class OptunaOOFTrainer:
                 "target_coverage": float(quantile_levels[-1] - quantile_levels[0]),
                 "n": int(m_finite.sum()),
             }
+
+        if target_type == 'multitask':
+            # Calibrator es dict {'long': isotonic, 'short': isotonic}.
+            cal_l = calibrator.get('long')
+            cal_s = calibrator.get('short')
+            if cal_l is None or cal_s is None:
+                raise RuntimeError(
+                    f"multitask calibrator inválido: keys={list(calibrator.keys())}"
+                )
+
+            p_l = y_pred_raw[:, 0]
+            p_s = y_pred_raw[:, 1]
+            y_cal_l = (
+                cal_l.predict(p_l) if hasattr(cal_l, 'predict') else cal_l.transform(p_l)
+            ).astype(np.float32)
+            y_cal_s = (
+                cal_s.predict(p_s) if hasattr(cal_s, 'predict') else cal_s.transform(p_s)
+            ).astype(np.float32)
+
+            # Time/state alineados con las predicciones para construir parquets
+            # downstream (main_oof). El offset es el mismo que usa create_sequences:
+            # seq_len_long - 1 (primera predicción tras llenar el contexto largo).
+            n_pred = len(p_l)
+            ctx_off = int(self.base_model_config.seq_len_long) - 1
+            df_aligned = df_prep.iloc[ctx_off:ctx_off + n_pred]
+            time_arr = (
+                pd.to_datetime(df_aligned["time"]).to_numpy()
+                if "time" in df_aligned.columns else np.arange(n_pred)
+            )
+            state_arr = (
+                df_aligned["state"].astype(str).to_numpy()
+                if "state" in df_aligned.columns
+                else np.full(n_pred, None)
+            )
+
+            results = {}
+            for name, p_cal_side, y_side, p_raw_side in [
+                ('long', y_cal_l, y_true[:, 0], p_l),
+                ('short', y_cal_s, y_true[:, 1], p_s),
+            ]:
+                m = np.isfinite(p_cal_side) & np.isfinite(y_side)
+                yv = y_side[m]
+                pv = p_cal_side[m]
+                out_side = self.evaluator.evaluate_predictions(
+                    y_true=yv, y_pred_proba=pv,
+                    verbose=True,
+                    beta_primary=0.25, min_precision=0.45, max_signal_rate=0.15,
+                )
+                try:
+                    out_side['auc_pr'] = float(average_precision_score(yv, pv))
+                except Exception:
+                    out_side['auc_pr'] = float('nan')
+                # Stash arrays para que main_oof pueda guardar parquets dual.
+                out_side['_arrays'] = {
+                    'p_raw': p_raw_side,
+                    'p_cal': p_cal_side,
+                    'y_true': y_side,
+                    'time': time_arr,
+                    'state': state_arr,
+                }
+                results[name] = out_side
+
+            return results
 
         # ── Camino binario (original) ─────────────────────────────────────
         y_pred = y_pred_raw
@@ -1037,6 +1191,11 @@ class OptunaOOFTrainer:
 
         target_type = getattr(self.base_model_config, 'target_type', 'binary')
         is_triple_class = (target_type == 'triple_class')
+
+        if target_type == 'multitask':
+            # Walk-forward eval dual diferido a commit 2.
+            print("[multitask] walkforward (fast v0) holdout skipped.")
+            return {}
 
         if side not in ("long", "short"):
             raise ValueError(f"side inválido: {side}")
@@ -1525,6 +1684,11 @@ class OptunaOOFTrainer:
 
         target_type = getattr(self.base_model_config, 'target_type', 'binary')
         is_triple_class = (target_type == 'triple_class')
+
+        if target_type == 'multitask':
+            # Walk-forward fast holdout dual diferido a commit 2.
+            print("[multitask] walkforward (fast) holdout skipped.")
+            return {}
 
         if side not in ("long", "short"):
             raise ValueError(f"side inválido: {side}")

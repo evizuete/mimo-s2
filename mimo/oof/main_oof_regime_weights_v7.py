@@ -803,6 +803,33 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.20, "sl": 1.00},
         },
     },
+    # 202000: barriers idénticas a 201200 (tp=2.0/sl=0.8, BE=0.286). La novedad
+    # es la arquitectura multitask: un único modelo con trunk compartido y dos
+    # cabezas sigmoid (signal_long + signal_short) entrenadas con focal binary
+    # cross-entropy y sample_weight independiente por lado. Lanzar con
+    # --target-type=multitask --side both --variant-long vol_boost
+    # --variant-short vol_boost. Hipótesis tras 201200 (LONG=0.272 / SHORT=0.295
+    # con vol_boost): el trunk compartido fuerza al modelo a aprender
+    # representaciones direccionalmente agnósticas que mejoran ambos lados,
+    # mientras que las cabezas finales preservan la especificidad LONG/SHORT.
+    # Si rompe el techo LONG (BE=0.286) cierra el set deployable; si no, da
+    # señal de que el techo está realmente en los inputs/labels.
+    "202000": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
     # 201100: barriers idénticas a 200900 (tp=2.0/sl=0.8, BE=0.286). La novedad
     # es target-type=triple_class (cabeza softmax(3) sobre {SL, TIMEOUT, TP}
     # con SparseCategoricalCrossentropy). Lanzar con --target-type=triple_class.
@@ -868,14 +895,16 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--notes", type=str, default="")
     ap.add_argument(
         "--target-type",
-        choices=["binary", "quantile", "magnitude", "triple_class"],
+        choices=["binary", "quantile", "magnitude", "triple_class", "multitask"],
         default="binary",
         help=(
             "Tipo de target: 'binary' (triple-barrier, default), 'quantile' "
             "(regresión cuantílica con pinball), 'magnitude' (clasificación "
-            "binaria direction-agnostic: ¿habrá excursión >= M·ATR en h barras?) "
-            "o 'triple_class' (3-way: SL=0 / TIMEOUT=1 / TP=2 con softmax+SCCE; "
-            "el modelo expone P(TP) para gating y aprende implícitamente P(SL))."
+            "binaria direction-agnostic: ¿habrá excursión >= M·ATR en h barras?), "
+            "'triple_class' (3-way: SL=0 / TIMEOUT=1 / TP=2 con softmax+SCCE) "
+            "o 'multitask' (dos cabezas LONG+SHORT compartiendo trunk, dos "
+            "sigmoids con focal+sample_weight independiente por lado; --side se "
+            "fuerza a 'both' y se generan dos parquets de holdout por release)."
         ),
     )
     ap.add_argument(
@@ -1379,21 +1408,26 @@ def build_trainer(
     # quantile     → cabeza pinball multi-output, ignora barriers
     # magnitude    → cabeza binary direction-agnostic, ignora barriers regime-based
     # triple_class → cabeza softmax(3) con SCCE, mismas barriers que binary
+    # multitask    → trunk compartido + 2 sigmoids (signal_long + signal_short)
+    #                con triple-barrier dual; ambas barriers se aplican a la vez
     # binary       → triple-barrier clásico con barriers por régimen
     is_quantile = target_type == "quantile"
     is_magnitude = target_type == "magnitude"
     is_triple_class = target_type == "triple_class"
+    is_multitask = target_type == "multitask"
     if is_quantile:
         label_method_active = "quantile_return"
     elif is_magnitude:
         label_method_active = "magnitude_binary"
     elif is_triple_class:
         label_method_active = "triple_class"
+    elif is_multitask:
+        label_method_active = "triple_barrier_dual"
     else:
         label_method_active = "triple_barrier"
 
-    # ranking_loss conceptualmente solo aplica a binario direccional
-    ranking_loss = 0.0 if (is_quantile or is_magnitude or is_triple_class) else 0.2
+    # ranking_loss conceptualmente solo aplica a binario direccional single-side
+    ranking_loss = 0.0 if (is_quantile or is_magnitude or is_triple_class or is_multitask) else 0.2
     # target_type del modelo: magnitude usa cabeza binary igual que el direccional
     model_target_type = "binary" if is_magnitude else target_type
 
@@ -1538,8 +1572,23 @@ def run_side(
     is_quantile_mode = (
         getattr(trainer.base_model_config, "target_type", "binary") == "quantile"
     )
+    is_multitask_mode = (
+        getattr(trainer.base_model_config, "target_type", "binary") == "multitask"
+    )
     with holdout_eval_context():
-        if is_quantile_mode:
+        if is_multitask_mode:
+            # Multitask: una sola pasada por el modelo produce predicciones para
+            # ambos lados (signal_long + signal_short). evaluate_holdout devuelve
+            # un dict {'long': out_l, 'short': out_s}; cogemos el lado actual.
+            # Walkforward queda diferido a commit 2 → forzamos policy='static'
+            # reusando el static como walkforward (mismo truco que quantile).
+            dual_eval = trainer.evaluate_holdout(artifacts, df_hold, side=side)
+            side_eval = dual_eval.get(side, dual_eval) if isinstance(dual_eval, dict) and side in dual_eval else dual_eval
+            holdout_report = {
+                "static": side_eval,
+                "walkforward": dict(side_eval),
+            }
+        elif is_quantile_mode:
             # En modo quantile el walkforward eval no aplica (las métricas
             # binarias auc_pr/precision sobre las que decide la policy no
             # tienen sentido sobre cuantiles). Forzamos policy='static'
@@ -1564,7 +1613,26 @@ def run_side(
             }
 
     holdout_preds_path = train_dir / "data" / f"holdout_predictions_{release}_{side}.parquet"
-    Helper.save_holdout_predictions(holdout_report, holdout_preds_path, side=side)
+    if is_multitask_mode:
+        # En multitask evaluate_holdout no rellena 'walkforward.predictions'
+        # (ese campo lo construye el walkforward fast). Construimos el parquet
+        # a partir de _arrays para mantener el contrato downstream
+        # (build_calibration_dataset espera el parquet de holdout preds).
+        side_arrays = side_eval.get("_arrays", {}) if isinstance(side_eval, dict) else {}
+        if side_arrays:
+            multi_preds = {
+                "time": side_arrays.get("time"),
+                "state": side_arrays.get("state"),
+                "y_true": side_arrays.get("y_true"),
+                "y_pred_raw": side_arrays.get("p_raw"),
+                "y_pred_cal": side_arrays.get("p_cal"),
+            }
+            faux_report = {"walkforward": {"predictions": multi_preds}}
+            Helper.save_holdout_predictions(faux_report, holdout_preds_path, side=side)
+        else:
+            print(f"⚠️  multitask: side_eval sin _arrays para {side}; no se guarda parquet.")
+    else:
+        Helper.save_holdout_predictions(holdout_report, holdout_preds_path, side=side)
 
     calibration_path = train_dir / "data" / f"calibration_dataset_{release}_{side}.parquet"
     oof_path = Path(artifacts.oof_df_path)

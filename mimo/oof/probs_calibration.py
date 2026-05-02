@@ -155,15 +155,20 @@ class ProbsCalibration:
 
         n_samples = row_index.size
 
-        # ── Detección de modo quantile / triple_class (vs binary clásico) ──
+        # ── Detección de modo (quantile / triple_class / multitask / binary) ──
         target_type = getattr(self.model_config, 'target_type', 'binary')
         is_quantile = (target_type == 'quantile')
         is_triple_class = (target_type == 'triple_class')
+        is_multitask = (target_type == 'multitask')
         if is_quantile:
             quantile_levels = tuple(self.model_config.quantile_levels)
             n_q = len(quantile_levels)
             oof_raw = np.full((len(df), n_q), np.nan, dtype=np.float32)
             oof_y = np.full(len(df), np.nan, dtype=np.float32)
+        elif is_multitask:
+            # Dos columnas: [P_long_oof, P_short_oof] y [is_long_TP, is_short_TP].
+            oof_raw = np.full((len(df), 2), np.nan, dtype=np.float32)
+            oof_y = np.full((len(df), 2), -1, dtype=np.int8)
         else:
             # binary y triple_class comparten storage: oof_raw=P(TP), oof_y=is_TP.
             oof_raw = np.full(len(df), np.nan, dtype=np.float32)
@@ -216,6 +221,12 @@ class ProbsCalibration:
                 # el filtro de mask_oof se encargan downstream.
                 y_train = data_train["labels"].astype(np.float32)
                 y_val = data_val["labels"].astype(np.float32)
+            elif is_multitask:
+                # Labels shape (N, 2) con [is_long_TP, is_short_TP] desde
+                # data_pipeline._extract_labels_weights. Se pasan tal cual a
+                # tm.train, que internamente los splittea a dict para Keras.
+                y_train = data_train["labels"].astype(np.float32)
+                y_val = data_val["labels"].astype(np.float32)
             else:
                 # binary: labels son {0, 1}.
                 # triple_class: labels son {0=SL, 1=TIMEOUT, 2=TP}. Se pasan
@@ -237,6 +248,14 @@ class ProbsCalibration:
                 # Cabeza softmax(3); el bias en la última Dense es zero por
                 # diseño. El init_bias del flujo binario no aplica.
                 init_bias = 0.0
+            elif is_multitask:
+                # Dos cabezas binarias → init_bias por lado vía dict.
+                pr_long = float(np.clip(np.nanmean(y_train[:, 0]), 1e-4, 1 - 1e-4))
+                pr_short = float(np.clip(np.nanmean(y_train[:, 1]), 1e-4, 1 - 1e-4))
+                init_bias = {
+                    'long': float(np.log(pr_long / (1 - pr_long))),
+                    'short': float(np.log(pr_short / (1 - pr_short))),
+                }
             else:
                 pos_rate = float(np.clip(np.nanmean(y_train), 1e-4, 1 - 1e-4))
                 init_bias = float(np.log(pos_rate / (1 - pos_rate)))
@@ -292,6 +311,20 @@ class ProbsCalibration:
                 vals_loss = history["val_loss"]
                 best_epoch = int(np.argmin(vals_loss)) + 1
                 best_val = -float(np.min(vals_loss))
+            elif is_multitask:
+                # Métricas Keras multi-output: '<output>_<metric>'.
+                # Tomamos la media de val_auc_pr_long y val_auc_pr_short por época.
+                vals_long = np.asarray(history.get("val_signal_long_auc_pr", []))
+                vals_short = np.asarray(history.get("val_signal_short_auc_pr", []))
+                if len(vals_long) == 0 or len(vals_short) == 0:
+                    raise RuntimeError(
+                        f"multitask fold {fold + 1}: no se encontraron las métricas "
+                        f"val_signal_long_auc_pr / val_signal_short_auc_pr en history. "
+                        f"Claves disponibles: {list(history.keys())}"
+                    )
+                vals_mean = 0.5 * (vals_long + vals_short)
+                best_epoch = int(np.argmax(vals_mean)) + 1
+                best_val = float(np.max(vals_mean))
             else:
                 # binary → val_auc_pr; triple_class → val_auc_pr_tp (P(TP) vs is_TP).
                 auc_key = "val_auc_pr_tp" if is_triple_class else "val_auc_pr"
@@ -314,9 +347,23 @@ class ProbsCalibration:
             if _keras_model is not None and hasattr(_keras_model, 'predict'):
                 _x_list = [X_val['seq_short'], X_val['seq_long'],
                            X_val['context'], X_val['time']]
-                y_pred_val = _keras_model.predict(
-                    _x_list, batch_size=4096, verbose=0
-                ).astype(np.float32)
+                _raw = _keras_model.predict(_x_list, batch_size=4096, verbose=0)
+                # Multitask: predict devuelve list/dict (named outputs).
+                if is_multitask:
+                    if isinstance(_raw, dict):
+                        p_long = np.asarray(_raw['signal_long']).reshape(-1)
+                        p_short = np.asarray(_raw['signal_short']).reshape(-1)
+                    elif isinstance(_raw, (list, tuple)):
+                        p_long = np.asarray(_raw[0]).reshape(-1)
+                        p_short = np.asarray(_raw[1]).reshape(-1)
+                    else:
+                        raise RuntimeError(
+                            f"multitask predict shape inesperado: "
+                            f"type={type(_raw)}"
+                        )
+                    y_pred_val = np.stack([p_long, p_short], axis=-1).astype(np.float32)
+                else:
+                    y_pred_val = np.asarray(_raw).astype(np.float32)
             else:
                 y_pred_val = tm.predict(X_val).astype(np.float32)
 
@@ -324,6 +371,17 @@ class ProbsCalibration:
                 # Shape esperado: (val_count, n_q). Mantener 2D.
                 if y_pred_val.ndim == 1:
                     y_pred_val = y_pred_val.reshape(-1, 1)
+                if y_pred_val.shape[0] != val_count:
+                    raise RuntimeError(
+                        f"Desalineación fold {fold + 1}: val_count={val_count} "
+                        f"!= pred.shape[0]={y_pred_val.shape[0]}"
+                    )
+            elif is_multitask:
+                if y_pred_val.ndim != 2 or y_pred_val.shape[-1] != 2:
+                    raise RuntimeError(
+                        f"multitask fold {fold + 1}: pred shape {y_pred_val.shape} "
+                        f"inesperado (se esperaba (N, 2))."
+                    )
                 if y_pred_val.shape[0] != val_count:
                     raise RuntimeError(
                         f"Desalineación fold {fold + 1}: val_count={val_count} "
@@ -354,6 +412,9 @@ class ProbsCalibration:
                 # Binarizamos label para el calibrador y métricas binarias
                 # downstream: 1=TP (clase 2), 0=no-TP (clases 0 y 1).
                 oof_y[val_row_positions] = (np.asarray(y_val) == 2).astype(np.int8)
+            elif is_multitask:
+                # y_val shape (N, 2) ya. Guardamos como int.
+                oof_y[val_row_positions] = np.asarray(y_val).astype(np.int8)
             else:
                 oof_y[val_row_positions]   = y_val
 
@@ -433,6 +494,57 @@ class ProbsCalibration:
             df["oof_proba_cal"] = oof_cal_all[:, 0]
 
             return df, cal, best_epochs
+
+        if is_multitask:
+            # ── Calibración isotónica DUAL (multitask) ─────────────────────
+            # oof_raw shape (N, 2) [P_long, P_short], oof_y shape (N, 2).
+            # Entrenamos UN calibrador isotónico por lado y los devolvemos
+            # como dict {'long': cal_long, 'short': cal_short}.
+            mask = (
+                np.isfinite(oof_raw).all(axis=1)
+                & (oof_y[:, 0] >= 0) & (oof_y[:, 1] >= 0)
+            )
+            if mask.sum() < 1000:
+                raise ValueError(
+                    f"multitask: muestras OOF insuficientes mask.sum()={int(mask.sum())}"
+                )
+
+            print(f"OOF mask.sum()={int(mask.sum())} (multitask)")
+            print(f"  P_long  min/mean/max = "
+                  f"{float(oof_raw[mask, 0].min()):.4f} / "
+                  f"{float(oof_raw[mask, 0].mean()):.4f} / "
+                  f"{float(oof_raw[mask, 0].max()):.4f}")
+            print(f"  P_short min/mean/max = "
+                  f"{float(oof_raw[mask, 1].min()):.4f} / "
+                  f"{float(oof_raw[mask, 1].mean()):.4f} / "
+                  f"{float(oof_raw[mask, 1].max()):.4f}")
+
+            cal_dict = {}
+            oof_cal = np.full((len(df), 2), np.nan, dtype=np.float32)
+            for k, name in enumerate(['long', 'short']):
+                p_raw_k = np.clip(oof_raw[mask, k].astype(float), 1e-4, 1.0 - 1e-4)
+                y_true_k = oof_y[mask, k].astype(int)
+                pos_k = int(y_true_k.sum())
+                print(f"  [cal-{name}] Pos={pos_k:,}  Neg={len(y_true_k) - pos_k:,}")
+                cal_k = IsotonicRegression(out_of_bounds="clip")
+                cal_k.fit(p_raw_k, y_true_k)
+                p_cal_k = cal_k.predict(p_raw_k).astype(np.float32)
+                if abs(self.temperature - 1.0) > 1e-6:
+                    p_cal_k = self._apply_temperature(p_cal_k, self.temperature)
+                oof_cal[mask, k] = p_cal_k
+                cal_dict[name] = cal_k
+
+            # Guardar en df: dos columnas cada (raw, cal). Aliases:
+            #   oof_proba_raw / oof_proba_cal apuntan al LADO LONG
+            #   (downstream que aún espera columna única).
+            df["oof_proba_long_raw"] = oof_raw[:, 0]
+            df["oof_proba_long_cal"] = oof_cal[:, 0]
+            df["oof_proba_short_raw"] = oof_raw[:, 1]
+            df["oof_proba_short_cal"] = oof_cal[:, 1]
+            df["oof_proba_raw"] = oof_raw[:, 0]
+            df["oof_proba_cal"] = oof_cal[:, 0]
+
+            return df, {"type": "multitask_isotonic", **cal_dict}, best_epochs
 
         # ── Calibración isotónica (binary, comportamiento original) ────────
         mask = np.isfinite(oof_raw) & np.isfinite(oof_y) & (oof_y >= 0)
