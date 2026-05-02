@@ -854,6 +854,28 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.20, "sl": 1.00},
         },
     },
+    # 202100: barriers idénticas a 202000 (tp=2.0/sl=0.8, BE=0.286, multitask).
+    # La novedad es el train extendido a 2024-01-01 (en vez de 2025-01-01) →
+    # ~150k muestras vs ~76k. Hipótesis: multitask es más data-hungry
+    # (trunk compartido necesita exposición a regímenes variados) y duplicar
+    # n reduce varianza entre folds OOF y debería subir el lift. Holdout
+    # sin cambios (Feb→Abr 2026) para A/B paritario contra 202000.
+    "202100": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
     # 201100: barriers idénticas a 200900 (tp=2.0/sl=0.8, BE=0.286). La novedad
     # es target-type=triple_class (cabeza softmax(3) sobre {SL, TIMEOUT, TP}
     # con SparseCategoricalCrossentropy). Lanzar con --target-type=triple_class.
@@ -917,6 +939,31 @@ def _get_feature_masks_for_release(release: str) -> dict:
     """Devuelve feature_masks. Hoy son exclusivos para todos los releases."""
     print(f"🎭 [MASKS] release={release} | feature_masks exclusivos (long/short filtran direccionales)")
     return _DEFAULT_FEATURE_MASKS
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Train-window por release
+# ─────────────────────────────────────────────────────────────────────────────
+# Hasta 202000 el train arrancaba en 2025-01-01 (≈76k muestras 5min hasta
+# Feb 2026). Para multitask, que es más data-hungry, 202100 extiende el
+# train a 2024-01-01 (~150k muestras). El holdout queda fijo (Feb→Abr 2026)
+# para que la métrica sea comparable A/B contra 202000.
+
+_DEFAULT_TRAIN_FROM = datetime(2025, 1, 1)
+
+TRAIN_FROM_BY_RELEASE: Dict[str, datetime] = {
+    "202100": datetime(2024, 1, 1),
+}
+
+
+def _get_train_from_for_release(release: str) -> datetime:
+    release_str = str(release)
+    train_from = TRAIN_FROM_BY_RELEASE.get(release_str, _DEFAULT_TRAIN_FROM)
+    if release_str in TRAIN_FROM_BY_RELEASE:
+        print(f"📅 [TRAIN_FROM] release={release_str} | EXTENDIDO a {train_from.date().isoformat()}")
+    else:
+        print(f"📅 [TRAIN_FROM] release={release_str} | default {train_from.date().isoformat()}")
+    return train_from
 
 
 def _get_barriers_for_release(release: str) -> dict:
@@ -1949,7 +1996,7 @@ def main() -> None:
 
     install_regime_weight_patch(regime_weights_by_side, verbose=True)
 
-    optuna_from = datetime(2025, 1, 1)
+    optuna_from = _get_train_from_for_release(args.release)
     holdout_from = datetime(2026, 2, 1)
     holdout_to = datetime(2026, 4, 26)
 
