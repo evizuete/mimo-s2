@@ -941,31 +941,6 @@ def _get_feature_masks_for_release(release: str) -> dict:
     return _DEFAULT_FEATURE_MASKS
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Train-window por release
-# ─────────────────────────────────────────────────────────────────────────────
-# Hasta 202000 el train arrancaba en 2025-01-01 (≈76k muestras 5min hasta
-# Feb 2026). Para multitask, que es más data-hungry, 202100 extiende el
-# train a 2024-01-01 (~150k muestras). El holdout queda fijo (Feb→Abr 2026)
-# para que la métrica sea comparable A/B contra 202000.
-
-_DEFAULT_TRAIN_FROM = datetime(2025, 1, 1)
-
-TRAIN_FROM_BY_RELEASE: Dict[str, datetime] = {
-    "202100": datetime(2024, 1, 1),
-}
-
-
-def _get_train_from_for_release(release: str) -> datetime:
-    release_str = str(release)
-    train_from = TRAIN_FROM_BY_RELEASE.get(release_str, _DEFAULT_TRAIN_FROM)
-    if release_str in TRAIN_FROM_BY_RELEASE:
-        print(f"📅 [TRAIN_FROM] release={release_str} | EXTENDIDO a {train_from.date().isoformat()}")
-    else:
-        print(f"📅 [TRAIN_FROM] release={release_str} | default {train_from.date().isoformat()}")
-    return train_from
-
-
 def _get_barriers_for_release(release: str) -> dict:
     """Devuelve los barriers para el release, con fallback a _DEFAULT_BARRIERS."""
     release_str = str(release)
@@ -1039,7 +1014,38 @@ def parse_args() -> argparse.Namespace:
             "(no expuestos por CLI; defaults 64/256 son adecuados a 5min)."
         ),
     )
+    # ── Ventanas temporales ─────────────────────────────────────────────────
+    # Defaults históricos (saga 200xxx-202000): train = 2025-01-01 →
+    # 2026-02-01, holdout = 2026-02-01 → 2026-04-26. --train-to default es
+    # igual a --holdout-from para que train y holdout sean contiguos; pasar
+    # un train-to anterior crea un purge-gap (común en time-series).
+    ap.add_argument(
+        "--train-from", type=_parse_date, default=datetime(2025, 1, 1),
+        help="Fecha inicial del train (YYYY-MM-DD). Default 2025-01-01.",
+    )
+    ap.add_argument(
+        "--train-to", type=_parse_date, default=None,
+        help=(
+            "Fecha final del train (YYYY-MM-DD), exclusiva. Default = "
+            "--holdout-from (train y holdout contiguos). Si pasas un valor "
+            "anterior a --holdout-from creas un purge-gap entre los dos."
+        ),
+    )
+    ap.add_argument(
+        "--holdout-from", type=_parse_date, default=datetime(2026, 2, 1),
+        help="Fecha inicial del holdout (YYYY-MM-DD), inclusiva. Default 2026-02-01.",
+    )
+    ap.add_argument(
+        "--holdout-to", type=_parse_date, default=datetime(2026, 4, 26),
+        help="Fecha final del holdout (YYYY-MM-DD), exclusiva. Default 2026-04-26.",
+    )
     return ap.parse_args()
+
+
+def _parse_date(s) -> datetime:
+    if isinstance(s, datetime):
+        return s
+    return datetime.strptime(str(s), "%Y-%m-%d")
 
 
 def resolve_label_horizons(args: argparse.Namespace) -> tuple[int, int]:
@@ -1996,9 +2002,26 @@ def main() -> None:
 
     install_regime_weight_patch(regime_weights_by_side, verbose=True)
 
-    optuna_from = _get_train_from_for_release(args.release)
-    holdout_from = datetime(2026, 2, 1)
-    holdout_to = datetime(2026, 4, 26)
+    train_from = args.train_from
+    holdout_from = args.holdout_from
+    holdout_to = args.holdout_to
+    train_to = args.train_to if args.train_to is not None else holdout_from
+    if train_from >= train_to:
+        raise ValueError(f"--train-from ({train_from}) debe ser anterior a --train-to ({train_to})")
+    if holdout_from >= holdout_to:
+        raise ValueError(f"--holdout-from ({holdout_from}) debe ser anterior a --holdout-to ({holdout_to})")
+    if train_to > holdout_from:
+        raise ValueError(
+            f"--train-to ({train_to}) no puede ser posterior a --holdout-from ({holdout_from}); "
+            f"crearía solapamiento entre train y holdout."
+        )
+    print(
+        f"📅 [WINDOWS] train={train_from.date().isoformat()} → "
+        f"{train_to.date().isoformat()}  |  holdout="
+        f"{holdout_from.date().isoformat()} → {holdout_to.date().isoformat()}"
+        + (f"  (purge gap {(holdout_from - train_to).days}d)"
+           if train_to < holdout_from else "")
+    )
 
     experiment_tag = f"rw_both_L{args.variant_long}_h{label_h_long}_S{args.variant_short}_h{label_h_short}"
     if args.regime_weights_long_json:
@@ -2015,10 +2038,13 @@ def main() -> None:
     Helper.save_meta(
         {
             "release": args.release,
-            "train_from": optuna_from.isoformat(),
+            "train_from": train_from.isoformat(),
+            "train_to": train_to.isoformat(),
             "holdout_from": holdout_from.isoformat(),
             "holdout_to": holdout_to.isoformat(),
             "side": args.side,
+            "target_type": args.target_type,
+            "base_tf": args.base_tf,
             "variant_long": args.variant_long,
             "variant_short": args.variant_short,
             "label_horizon_long": label_h_long,
@@ -2037,7 +2063,7 @@ def main() -> None:
     # pipeline trabaja sobre la nueva resolución sin cambios adicionales.
     resample_arg = None if str(args.base_tf).lower() in ("1min", "1m", "none", "") else args.base_tf
     dm = DataManager.from_database_historical_2(
-        db, from_date=optuna_from, to_date=holdout_to, resample=resample_arg
+        db, from_date=train_from, to_date=holdout_to, resample=resample_arg
     )
     df_rates = dm.df
     if resample_arg is not None:
@@ -2059,8 +2085,8 @@ def main() -> None:
             print(f"   Eliminados {n_before - n_after} timestamps duplicados")
     print(f"✅ Datos listos: {len(df_rates):,} filas")
 
-    df_train = df_rates[df_rates.time < holdout_from].copy()
-    df_hold = df_rates[df_rates.time >= holdout_from].copy()
+    df_train = df_rates[(df_rates.time >= train_from) & (df_rates.time < train_to)].copy()
+    df_hold = df_rates[(df_rates.time >= holdout_from) & (df_rates.time < holdout_to)].copy()
     print(f"   Train: {len(df_train):,} | Holdout: {len(df_hold):,}")
 
     quantile_levels_parsed = tuple(
