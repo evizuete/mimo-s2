@@ -253,8 +253,30 @@ class OptunaOOFTrainer:
         model_config.batch_size = trial.suggest_categorical('batch_size', self._choices('batch_size'))
 
         # Focal loss
-        model_config.focal_alpha = trial.suggest_categorical('focal_alpha', self._choices('focal_alpha'))
+        # Multitask: si el grid trae focal_alpha_long y focal_alpha_short, los
+        # combinamos en dict {'long': ..., 'short': ...}. El model_builder
+        # detecta dict vs float y asigna por cabeza. Si no, fallback al
+        # focal_alpha escalar (comportamiento clásico binario).
+        has_alpha_long = self.grid_space and 'focal_alpha_long' in self.grid_space
+        has_alpha_short = self.grid_space and 'focal_alpha_short' in self.grid_space
+        if has_alpha_long and has_alpha_short:
+            a_long = trial.suggest_categorical('focal_alpha_long', self._choices('focal_alpha_long'))
+            a_short = trial.suggest_categorical('focal_alpha_short', self._choices('focal_alpha_short'))
+            model_config.focal_alpha = {'long': float(a_long), 'short': float(a_short)}
+        else:
+            model_config.focal_alpha = trial.suggest_categorical('focal_alpha', self._choices('focal_alpha'))
         model_config.focal_gamma = trial.suggest_categorical('focal_gamma', self._choices('focal_gamma'))
+
+        # Loss weights por cabeza (multitask). Si el grid no los trae, se
+        # quedan en el default de ModelConfig (1.0/1.0).
+        if self.grid_space and 'loss_weight_long' in self.grid_space:
+            model_config.loss_weight_long = float(trial.suggest_categorical(
+                'loss_weight_long', self._choices('loss_weight_long')
+            ))
+        if self.grid_space and 'loss_weight_short' in self.grid_space:
+            model_config.loss_weight_short = float(trial.suggest_categorical(
+                'loss_weight_short', self._choices('loss_weight_short')
+            ))
 
         # Flags
         model_config.use_attention = trial.suggest_categorical('use_attention', self._choices('use_attention'))
@@ -569,7 +591,15 @@ class OptunaOOFTrainer:
 
     def _model_config_from_params(self, params: Dict[str, Any]) -> ModelConfig:
         mc = ModelConfig(**vars(self.base_model_config))
+        # Multitask: combinar focal_alpha_long/short en dict si ambos están.
+        if 'focal_alpha_long' in params and 'focal_alpha_short' in params:
+            mc.focal_alpha = {
+                'long': float(params['focal_alpha_long']),
+                'short': float(params['focal_alpha_short']),
+            }
         for k, v in params.items():
+            if k in ('focal_alpha_long', 'focal_alpha_short'):
+                continue
             if hasattr(mc, k):
                 setattr(mc, k, v)
         return mc

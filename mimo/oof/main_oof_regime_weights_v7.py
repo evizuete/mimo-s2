@@ -470,7 +470,22 @@ GRID_BY_RELEASE = {
     # Esperado: +2-4 pp AUC-ROC si las features multi-TF aportan contexto util.
     "200400": {
         **_DEFAULT_GRID,
-    }
+    },
+    # ── 202101: hparam sweep multitask. Mantiene barriers/data window de
+    # 202100 (más datos, holdout 6 meses) y añade búsqueda Optuna sobre los
+    # parámetros que más capturan el "carácter multitask" del problema:
+    #   • focal_alpha asimétrico por lado (LONG pos_rate≈0.148, SHORT≈0.155)
+    #   • loss_weight_long para sondear si el trunk se beneficia más de
+    #     entrenar LONG (head más débil) que SHORT.
+    # Grid: 2 × 2 × 2 = 8 trials (~70-80 min). Si focal_alpha por lado da
+    # un lift consistente, follow-up con sweep de loss_weight_short.
+    "202101": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        "focal_alpha_long":  [0.30, 0.40],
+        "focal_alpha_short": [0.30, 0.45],
+        "loss_weight_long":  [1.0, 1.5],
+        "loss_weight_short": [1.0],
+    },
 }
 
 
@@ -861,6 +876,27 @@ BARRIERS_BY_RELEASE = {
     # n reduce varianza entre folds OOF y debería subir el lift. Holdout
     # sin cambios (Feb→Abr 2026) para A/B paritario contra 202000.
     "202100": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
+    # 202101: barriers idénticas a 202100. La novedad es el grid Optuna
+    # multitask sobre focal_alpha asimétrico por lado y loss_weight_long
+    # (ver GRID_BY_RELEASE['202101']). 8 trials sobre la misma data window
+    # extendida que 202100, así el delta de precision se atribuye a
+    # hparams, no a más datos.
+    "202101": {
         "tp_base": 2.0,
         "sl_base": 0.80,
         "regime_barriers_long": {
