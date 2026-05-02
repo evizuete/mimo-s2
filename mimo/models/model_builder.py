@@ -160,7 +160,11 @@ class TradingModel:
             )(x)
             p_long = layers.Activation('sigmoid', name='signal_long')(logit_long)
             p_short = layers.Activation('sigmoid', name='signal_short')(logit_short)
-            return [p_long, p_short]
+            # Devolvemos un dict — Keras 3 usa estructura dict-keyed para
+            # match loss/metrics/y/sample_weight por nombre. Devolverlo como
+            # list provoca KeyError(0) en compile_utils.resolve_path al
+            # intentar indexar un dict de losses con un int de la lista.
+            return {'signal_long': p_long, 'signal_short': p_short}
 
         # Camino original (binario): logits + sigmoid
         signal_logit = layers.Dense(
