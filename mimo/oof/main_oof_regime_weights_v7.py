@@ -24,7 +24,7 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -486,6 +486,29 @@ GRID_BY_RELEASE = {
         "loss_weight_long":  [1.0, 1.5],
         "loss_weight_short": [1.0],
     },
+    # ── 202102: ampliación del search-space multitask. Tras 202101 confirmar
+    # que los hparams ganadores son simétricos (Trial 2: focal_α=0.3/0.3,
+    # loss_weight=1.0/1.0 → val AUC-PR=0.2036), abrimos exploración a:
+    #   • capacidad: lstm_units {64,96,128}, conv1d_filters {48,64,96}
+    #   • regularización: dropout_seq/lstm/dense ampliados
+    #   • optim: learning_rate {5e-5, 1e-4, 2e-4, 3e-4}
+    #   • focal_alpha simétrico centrado en el ganador (0.25/0.30/0.35)
+    # Cartesiana ≈ 4*3*3*2*3*2*3*3 = 3.888 combos → inviable como grid.
+    # Lanzar con --use-tpe --optuna-trials 14 (TPESampler sobre las listas
+    # categóricas declaradas aquí, ~3h estimadas).
+    "202102": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        "conv1d_filters":    [48, 64, 96],
+        "lstm_units":        [64, 96, 128],
+        "dropout_seq":       [0.10, 0.15],
+        "dropout_lstm":      [0.20, 0.30, 0.40],
+        "dropout_dense":     [0.20, 0.30],
+        "learning_rate":     [5e-5, 1e-4, 2e-4, 3e-4],
+        "focal_alpha_long":  [0.25, 0.30, 0.35],
+        "focal_alpha_short": [0.25, 0.30, 0.35],
+        "loss_weight_long":  [1.0],
+        "loss_weight_short": [1.0],
+    },
 }
 
 
@@ -912,6 +935,24 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.20, "sl": 1.00},
         },
     },
+    # 202102: barriers idénticas a 202101. Solo cambia el search-space Optuna
+    # (TPE sobre capacidad, dropout, learning_rate y focal_alpha simétrico).
+    "202102": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
     # 201100: barriers idénticas a 200900 (tp=2.0/sl=0.8, BE=0.286). La novedad
     # es target-type=triple_class (cabeza softmax(3) sobre {SL, TIMEOUT, TP}
     # con SparseCategoricalCrossentropy). Lanzar con --target-type=triple_class.
@@ -1074,6 +1115,23 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--holdout-to", type=_parse_date, default=datetime(2026, 4, 26),
         help="Fecha final del holdout (YYYY-MM-DD), exclusiva. Default 2026-04-26.",
+    )
+    ap.add_argument(
+        "--optuna-trials", type=int, default=None,
+        help=(
+            "Número de trials Optuna. Si no se pasa: con --use-tpe falla, sin "
+            "--use-tpe usa la cardinalidad del grid_space (modo GridSampler). "
+            "Con --use-tpe permite muestreo TPE no exhaustivo sobre un "
+            "grid_space amplio."
+        ),
+    )
+    ap.add_argument(
+        "--use-tpe", action="store_true",
+        help=(
+            "Usa TPESampler en lugar de GridSampler. Pensado para "
+            "grid_spaces grandes donde el producto cartesiano es inviable. "
+            "Requiere --optuna-trials."
+        ),
     )
     return ap.parse_args()
 
@@ -1708,6 +1766,8 @@ def _run_side_multitask(
     release: str,
     holdout_only: bool,
     skip_optuna: bool,
+    optuna_trials: Optional[int] = None,
+    use_tpe: bool = False,
 ) -> Dict[str, Any]:
     """
     Camino multitask: una sola pasada de entrenamiento + una sola evaluación
@@ -1732,12 +1792,16 @@ def _run_side_multitask(
                     f"Error cargando: {type(e).__name__}: {e}"
                 )
         else:
-            print(f"\n[TUNING] Fine tuning MULTITASK model con regime weights duales...")
+            sampler_label = "TPE" if use_tpe else "Grid"
+            print(
+                f"\n[TUNING] Fine tuning MULTITASK model con regime weights duales "
+                f"(sampler={sampler_label}, n_trials={optuna_trials})..."
+            )
             trainer.optimize(
                 df_rates=df_train,
                 side=canonical_side,
-                n_trials=None,
-                use_grid=True,
+                n_trials=optuna_trials,
+                use_grid=not use_tpe,
                 grid_space=_get_grid_for_release(release),
                 load_if_exists=True,
             )
@@ -1869,6 +1933,8 @@ def run_side(
     release: str,
     holdout_only: bool,
     skip_optuna: bool,
+    optuna_trials: Optional[int] = None,
+    use_tpe: bool = False,
 ) -> Dict[str, Any]:
     if side == "multitask":
         return _run_side_multitask(
@@ -1879,6 +1945,8 @@ def run_side(
             release=release,
             holdout_only=holdout_only,
             skip_optuna=skip_optuna,
+            optuna_trials=optuna_trials,
+            use_tpe=use_tpe,
         )
 
     if holdout_only:
@@ -1898,12 +1966,16 @@ def run_side(
                     f"Error cargando: {type(e).__name__}: {e}"
                 )
         else:
-            print(f"\n[TUNING] Fine tuning {side.upper()} model con regime weights...")
+            sampler_label = "TPE" if use_tpe else "Grid"
+            print(
+                f"\n[TUNING] Fine tuning {side.upper()} model con regime weights "
+                f"(sampler={sampler_label}, n_trials={optuna_trials})..."
+            )
             trainer.optimize(
                 df_rates=df_train,
                 side=side,
-                n_trials=None,
-                use_grid=True,
+                n_trials=optuna_trials,
+                use_grid=not use_tpe,
                 grid_space=_get_grid_for_release(release),
                 load_if_exists=True,
             )
@@ -2176,6 +2248,8 @@ def main() -> None:
             release=args.release,
             holdout_only=args.holdout_only,
             skip_optuna=args.skip_optuna,
+            optuna_trials=args.optuna_trials,
+            use_tpe=args.use_tpe,
         )
         if side == "multitask":
             # _run_side_multitask devuelve dict por lado para decision /
