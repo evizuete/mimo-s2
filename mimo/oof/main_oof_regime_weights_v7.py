@@ -94,6 +94,13 @@ def build_calibration_dataset(
     # del lado pedido al esquema canónico antes de filtrar.
     if multitask_side_alias in ("long", "short"):
         suf = multitask_side_alias
+        # Eliminar las columnas alias canónicas que probs_calibration escribe
+        # como atajo de legacy (signal=signal_long, oof_proba_*=oof_proba_long_*).
+        # Si las dejamos chocan al renombrar y df["signal"] devuelve DataFrame.
+        drop_aliases = [c for c in ("signal", "oof_proba_raw", "oof_proba_cal")
+                        if c in df_oof.columns]
+        if drop_aliases:
+            df_oof = df_oof.drop(columns=drop_aliases)
         rename_oof = {
             f"signal_{suf}": "signal",
             f"oof_proba_{suf}_raw": "oof_proba_raw",
