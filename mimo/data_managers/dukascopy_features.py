@@ -162,7 +162,7 @@ def aggregate_to_1m(df_ticks: pd.DataFrame) -> pd.DataFrame:
 
     # Forward-fill suave para gaps de < 5 min, dejar NaN para gaps mas largos.
     n_before = out.notna().sum()
-    out = out.fillna(method="ffill", limit=4)
+    out = out.ffill(limit=4)
     n_after = out.notna().sum()
     print(f"  [ffill <=4 min] filas validas tras forward-fill suave:")
     for col in ["spread_mean", "tick_count", "imbalance_mean"]:
