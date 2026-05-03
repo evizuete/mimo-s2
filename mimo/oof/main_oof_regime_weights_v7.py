@@ -1706,6 +1706,20 @@ def install_regime_weight_patch(regime_weights_by_side: Dict[str, Dict[str, Any]
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _tf_defaults(base_tf: str) -> Dict[str, int]:
+    """Defaults dependientes del base_tf.
+
+    A 5min, las sequences de 64/256 cubren 5.3h / 21.3h y la ventana de
+    normalización de 200 cubre ~16.6h — sobredimensionado para horizons de
+    ~5 barras. Se aplican defaults reducidos solo cuando base_tf=='5min'.
+    Para 1min y otros valores se mantienen los defaults históricos para
+    no romper runs existentes.
+    """
+    if str(base_tf).lower() in ("5min", "5m"):
+        return {"seq_len_short": 24, "seq_len_long": 96, "price_norm_window": 100}
+    return {"seq_len_short": 64, "seq_len_long": 256, "price_norm_window": 200}
+
+
 def build_trainer(
     release: str,
     label_horizon_long: int,
@@ -1715,6 +1729,7 @@ def build_trainer(
     quantile_h: int = 5,
     quantile_levels: tuple = (0.25, 0.50, 0.75),
     magnitude_m: float = 1.5,
+    base_tf: str = "1min",
 ) -> OptunaOOFTrainer:
     general = Config(
         release=release,
@@ -1725,6 +1740,13 @@ def build_trainer(
     )
 
     barriers = _get_barriers_for_release(release)
+    tf_defaults = _tf_defaults(base_tf)
+    print(
+        f"🪟 [TF DEFAULTS] base_tf={base_tf} | "
+        f"seq_len_short={tf_defaults['seq_len_short']} | "
+        f"seq_len_long={tf_defaults['seq_len_long']} | "
+        f"price_norm_window={tf_defaults['price_norm_window']}"
+    )
 
     # quantile     → cabeza pinball multi-output, ignora barriers
     # magnitude    → cabeza binary direction-agnostic, ignora barriers regime-based
@@ -1770,11 +1792,12 @@ def build_trainer(
             quantile_levels=tuple(quantile_levels),
             magnitude_threshold=float(magnitude_m),
             feature_masks=_get_feature_masks_for_release(release),
+            price_norm_window=tf_defaults["price_norm_window"],
         ),
         regime_config=StateConfig(adx_trend_threshold=25.0),
         base_model_config=ModelConfig(
-            seq_len_short=64,
-            seq_len_long=256,
+            seq_len_short=tf_defaults["seq_len_short"],
+            seq_len_long=tf_defaults["seq_len_long"],
             epochs=90,
             patience=12,
             use_hierarchical_fusion=True,
@@ -2304,6 +2327,7 @@ def main() -> None:
         quantile_h=args.quantile_h,
         quantile_levels=quantile_levels_parsed,
         magnitude_m=args.magnitude_m,
+        base_tf=args.base_tf,
     )
 
     combined_report = {

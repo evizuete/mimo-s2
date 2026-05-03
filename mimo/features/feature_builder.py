@@ -245,7 +245,7 @@ class FeatureEngineer:
         # 7. Adding chop and exhaustion scoring
         df = self._add_chop_and_exhaustion_features(df)
 
-        df = self.add_price_invariant_features(df, window=200)
+        df = self.add_price_invariant_features(df, window=self.config.price_norm_window)
 
         # 8. Multi-timeframe features (5m / 15m / 1h)
         df = self._add_multi_timeframe_features(df)
@@ -350,10 +350,12 @@ class FeatureEngineer:
         df['atr_norm'] = df['atr'] / df['close']
         df['atr_norm_bps'] = df['atr_norm'] * 10_000.0
 
+        _w = int(self.config.price_norm_window)
+        _mp = max(10, _w // 4)
         df['atr_norm_bps_z'] = (
             df['atr_norm_bps']
-            .transform(lambda x: (x - x.rolling(200, min_periods=50).mean())
-                                 / (x.rolling(200, min_periods=50).std() + 1e-8))
+            .transform(lambda x: (x - x.rolling(_w, min_periods=_mp).mean())
+                                 / (x.rolling(_w, min_periods=_mp).std() + 1e-8))
             .clip(-3, 3)
         )
 
@@ -426,10 +428,12 @@ class FeatureEngineer:
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
         df['bb_width_bps'] = df['bb_width'] * 10_000.0
 
+        _w = int(self.config.price_norm_window)
+        _mp = max(10, _w // 4)
         df['bb_width_bps_z'] = (
             df['bb_width_bps']
-            .transform(lambda x: (x - x.rolling(200, min_periods=50).mean())
-                                 / (x.rolling(200, min_periods=50).std() + 1e-8))
+            .transform(lambda x: (x - x.rolling(_w, min_periods=_mp).mean())
+                                 / (x.rolling(_w, min_periods=_mp).std() + 1e-8))
             .clip(-3, 3)
         )
 
@@ -542,10 +546,12 @@ class FeatureEngineer:
             df[f"realized_vol_{w}"] = ret_1.rolling(w).std()
             df[f'realized_vol_{w}_bps'] = df[f'realized_vol_{w}'] * 10_000.0
 
+            _w = int(self.config.price_norm_window)
+            _mp = max(10, _w // 4)
             df[f'realized_vol_{w}_bps_z'] = (
                 df[f'realized_vol_{w}_bps']
-                .transform(lambda x: (x - x.rolling(200, min_periods=50).mean())
-                                     / (x.rolling(200, min_periods=50).std() + 1e-8))
+                .transform(lambda x: (x - x.rolling(_w, min_periods=_mp).mean())
+                                     / (x.rolling(_w, min_periods=_mp).std() + 1e-8))
                 .clip(-3, 3)
             )
 
@@ -918,12 +924,15 @@ class FeatureEngineer:
 
         df = df.copy()
 
+        _w = int(self.config.price_norm_window)
+        _mp = max(10, _w // 4)
+
         df["chop_score"] = self._compute_chop_score(df, n=chop_n)
-        score_threshold = df['chop_score'].rolling(200, min_periods=50).quantile(0.85)
+        score_threshold = df['chop_score'].rolling(_w, min_periods=_mp).quantile(0.85)
         df['is_chop'] = (df['chop_score'] >= score_threshold).astype(int)
 
         df["exhaustion_score"] = self._compute_exhaustion_score(df, n=exhaustion_n)
-        exhaustion_threshold = df['exhaustion_score'].rolling(200, min_periods=50).quantile(0.85)
+        exhaustion_threshold = df['exhaustion_score'].rolling(_w, min_periods=_mp).quantile(0.85)
         df["is_exhaustion"] = (df["exhaustion_score"] >= exhaustion_threshold).astype(int)
 
         return df
