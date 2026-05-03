@@ -557,6 +557,23 @@ GRID_BY_RELEASE = {
         "loss_weight_long":  [1.0],
         "loss_weight_short": [1.0],
     },
+    # 202105: clon de 202104. Diseñado para correrse con base_tf=5min y
+    # h_long=h_short=3 (15 min de horizonte, sweet spot intraday corto).
+    # Usa los defaults condicionales por base_tf (seq_len 24/96,
+    # price_norm_window=100) introducidos en commit 9eaa47b.
+    "202105": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        "conv1d_filters":    [48, 64, 96],
+        "lstm_units":        [64, 96, 128],
+        "dropout_seq":       [0.10, 0.15],
+        "dropout_lstm":      [0.20, 0.30, 0.40],
+        "dropout_dense":     [0.20, 0.30],
+        "learning_rate":     [5e-5, 1e-4, 2e-4, 3e-4],
+        "focal_alpha_long":  [0.25, 0.30, 0.35],
+        "focal_alpha_short": [0.25, 0.30, 0.35],
+        "loss_weight_long":  [1.0],
+        "loss_weight_short": [1.0],
+    },
 }
 
 
@@ -1020,6 +1037,24 @@ BARRIERS_BY_RELEASE = {
         },
     },
     "202104": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
+    # 202105: barriers idénticas a 202104. Cambia base_tf=5min y horizonte
+    # h=3 (15 min); las barriers en ATR son adimensionales respecto al TF.
+    "202105": {
         "tp_base": 2.0,
         "sl_base": 0.80,
         "regime_barriers_long": {
