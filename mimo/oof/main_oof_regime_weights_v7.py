@@ -574,6 +574,37 @@ GRID_BY_RELEASE = {
         "loss_weight_long":  [1.0],
         "loss_weight_short": [1.0],
     },
+    # 202106: clon de 202105 con h=4 (20 min horizonte). Diseñado para 1 trial
+    # TPE como validación intermedia entre h=3 (selectivo, base baja) y h=5
+    # (poco selectivo, base media). Espera base_rate ~0.10.
+    "202106": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        "conv1d_filters":    [48, 64, 96],
+        "lstm_units":        [64, 96, 128],
+        "dropout_seq":       [0.10, 0.15],
+        "dropout_lstm":      [0.20, 0.30, 0.40],
+        "dropout_dense":     [0.20, 0.30],
+        "learning_rate":     [5e-5, 1e-4, 2e-4, 3e-4],
+        "focal_alpha_long":  [0.25, 0.30, 0.35],
+        "focal_alpha_short": [0.25, 0.30, 0.35],
+        "loss_weight_long":  [1.0],
+        "loss_weight_short": [1.0],
+    },
+    # 202107: clon de 202105 con h=5 (25 min horizonte). Mismo objetivo que
+    # 202106 pero con horizonte mayor; espera base_rate ~0.13.
+    "202107": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        "conv1d_filters":    [48, 64, 96],
+        "lstm_units":        [64, 96, 128],
+        "dropout_seq":       [0.10, 0.15],
+        "dropout_lstm":      [0.20, 0.30, 0.40],
+        "dropout_dense":     [0.20, 0.30],
+        "learning_rate":     [5e-5, 1e-4, 2e-4, 3e-4],
+        "focal_alpha_long":  [0.25, 0.30, 0.35],
+        "focal_alpha_short": [0.25, 0.30, 0.35],
+        "loss_weight_long":  [1.0],
+        "loss_weight_short": [1.0],
+    },
 }
 
 
@@ -1055,6 +1086,40 @@ BARRIERS_BY_RELEASE = {
     # 202105: barriers idénticas a 202104. Cambia base_tf=5min y horizonte
     # h=3 (15 min); las barriers en ATR son adimensionales respecto al TF.
     "202105": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
+    # 202106: barriers idénticas a 202105 (h=4, 20 min horizonte).
+    "202106": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
+    # 202107: barriers idénticas a 202105 (h=5, 25 min horizonte).
+    "202107": {
         "tp_base": 2.0,
         "sl_base": 0.80,
         "regime_barriers_long": {
