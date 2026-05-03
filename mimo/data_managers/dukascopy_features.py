@@ -52,8 +52,29 @@ def filter_outliers(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _infer_tick_direction(mid: pd.Series) -> pd.Series:
+    """Lee-Ready tick rule.
+    Devuelve +1 (buy aggressor), -1 (sell aggressor) o forward-fill cuando el
+    mid no cambia. La direccion inicial (sin historico previo) se trata como 0.
+    """
+    diff = mid.diff()
+    direction = np.sign(diff)
+    # ticks "flat" (diff == 0) heredan la direccion previa via ffill
+    direction = direction.replace(0, np.nan).ffill()
+    direction = direction.fillna(0.0)
+    return direction.astype("float32")
+
+
 def aggregate_to_1m(df_ticks: pd.DataFrame) -> pd.DataFrame:
-    """Construye features 1-minuto desde ticks. label='right'."""
+    """Construye features 1-minuto desde ticks. label='right'.
+
+    Detecta automáticamente el schema:
+      - Si existen bid_volume + ask_volume: usa quote_imbalance clasica
+        (presion del libro pasivo).
+      - Si existe solo volume: aplica Lee-Ready tick rule para inferir flujo
+        de agresor y construye signed_volume_ratio (presion del flow ejecutado,
+        suele ser MAS informativa que la del libro pasivo).
+    """
     if df_ticks.empty:
         raise ValueError("DataFrame de ticks vacio")
 
@@ -63,21 +84,33 @@ def aggregate_to_1m(df_ticks: pd.DataFrame) -> pd.DataFrame:
 
     df["spread"] = df["ask"] - df["bid"]
     df["mid"] = (df["ask"] + df["bid"]) / 2.0
-    bv_plus_av = df["bid_volume"] + df["ask_volume"]
-    df["imbalance"] = np.where(
-        bv_plus_av > 0,
-        df["bid_volume"] / np.maximum(bv_plus_av, 1e-9),
-        0.5,
-    )
+
+    # ── Detección del modo de "imbalance" ──────────────────────────────────
+    has_split_volume = ("bid_volume" in df.columns) and ("ask_volume" in df.columns)
+    has_total_volume = "volume" in df.columns
+    if has_split_volume:
+        mode = "split_volume"
+        bv_plus_av = df["bid_volume"] + df["ask_volume"]
+        df["imbalance"] = np.where(
+            bv_plus_av > 0,
+            df["bid_volume"] / np.maximum(bv_plus_av, 1e-9),
+            0.5,
+        )
+    elif has_total_volume:
+        mode = "tick_rule"
+        df["direction"] = _infer_tick_direction(df["mid"])
+        df["signed_volume"] = df["volume"].astype("float64") * df["direction"]
+    else:
+        mode = "no_volume"
+        print("  [warn] sin columna(s) de volumen; imbalance no se construirá.")
+
+    print(f"  [aggregate] modo de imbalance: {mode}")
 
     df = df.set_index("time")
 
     # ---- Spread (liquidez) ----
     spread_mean = df["spread"].resample("1min", label="right", closed="right").mean()
     spread_p95 = df["spread"].resample("1min", label="right", closed="right").quantile(0.95)
-
-    # ---- Imbalance (presion direccional) ----
-    imb_mean = df["imbalance"].resample("1min", label="right", closed="right").mean()
 
     # ---- Intensidad / actividad ----
     tick_count = df["spread"].resample("1min", label="right", closed="right").count()
@@ -86,9 +119,22 @@ def aggregate_to_1m(df_ticks: pd.DataFrame) -> pd.DataFrame:
     quote_vol = df["mid"].resample("1min", label="right", closed="right").std()
 
     # ---- Velocidad: ticks-por-segundo ~ tick_count / 60 (proxy) ----
-    # Lo dejamos en escala "ticks por segundo" (mas interpretable) en lugar de p95
-    # del inter-tick que requeriria mas trabajo. Es equivalente para z-scoring.
     quote_velocity = tick_count / 60.0
+
+    # ---- Imbalance (segun el modo) ----
+    if mode == "split_volume":
+        imb_mean = df["imbalance"].resample("1min", label="right", closed="right").mean()
+    elif mode == "tick_rule":
+        signed_sum = df["signed_volume"].resample("1min", label="right", closed="right").sum()
+        total_sum = df["volume"].resample("1min", label="right", closed="right").sum()
+        # Ratio en [-1, +1]; +1 = todo flow comprador, -1 = todo flow vendedor
+        imb_mean = (signed_sum / total_sum.where(total_sum > 0, np.nan)).fillna(0.0)
+        # Re-escalamos a [0, 1] para que sea comparable con la version split_volume
+        # (0.5 = neutral). Asi la feature canonica "quote_imbalance_mean_1m" tiene
+        # la misma semantica conceptual independientemente del schema de entrada.
+        imb_mean = (imb_mean + 1.0) / 2.0
+    else:
+        imb_mean = pd.Series(0.5, index=tick_count.index)
 
     # ---- Crudas: mid OHLC ----
     mid_resampled = df["mid"].resample("1min", label="right", closed="right")
@@ -110,8 +156,11 @@ def aggregate_to_1m(df_ticks: pd.DataFrame) -> pd.DataFrame:
         "mid_low": mid_low,
     })
 
+    if mode == "tick_rule":
+        # Volumen total agregado: util como feature complementaria
+        out["volume_sum_1m"] = df["volume"].resample("1min", label="right", closed="right").sum()
+
     # Forward-fill suave para gaps de < 5 min, dejar NaN para gaps mas largos.
-    # Util para evitar imputar valores en weekends.
     n_before = out.notna().sum()
     out = out.fillna(method="ffill", limit=4)
     n_after = out.notna().sum()
