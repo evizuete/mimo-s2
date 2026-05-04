@@ -470,7 +470,7 @@ class FeatureEngineer:
             # PSI bajo en holdout cuando la vol cambia (vs _bps que escalan con
             # la dispersion natural de los retornos). Construir SIEMPRE; el
             # uso depende de _assign_features_to_inputs y use_vol_invariant_features.
-            atr_safe = df['atr'].replace(0, np.nan).fillna(method='ffill').fillna(1e-8)
+            atr_safe = df['atr'].replace(0, np.nan).ffill().fillna(1e-8)
             df[f'{ema_col}_dist_atr'] = clip(
                 (df.close - df[ema_col]) / (atr_safe + 1e-10), -8, 8
             )
@@ -500,7 +500,7 @@ class FeatureEngineer:
 
         # Retornos múltiples horizontes
         BPS = 10_000.0
-        atr_safe = df['atr'].replace(0, np.nan).fillna(method='ffill').fillna(1e-8)
+        atr_safe = df['atr'].replace(0, np.nan).ffill().fillna(1e-8)
         for lag in self.config.return_lags:
             df[f'ret_{lag}'] = df.close.pct_change(lag)
             df[f'ret_{lag}_bps'] = clip(df[f'ret_{lag}'] * BPS, -150, 150)
