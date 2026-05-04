@@ -117,6 +117,13 @@ class FeatureConfig:
     # mimo/oof/feature_importance_permutation.py.
     use_reduced_features: bool = False
 
+    # Ultra-reduced features: aplica un segundo recorte sobre el subset ya
+    # reducido, identificado por permutation importance sobre 202300 (drop_max
+    # < 0.001 — threshold mas conservador en segunda iteracion). Reduce de
+    # 71 a ~33 features (>50% menos del baseline 97). Solo se debe activar
+    # con use_reduced_features=True (es un superset de eliminaciones).
+    use_ultra_reduced_features: bool = False
+
     # Labeling
     label_horizon: int = 10  # Horizonte de predicción (5 mins para 1-min data)
     label_method: str = 'triple_barrier'  # 'adaptive', 'fixed', 'triple_barrier', 'quantile_return'
@@ -1153,6 +1160,45 @@ class FeatureEngineer:
         "poc_dist_atr",                       # poc_dist en seq_short manda
     }
 
+    # Segunda iteracion (sobre 202300): features con drop_max < 0.001 tras
+    # reentrenar con 72 features. Threshold mas conservador (0.001 vs 0.0005).
+    # Total: 38 features adicionales (>50% del set ya reducido) — captura las
+    # redundancias que se hicieron evidentes tras la primera reduccion.
+    _ULTRA_REDUCED_DROP_SEQ_SHORT = {
+        "vol_z_1h",                  # ya redundante (vol_spike captura mejor)
+        "macd_hist_atr_log",         # seq_long.macd_hist_atr_log ya manda
+        "body_rel",                  # range_hl_rel + wicks bastan
+        "range_hl_rel",              # ya cubierto por wick_rel
+        "ret_3_atr",                 # ret_1 y ret_10 cubren
+    }
+    _ULTRA_REDUCED_DROP_SEQ_LONG = {
+        "dm_diff_15m_norm", "rsi_5m_norm", "rsi_norm",
+        "dm_diff_5m_norm", "macd_hist_5m_atr",
+        "ema_50_slope_atr", "bb_position_5m", "trend_dir",
+        "ema_50_dist_atr", "range_hl_rel", "close_norm",
+        "efficiency_20", "realized_vol_20_bps_z",
+        "ema_21_dist_atr",            # ema_9_dist_atr seq_short manda
+        "adx_5m_norm", "adx_norm",
+        "ema21_dist_15m_bps", "ema50_dist_15m_bps",
+    }
+    _ULTRA_REDUCED_DROP_CONTEXT = {
+        "vwap_dist_4h_atr",           # vwap_dist_atr seq_short suficiente
+        "macd_positive",              # binarios redundantes
+        "bb_width_bps_z",             # atr_norm_bps_z lo cubre
+        "adx_norm",                   # adx_1h_norm domina
+        "vol_trend_1h",               # vol_pct_1h y vol_spike bastan
+        "chop_score",                 # is_chop ya removido en ultra
+        "is_us_first_hour",
+        "macd_negative",
+        "ema21_dist_1h_bps",          # info ya en seq_long
+        "adx_smooth_norm",            # adx_1h_norm domina
+        "is_us_last_hour",
+        "is_exhaustion",
+        "dist_high_60",
+        "dm_diff_norm",               # dm_diff_1h_norm domina
+        "rsi_oversold",
+    }
+
     def _assign_features_to_inputs(self):
         """Define qué features van a cada input del modelo"""
 
@@ -1163,6 +1209,7 @@ class FeatureEngineer:
         # son invariantes porque el ATR recoge la vol local.
         use_atr = bool(getattr(self.config, "use_vol_invariant_features", False))
         use_reduced = bool(getattr(self.config, "use_reduced_features", False))
+        use_ultra = bool(getattr(self.config, "use_ultra_reduced_features", False))
 
         def _suffix(bps_name: str) -> str:
             """Para nombres tipo 'ret_5_bps' o 'ema_9_dist_bps', devuelve el
@@ -1173,11 +1220,16 @@ class FeatureEngineer:
             atr_name = bps_name[:-len("_bps")] + "_atr"
             return atr_name
 
-        def _filter_reduced(cols: list, drop_set: set) -> list:
-            """Si use_reduced=True, elimina las features marcadas como ruido."""
-            if not use_reduced:
+        def _filter_reduced(cols: list, drop_set: set,
+                            ultra_drop_set: set | None = None) -> list:
+            """Aplica los filtros de reducción según los flags activos.
+            ultra es un superset (segundo recorte sobre 202300)."""
+            if not use_reduced and not use_ultra:
                 return cols
-            return [c for c in cols if c not in drop_set]
+            drops = set(drop_set) if use_reduced else set()
+            if use_ultra and ultra_drop_set is not None:
+                drops |= set(ultra_drop_set)
+            return [c for c in cols if c not in drops]
 
         # Features para secuencia corta (más reactivas)
         self.feature_columns['sequence_short'] = _filter_reduced([
@@ -1194,7 +1246,7 @@ class FeatureEngineer:
             'vol_z_1h', 'vol_spike',
             # VWAP / volume profile bar-a-bar (magnet de volumen)
             'vwap_dist_atr', 'poc_dist_atr',
-        ], self._REDUCED_DROP_SEQ_SHORT)
+        ], self._REDUCED_DROP_SEQ_SHORT, self._ULTRA_REDUCED_DROP_SEQ_SHORT)
 
         # Features para secuencia larga (tendencia)
         # Incluye multi-TF (5m, 15m) que aportan contexto a escalas mayores
@@ -1217,7 +1269,7 @@ class FeatureEngineer:
             'ema21_dist_15m_bps', 'ema50_dist_15m_bps',
             'ema21_slope_15m_bps', 'rsi_15m_norm',
             'macd_hist_15m_atr', 'adx_15m_norm', 'dm_diff_15m_norm',
-        ], self._REDUCED_DROP_SEQ_LONG)
+        ], self._REDUCED_DROP_SEQ_LONG, self._ULTRA_REDUCED_DROP_SEQ_LONG)
 
         # Features de contexto (estado actual del mercado)
         # Incluye 1h multi-TF y calendario extendido para macro-context.
@@ -1241,7 +1293,7 @@ class FeatureEngineer:
             'vwap_dist_atr', 'vwap_dist_4h_atr', 'vwap_band_pos', 'vwap_slope_atr',
             # Volume profile rolling 4h (POC y concentración)
             'poc_dist_atr', 'vol_concentration',
-        ], self._REDUCED_DROP_CONTEXT)
+        ], self._REDUCED_DROP_CONTEXT, self._ULTRA_REDUCED_DROP_CONTEXT)
 
         # Features temporales
         self.feature_columns['time'] = [
