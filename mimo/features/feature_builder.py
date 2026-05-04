@@ -814,33 +814,38 @@ class FeatureEngineer:
 
     def _add_temporal_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Features temporales y de sesión"""
-        if 'time' in df.columns:
-            df['time'] = pd.to_datetime(df['time'])
-            df['hour'] = df['time'].dt.hour
-            df['minute'] = df['time'].dt.minute
-            df['dayofweek'] = df['time'].dt.dayofweek
+        if 'time' not in df.columns:
+            return df
 
-            # Codificación cíclica
-            df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-            df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-            df['minute_sin'] = np.sin(2 * np.pi * df['minute'] / 60)
-            df['minute_cos'] = np.cos(2 * np.pi * df['minute'] / 60)
-            df['dow_sin'] = np.sin(2 * np.pi * df['dayofweek'] / 5)
-            df['dow_cos'] = np.cos(2 * np.pi * df['dayofweek'] / 5)
+        time_dt = pd.to_datetime(df['time'])
+        hour = time_dt.dt.hour
+        minute = time_dt.dt.minute
+        dayofweek = time_dt.dt.dayofweek
 
-            # Sesiones de trading
-            df['is_asia'] = ((df['hour'] >= 0) & (df['hour'] < 8)).astype(int)
-            df['is_london'] = ((df['hour'] >= 8) & (df['hour'] < 16)).astype(int)
-            df['is_ny'] = ((df['hour'] >= 13) & (df['hour'] < 21)).astype(int)
-            df['is_overlap'] = ((df['is_london'] == 1) & (df['is_ny'] == 1)).astype(int)
+        is_london = ((hour >= 8) & (hour < 16)).astype(int)
+        is_ny = ((hour >= 13) & (hour < 21)).astype(int)
 
-            # Apertura/cierre
-            df['is_open'] = ((df['hour'] == 9) & (df['minute'] < 30)).astype(int)
-            df['is_close'] = ((df['hour'] == 15) & (df['minute'] > 30)).astype(int)
+        new_cols = {
+            'time': time_dt,
+            'hour': hour,
+            'minute': minute,
+            'dayofweek': dayofweek,
+            'hour_sin': np.sin(2 * np.pi * hour / 24),
+            'hour_cos': np.cos(2 * np.pi * hour / 24),
+            'minute_sin': np.sin(2 * np.pi * minute / 60),
+            'minute_cos': np.cos(2 * np.pi * minute / 60),
+            'dow_sin': np.sin(2 * np.pi * dayofweek / 5),
+            'dow_cos': np.cos(2 * np.pi * dayofweek / 5),
+            'is_asia': ((hour >= 0) & (hour < 8)).astype(int),
+            'is_london': is_london,
+            'is_ny': is_ny,
+            'is_overlap': ((is_london == 1) & (is_ny == 1)).astype(int),
+            'is_open': ((hour == 9) & (minute < 30)).astype(int),
+            'is_close': ((hour == 15) & (minute > 30)).astype(int),
+        }
 
-        # Defragmentar el DataFrame tras los ~20 df['col']=... consecutivos
-        # (silencia PerformanceWarning de pandas). Sin impacto en resultados.
-        df = df.copy()
+        df = df.drop(columns=[c for c in new_cols if c in df.columns], errors='ignore')
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
         return df
 
     def _add_context_features(self, df: pd.DataFrame) -> pd.DataFrame:
