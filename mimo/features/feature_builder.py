@@ -431,8 +431,9 @@ class FeatureEngineer:
         df['bb_middle'] = bb[f'BBM_{self.config.bb_period}_{self.config.bb_std}']
         df['bb_lower'] = bb[f'BBL_{self.config.bb_period}_{self.config.bb_std}']
 
-        # Ancho de banda (volatilidad)
-        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+        # Ancho de banda (volatilidad). Epsilon para evitar /0 si bb_middle ~ 0
+        # (caso teórico en activos con precios cercanos a cero).
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / (df['bb_middle'] + 1e-10)
         df['bb_width_bps'] = df['bb_width'] * 10_000.0
 
         _w = int(self.config.price_norm_window)
@@ -523,9 +524,15 @@ class FeatureEngineer:
     EPS = 1e-12
 
     def _rolling_autocorr_lag1(self, r: pd.Series, w: int) -> pd.Series:
-        # Corr( r[t-w+1:t], r[t-w+2:t+1] ) usando sumas rodantes
+        """Autocorrelación causal con lag-1.
+
+        Calcula Corr(r[t-w+1 : t], r[t-w : t-1]) — la serie y su versión
+        retrasada un paso. Causal: solo usa información hasta t.
+
+        Antes (buggy): y = r.shift(-1) tomaba r[t+1] (lookahead).
+        """
         x = r
-        y = r.shift(-1)
+        y = r.shift(1)  # lag-1 retrasado, NO adelantado
 
         Sx = x.rolling(w).sum()
         Sy = y.rolling(w).sum()
@@ -540,9 +547,7 @@ class FeatureEngineer:
 
         out = cov / (np.sqrt(varx * vary) + self.EPS)
         out = out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-        # por el shift(-1), el último queda mal alineado
-        out.iloc[-1] = 0.0
+        # Las primeras w filas tienen NaN propagado por el shift inicial
         return out
 
     def _consecutive_runs(self, cond: np.ndarray) -> np.ndarray:

@@ -253,7 +253,22 @@ class LabelGenerator:
 
     def _fixed_labels(self, df: pd.DataFrame, side: str) -> pd.DataFrame:
         """
-        Etiquetado con umbrales en ATRs.
+        ⚠️  DEPRECATED — usar `_triple_barrier_labels` en su lugar.
+
+        Etiquetado con umbrales fijos a tp×ATR (return) y sl×ATR (adverse).
+        Diferencia conceptual con triple_barrier:
+          - triple_barrier: signal=1 si TP se toca *en cualquier momento*
+            antes que SL dentro de [t+1, t+h].
+          - fixed (este): signal=1 si AL CIERRE de t+h, return >= tp×ATR Y
+            adverse < sl×ATR durante toda la ventana.
+
+        Más restrictivo y path-dependiente. El pipeline actual no lo usa.
+
+        ⚠️  Bugs conocidos sin arreglar (no impactan porque la función no se
+        invoca en el flujo actual con label_method='triple_barrier'):
+          - Cascada de np.roll en future_low/high es ambigua.
+          - No valida atr_norm > 0 antes de usar como denominador.
+        Si vas a reactivar esta función, audítala primero.
 
         Con regime_barriers: tp y sl varían fila a fila según el régimen.
         Sin ellos: comportamiento original con escalares fijos.

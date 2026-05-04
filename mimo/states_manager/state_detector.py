@@ -293,6 +293,21 @@ class StateDetector:
                 "rexp_p80":       cfg.fixed_range_expansion_p80,
             }
 
+        # ⚠️ Caída en el path dinámico: ocurre cuando NO se ha llamado a
+        # inject_thresholds() con los valores persistidos en train. En train
+        # esto está bien (se calculan sobre todo el histórico). En INFERENCIA
+        # con un df pequeño puede dar régimes inconsistentes vs los del modelo
+        # entrenado. El pipeline de OOF persiste los thresholds tras el primer
+        # cálculo; verifica que se inyectan antes de evaluate_holdout.
+        if not getattr(self, "_dynamic_warned", False):
+            print(
+                "  ⚠️  [StateDetector] Computing thresholds DYNAMICALLY from "
+                f"the current df (n={len(df):,}). This is correct for train "
+                "but NOT for inference if the df is small. Persist with "
+                "inject_thresholds() in production."
+            )
+            self._dynamic_warned = True
+
         # Caché dinámica (evita recalcular si el df no cambió)
         cache_key = (len(df), float(df["atr_norm"].mean()), float(df["atr_norm"].std()))
         if self._cache_key == cache_key and self._cached_thresholds is not None:
