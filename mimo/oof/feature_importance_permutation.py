@@ -129,27 +129,26 @@ def load_holdout_inputs(args: argparse.Namespace):
             set_market_condition=False,
             ensure_regime=True,
         )
+        # Multitask: usar side='both' para obtener features UNION (no
+        # filtradas por mascara side-specific) y labels duales (N, 2).
+        # Esto coincide con como prepare_production_model entrena el modelo.
         sequences = pipeline.create_sequences_by_side(
-            df_prep, sides=("long", "short"),
+            df_prep, sides=("both",),
             fit_scalers=False, train=True,
         )
 
-    # Para multitask el trunk es compartido y X es identico para los dos lados;
-    # la diferencia esta en las labels. Tomamos los arrays de 'long' y solo
-    # leemos labels de 'short' para construir y_true.
-    data_l = sequences["long"]
-    data_s = sequences["short"]
-
+    data = sequences["both"]
     X = {
-        "seq_short": data_l["seq_short"],
-        "seq_long":  data_l["seq_long"],
-        "context":   data_l["context"],
-        "time":      data_l["time"],
+        "seq_short": data["seq_short"],
+        "seq_long":  data["seq_long"],
+        "context":   data["context"],
+        "time":      data["time"],
     }
-    y_true = np.stack([
-        data_l["labels"].astype(int),
-        data_s["labels"].astype(int),
-    ], axis=-1)
+    y_true = np.asarray(data["labels"]).astype(int)
+    if y_true.ndim != 2 or y_true.shape[-1] != 2:
+        raise RuntimeError(
+            f"Multitask labels esperadas en shape (N, 2). Recibido {y_true.shape}"
+        )
     print(f"   X.seq_short: {X['seq_short'].shape}")
     print(f"   X.seq_long : {X['seq_long'].shape}")
     print(f"   X.context  : {X['context'].shape}")
@@ -157,17 +156,9 @@ def load_holdout_inputs(args: argparse.Namespace):
     print(f"   y_true     : {y_true.shape}  | pos_rate L={y_true[:,0].mean():.4f} "
           f"S={y_true[:,1].mean():.4f}")
 
-    # Recuperamos los nombres reales de columna por bloque tras side-mask.
-    pipeline.feature_engineer.set_side("long")
-    pipeline.feature_engineer._assign_features_to_inputs()
-    feat_long = {k: list(v) for k, v in pipeline.feature_engineer.feature_columns.items()}
-    pipeline.feature_engineer.set_side("short")
-    pipeline.feature_engineer._assign_features_to_inputs()
-    feat_short = {k: list(v) for k, v in pipeline.feature_engineer.feature_columns.items()}
-
-    # En multitask las cols por bloque se obtienen de la UNION de long y short.
-    # data_pipeline_v2.create_sequences_by_side construye los arrays escalados con
-    # all_seq_short_cols/all_seq_long_cols/all_context_cols (la union sorted).
+    # En multitask las cols por bloque son la UNION (no filtradas por side).
+    # data_pipeline_v2.create_sequences_by_side construye los arrays con
+    # all_seq_short_cols/all_seq_long_cols/all_context_cols (union sorted).
     union_cols = pipeline._get_all_feature_columns()
     feature_columns = {
         "seq_short": list(union_cols.get("sequence_short", [])),
