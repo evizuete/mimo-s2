@@ -103,6 +103,13 @@ class FeatureConfig:
     # Normalización
     price_norm_window: int = 200
 
+    # Vol-invariant features: si True, usa variantes ATR-normalizadas de
+    # retornos y EMA dist/slope en lugar de las _bps. Recomendado cuando el
+    # holdout tiene una distribucion de volatilidad distinta a train (ver
+    # mimo/oof/shift_analyzer/distribution_shift_analyzer.py — si las
+    # features _bps salen con PSI > 0.1 y sigma_ratio > 1.5).
+    use_vol_invariant_features: bool = False
+
     # Labeling
     label_horizon: int = 10  # Horizonte de predicción (5 mins para 1-min data)
     label_method: str = 'triple_barrier'  # 'adaptive', 'fixed', 'triple_barrier', 'quantile_return'
@@ -459,6 +466,18 @@ class FeatureEngineer:
             df[f'{ema_col}_dist_bps'] = df[f'{ema_col}_dist'] * BPS
             df[f'{ema_col}_slope_bps'] = df[f'{ema_col}_slope'] * BPS
 
+            # Variantes ATR-normalizadas: invariantes al regimen de volatilidad.
+            # PSI bajo en holdout cuando la vol cambia (vs _bps que escalan con
+            # la dispersion natural de los retornos). Construir SIEMPRE; el
+            # uso depende de _assign_features_to_inputs y use_vol_invariant_features.
+            atr_safe = df['atr'].replace(0, np.nan).fillna(method='ffill').fillna(1e-8)
+            df[f'{ema_col}_dist_atr'] = clip(
+                (df.close - df[ema_col]) / (atr_safe + 1e-10), -8, 8
+            )
+            df[f'{ema_col}_slope_atr'] = clip(
+                df[ema_col].diff(3) / (atr_safe + 1e-10), -8, 8
+            )
+
         # Relaciones entre EMAs
         if len(self.config.ema_periods) >= 2:
             fast, slow = self.config.ema_periods[0], self.config.ema_periods[1]
@@ -481,9 +500,16 @@ class FeatureEngineer:
 
         # Retornos múltiples horizontes
         BPS = 10_000.0
+        atr_safe = df['atr'].replace(0, np.nan).fillna(method='ffill').fillna(1e-8)
         for lag in self.config.return_lags:
             df[f'ret_{lag}'] = df.close.pct_change(lag)
             df[f'ret_{lag}_bps'] = clip(df[f'ret_{lag}'] * BPS, -150, 150)
+            # Variante ATR-normalizada: cuantos ATRs se movio el precio en
+            # 'lag' barras. Invariante al regimen de volatilidad — clave para
+            # transferibilidad train -> holdout cuando la vol cambia.
+            df[f'ret_{lag}_atr'] = clip(
+                df.close.diff(lag) / (atr_safe + 1e-10), -10, 10
+            )
 
         # Velocidad y aceleración del precio
         df['price_velocity'] = df.close.diff() / (df['atr'] + 1e-10)
@@ -1085,12 +1111,30 @@ class FeatureEngineer:
     def _assign_features_to_inputs(self):
         """Define qué features van a cada input del modelo"""
 
+        # Si use_vol_invariant_features=True, sustituimos las _bps que el
+        # distribution_shift_analyzer marcó como WARNING (PSI ~ 0.23-0.25 con
+        # sigma_ratio ~ 2 en holdout) por sus equivalentes ATR-normalizadas.
+        # Bps son sensibles al cambio de regimen de volatilidad; ATR-normalized
+        # son invariantes porque el ATR recoge la vol local.
+        use_atr = bool(getattr(self.config, "use_vol_invariant_features", False))
+
+        def _suffix(bps_name: str) -> str:
+            """Para nombres tipo 'ret_5_bps' o 'ema_9_dist_bps', devuelve el
+            equivalente _atr cuando use_atr=True, si la feature ATR existe.
+            """
+            if not use_atr:
+                return bps_name
+            atr_name = bps_name[:-len("_bps")] + "_atr"
+            return atr_name
+
         # Features para secuencia corta (más reactivas)
         self.feature_columns['sequence_short'] = [
             'close_norm', 'open_norm', 'high_norm', 'low_norm',
             'body_rel', 'upper_wick_rel', 'lower_wick_rel', 'range_hl_rel',
-            'ret_1_bps', 'ret_3_bps', 'ret_5_bps', 'ret_10_bps',
-            'ema_9_dist_bps', 'ema_21_dist_bps', 'ema_9_slope_bps',
+            _suffix('ret_1_bps'), _suffix('ret_3_bps'),
+            _suffix('ret_5_bps'), _suffix('ret_10_bps'),
+            _suffix('ema_9_dist_bps'), _suffix('ema_21_dist_bps'),
+            _suffix('ema_9_slope_bps'),
             'rsi_norm', 'macd_hist_atr_log', 'bb_position',
             'price_velocity', 'price_acceleration',
             'doji', 'hammer', 'shooting_star',
@@ -1105,19 +1149,19 @@ class FeatureEngineer:
         # sin que el modelo tenga que inferirlo desde la secuencia 1m.
         self.feature_columns['sequence_long'] = [
             'close_norm', 'range_hl_rel',
-            'ema_21_dist_bps', 'ema_50_dist_bps',
-            'ema_21_slope_bps', 'ema_50_slope_bps',
+            _suffix('ema_21_dist_bps'), _suffix('ema_50_dist_bps'),
+            _suffix('ema_21_slope_bps'), _suffix('ema_50_slope_bps'),
             'trend_dir',
             'rsi_norm', 'adx_norm', 'macd_hist_atr_log',
-            'ret_20_bps', 'ret_60_bps',
+            _suffix('ret_20_bps'), _suffix('ret_60_bps'),
             'realized_vol_20_bps_z', 'efficiency_20',
             'direction_bias_20',
-            # Multi-TF 5m
+            # Multi-TF 5m (PSI bajo en holdout — no necesitan ATR-norm)
             'ema21_dist_5m_bps', 'ema50_dist_5m_bps',
             'ema21_slope_5m_bps', 'rsi_5m_norm',
             'macd_hist_5m_atr', 'bb_position_5m',
             'adx_5m_norm', 'dm_diff_5m_norm',
-            # Multi-TF 15m
+            # Multi-TF 15m (PSI bajo en holdout — no necesitan ATR-norm)
             'ema21_dist_15m_bps', 'ema50_dist_15m_bps',
             'ema21_slope_15m_bps', 'rsi_15m_norm',
             'macd_hist_15m_atr', 'adx_15m_norm', 'dm_diff_15m_norm',

@@ -605,6 +605,26 @@ GRID_BY_RELEASE = {
         "loss_weight_long":  [1.0],
         "loss_weight_short": [1.0],
     },
+    # 202200: clon de 202105 con use_vol_invariant_features=True (activado en
+    # build_trainer via _VOL_INVARIANT_RELEASES). Sustituye ret_*_bps,
+    # ema_*_dist_bps, ema_*_slope_bps por sus equivalentes _atr en
+    # sequence_short y sequence_long. Test directo de la hipotesis del shift
+    # analyzer: si los WARNINGs PSI estaban causados por sigma_ratio~2 entre
+    # train y holdout, las features ATR-normalized deberian eliminar el shift
+    # y recuperar 3-5pp de precision en holdout.
+    "202200": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        "conv1d_filters":    [48, 64, 96],
+        "lstm_units":        [64, 96, 128],
+        "dropout_seq":       [0.10, 0.15],
+        "dropout_lstm":      [0.20, 0.30, 0.40],
+        "dropout_dense":     [0.20, 0.30],
+        "learning_rate":     [5e-5, 1e-4, 2e-4, 3e-4],
+        "focal_alpha_long":  [0.25, 0.30, 0.35],
+        "focal_alpha_short": [0.25, 0.30, 0.35],
+        "loss_weight_long":  [1.0],
+        "loss_weight_short": [1.0],
+    },
 }
 
 
@@ -1120,6 +1140,24 @@ BARRIERS_BY_RELEASE = {
     },
     # 202107: barriers idénticas a 202105 (h=5, 25 min horizonte).
     "202107": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
+    # 202200: barriers identicas a 202105. La unica diferencia es features
+    # ATR-normalized (vol-invariant) — ver _VOL_INVARIANT_RELEASES.
+    "202200": {
         "tp_base": 2.0,
         "sl_base": 0.80,
         "regime_barriers_long": {
@@ -1820,6 +1858,9 @@ def _tf_defaults(base_tf: str) -> Dict[str, int]:
     return {"seq_len_short": 64, "seq_len_long": 256, "price_norm_window": 200}
 
 
+_VOL_INVARIANT_RELEASES = {"202200"}
+
+
 def build_trainer(
     release: str,
     label_horizon_long: int,
@@ -1841,12 +1882,19 @@ def build_trainer(
 
     barriers = _get_barriers_for_release(release)
     tf_defaults = _tf_defaults(base_tf)
+    use_vol_invariant = str(release) in _VOL_INVARIANT_RELEASES
     print(
         f"🪟 [TF DEFAULTS] base_tf={base_tf} | "
         f"seq_len_short={tf_defaults['seq_len_short']} | "
         f"seq_len_long={tf_defaults['seq_len_long']} | "
         f"price_norm_window={tf_defaults['price_norm_window']}"
     )
+    if use_vol_invariant:
+        print(
+            f"🛡️  [VOL-INVARIANT] release={release} | "
+            f"sustituyendo features _bps por _atr en sequence_short y "
+            f"sequence_long para mitigar shift de volatilidad train→holdout"
+        )
 
     # quantile     → cabeza pinball multi-output, ignora barriers
     # magnitude    → cabeza binary direction-agnostic, ignora barriers regime-based
@@ -1893,6 +1941,7 @@ def build_trainer(
             magnitude_threshold=float(magnitude_m),
             feature_masks=_get_feature_masks_for_release(release),
             price_norm_window=tf_defaults["price_norm_window"],
+            use_vol_invariant_features=use_vol_invariant,
         ),
         regime_config=StateConfig(adx_trend_threshold=25.0),
         base_model_config=ModelConfig(
