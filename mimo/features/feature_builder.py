@@ -824,6 +824,9 @@ class FeatureEngineer:
             df['is_open'] = ((df['hour'] == 9) & (df['minute'] < 30)).astype(int)
             df['is_close'] = ((df['hour'] == 15) & (df['minute'] > 30)).astype(int)
 
+        # Defragmentar el DataFrame tras los ~20 df['col']=... consecutivos
+        # (silencia PerformanceWarning de pandas). Sin impacto en resultados.
+        df = df.copy()
         return df
 
     def _add_context_features(self, df: pd.DataFrame) -> pd.DataFrame:
