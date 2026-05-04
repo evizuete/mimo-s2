@@ -110,6 +110,13 @@ class FeatureConfig:
     # features _bps salen con PSI > 0.1 y sigma_ratio > 1.5).
     use_vol_invariant_features: bool = False
 
+    # Reduced features: si True, elimina del input del modelo el set de
+    # features identificadas como ruido por permutation importance sobre
+    # 202200 (drop_max < 0.0005 en AUC-PR). Reduce 97 -> 72 features (25%
+    # menos parametros en el LSTM, menos overfitting). Ver
+    # mimo/oof/feature_importance_permutation.py.
+    use_reduced_features: bool = False
+
     # Labeling
     label_horizon: int = 10  # Horizonte de predicción (5 mins para 1-min data)
     label_method: str = 'triple_barrier'  # 'adaptive', 'fixed', 'triple_barrier', 'quantile_return'
@@ -1116,6 +1123,36 @@ class FeatureEngineer:
 
         return df
 
+    # Features identificadas como ruido por permutation importance sobre 202200
+    # (drop_max < 0.0005 sobre AUC-PR). Se eliminan cuando
+    # use_reduced_features=True. Total: 25 features (~25.8% del input).
+    _REDUCED_DROP_SEQ_SHORT = {
+        "doji", "hammer", "shooting_star",  # candle patterns: muy raros
+        "rsi_norm",                          # duplicado con sequence_long.rsi_norm
+        "ret_5_atr",                         # redundante con ret_3/ret_10
+    }
+    _REDUCED_DROP_SEQ_LONG = {
+        "rsi_15m_norm", "macd_hist_15m_atr",  # multi-TF 15m no aporta
+        "adx_15m_norm", "ema21_slope_15m_bps",
+        "ema50_dist_5m_bps",                  # ema21_5m manda, ema50_5m no
+        "direction_bias_20",
+    }
+    _REDUCED_DROP_CONTEXT = {
+        "ema_bull", "ema_bear",               # binarios duplican con macd_pos/neg
+        "bb_position_1h",                     # ya tenemos bb_width_bps_z + 1h ema
+        "is_eu_first_hour",                   # otros calendar features ganan
+        "vol_z_1h", "vol_concentration",      # vol_z_1h ya esta en seq_short
+        "vwap_slope_atr",                     # vwap_dist_atr y _4h dominan
+        "is_chop",                            # chop_score continuo basta
+        "dist_low_60",                        # dist_high y position_range bastan
+        "rsi_1h_norm",                        # rsi_norm seq_long manda
+        "exhaustion_score",                   # is_exhaustion binario funciona
+        "range_expansion",                    # bb_width_bps_z ya cubre
+        "ema50_dist_1h_bps",                  # ema21_1h domina
+        "rsi_overbought",                     # binario duplica rsi_norm
+        "poc_dist_atr",                       # poc_dist en seq_short manda
+    }
+
     def _assign_features_to_inputs(self):
         """Define qué features van a cada input del modelo"""
 
@@ -1125,6 +1162,7 @@ class FeatureEngineer:
         # Bps son sensibles al cambio de regimen de volatilidad; ATR-normalized
         # son invariantes porque el ATR recoge la vol local.
         use_atr = bool(getattr(self.config, "use_vol_invariant_features", False))
+        use_reduced = bool(getattr(self.config, "use_reduced_features", False))
 
         def _suffix(bps_name: str) -> str:
             """Para nombres tipo 'ret_5_bps' o 'ema_9_dist_bps', devuelve el
@@ -1135,8 +1173,14 @@ class FeatureEngineer:
             atr_name = bps_name[:-len("_bps")] + "_atr"
             return atr_name
 
+        def _filter_reduced(cols: list, drop_set: set) -> list:
+            """Si use_reduced=True, elimina las features marcadas como ruido."""
+            if not use_reduced:
+                return cols
+            return [c for c in cols if c not in drop_set]
+
         # Features para secuencia corta (más reactivas)
-        self.feature_columns['sequence_short'] = [
+        self.feature_columns['sequence_short'] = _filter_reduced([
             'close_norm', 'open_norm', 'high_norm', 'low_norm',
             'body_rel', 'upper_wick_rel', 'lower_wick_rel', 'range_hl_rel',
             _suffix('ret_1_bps'), _suffix('ret_3_bps'),
@@ -1150,12 +1194,12 @@ class FeatureEngineer:
             'vol_z_1h', 'vol_spike',
             # VWAP / volume profile bar-a-bar (magnet de volumen)
             'vwap_dist_atr', 'poc_dist_atr',
-        ]
+        ], self._REDUCED_DROP_SEQ_SHORT)
 
         # Features para secuencia larga (tendencia)
         # Incluye multi-TF (5m, 15m) que aportan contexto a escalas mayores
         # sin que el modelo tenga que inferirlo desde la secuencia 1m.
-        self.feature_columns['sequence_long'] = [
+        self.feature_columns['sequence_long'] = _filter_reduced([
             'close_norm', 'range_hl_rel',
             _suffix('ema_21_dist_bps'), _suffix('ema_50_dist_bps'),
             _suffix('ema_21_slope_bps'), _suffix('ema_50_slope_bps'),
@@ -1173,11 +1217,11 @@ class FeatureEngineer:
             'ema21_dist_15m_bps', 'ema50_dist_15m_bps',
             'ema21_slope_15m_bps', 'rsi_15m_norm',
             'macd_hist_15m_atr', 'adx_15m_norm', 'dm_diff_15m_norm',
-        ]
+        ], self._REDUCED_DROP_SEQ_LONG)
 
         # Features de contexto (estado actual del mercado)
         # Incluye 1h multi-TF y calendario extendido para macro-context.
-        self.feature_columns['context'] = [
+        self.feature_columns['context'] = _filter_reduced([
             'atr_norm_bps_z', 'adx_norm', 'adx_smooth_norm', 'dm_diff_norm',
             'bb_width_bps_z', 'range_expansion',
             'dist_high_60', 'dist_low_60', 'position_range_240',
@@ -1197,7 +1241,7 @@ class FeatureEngineer:
             'vwap_dist_atr', 'vwap_dist_4h_atr', 'vwap_band_pos', 'vwap_slope_atr',
             # Volume profile rolling 4h (POC y concentración)
             'poc_dist_atr', 'vol_concentration',
-        ]
+        ], self._REDUCED_DROP_CONTEXT)
 
         # Features temporales
         self.feature_columns['time'] = [

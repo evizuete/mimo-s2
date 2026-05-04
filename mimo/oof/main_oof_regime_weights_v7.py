@@ -625,6 +625,24 @@ GRID_BY_RELEASE = {
         "loss_weight_long":  [1.0],
         "loss_weight_short": [1.0],
     },
+    # 202300: clon de 202200 + use_reduced_features=True. Elimina las 25
+    # features identificadas como ruido por permutation importance
+    # (mimo/oof/feature_importance_permutation.py sobre 202200) — drop_max
+    # AUC-PR < 0.0005. Reduce input de 97 -> 72 features (~25% menos),
+    # combatiendo overfitting con misma arquitectura. Hereda vol-invariant.
+    "202300": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        "conv1d_filters":    [48, 64, 96],
+        "lstm_units":        [64, 96, 128],
+        "dropout_seq":       [0.10, 0.15],
+        "dropout_lstm":      [0.20, 0.30, 0.40],
+        "dropout_dense":     [0.20, 0.30],
+        "learning_rate":     [5e-5, 1e-4, 2e-4, 3e-4],
+        "focal_alpha_long":  [0.25, 0.30, 0.35],
+        "focal_alpha_short": [0.25, 0.30, 0.35],
+        "loss_weight_long":  [1.0],
+        "loss_weight_short": [1.0],
+    },
 }
 
 
@@ -1158,6 +1176,24 @@ BARRIERS_BY_RELEASE = {
     # 202200: barriers identicas a 202105. La unica diferencia es features
     # ATR-normalized (vol-invariant) — ver _VOL_INVARIANT_RELEASES.
     "202200": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
+    # 202300: barriers identicas a 202200. La diferencia es feature reduction
+    # (97 -> 72 features) + vol-invariant heredado.
+    "202300": {
         "tp_base": 2.0,
         "sl_base": 0.80,
         "regime_barriers_long": {
@@ -1858,7 +1894,8 @@ def _tf_defaults(base_tf: str) -> Dict[str, int]:
     return {"seq_len_short": 64, "seq_len_long": 256, "price_norm_window": 200}
 
 
-_VOL_INVARIANT_RELEASES = {"202200"}
+_VOL_INVARIANT_RELEASES = {"202200", "202300"}
+_REDUCED_FEATURES_RELEASES = {"202300"}
 
 
 def build_trainer(
@@ -1883,6 +1920,7 @@ def build_trainer(
     barriers = _get_barriers_for_release(release)
     tf_defaults = _tf_defaults(base_tf)
     use_vol_invariant = str(release) in _VOL_INVARIANT_RELEASES
+    use_reduced = str(release) in _REDUCED_FEATURES_RELEASES
     print(
         f"🪟 [TF DEFAULTS] base_tf={base_tf} | "
         f"seq_len_short={tf_defaults['seq_len_short']} | "
@@ -1894,6 +1932,12 @@ def build_trainer(
             f"🛡️  [VOL-INVARIANT] release={release} | "
             f"sustituyendo features _bps por _atr en sequence_short y "
             f"sequence_long para mitigar shift de volatilidad train→holdout"
+        )
+    if use_reduced:
+        print(
+            f"✂️  [REDUCED FEATURES] release={release} | "
+            f"eliminando 25 features identificadas como ruido por permutation "
+            f"importance sobre 202200 (drop_max < 0.0005). 97 → 72 features."
         )
 
     # quantile     → cabeza pinball multi-output, ignora barriers
@@ -1942,6 +1986,7 @@ def build_trainer(
             feature_masks=_get_feature_masks_for_release(release),
             price_norm_window=tf_defaults["price_norm_window"],
             use_vol_invariant_features=use_vol_invariant,
+            use_reduced_features=use_reduced,
         ),
         regime_config=StateConfig(adx_trend_threshold=25.0),
         base_model_config=ModelConfig(
