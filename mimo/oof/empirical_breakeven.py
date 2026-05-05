@@ -120,11 +120,8 @@ def simulate_outcomes(
             else:
                 hit_tp = low[j] <= tp_level
                 hit_sl = high[j] >= sl_level
-            if hit_tp and hit_sl:
-                # ambos en la misma barra: regla pesimista — asumimos SL primero
-                outcome = "SL"
-                r_mult = -sl_mult
-                break
+            # Tie-break: TP gana en empate (mismo k) — coincide con
+            # triple_barrier_fixed_numba (label=1 si hit_tp <= hit_sl).
             if hit_tp:
                 outcome = "TP"
                 r_mult = tp_mult
@@ -152,8 +149,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--holdout-preds", required=True,
                     help="parquet con time/state/y_true/y_pred_cal/...")
-    ap.add_argument("--ohlcv", required=True,
-                    help="parquet o CSV con OHLCV 5min (time, open, high, low, close)")
+    ap.add_argument("--ohlcv", default=None,
+                    help="parquet o CSV con OHLCV 5min (time, open, high, low, close). "
+                         "Alternativa: usa --from-db para cargar desde la BD.")
+    ap.add_argument("--from-db", action="store_true",
+                    help="Carga OHLCV 5min directamente desde la BD usando "
+                         "DataManager.from_database_historical_2 (rango = preds.time ± buffer).")
+    ap.add_argument("--db-buffer-bars", type=int, default=200,
+                    help="Bars de margen antes/después del rango de preds para ATR/horizon")
+    ap.add_argument("--base-tf", default="5min",
+                    help="Timeframe a usar al resamplear desde la BD (--from-db)")
     ap.add_argument("--proba-col", default="y_pred_cal",
                     choices=["y_pred_cal", "y_pred_raw"])
     ap.add_argument("--side", default=None, choices=[None, "long", "short"],
@@ -186,18 +191,37 @@ def main():
     preds["time"] = pd.to_datetime(preds["time"])
     print(f"   rows={len(preds):,}  cols={list(preds.columns)}")
 
-    print(f"📂 ohlcv: {args.ohlcv}")
-    ohlcv_path = Path(args.ohlcv)
-    if ohlcv_path.suffix == ".csv":
-        ohlcv = pd.read_csv(ohlcv_path)
+    if args.from_db:
+        from mimo.data_managers.databases import Database
+        from mimo.data_managers.data_manager import DataManager
+        # margen para ATR warmup + horizon look-ahead
+        bar_min = {"1min": 1, "5min": 5, "15min": 15, "1h": 60}.get(args.base_tf, 5)
+        buf_min = args.db_buffer_bars * bar_min
+        from_dt = (preds["time"].min() - pd.Timedelta(minutes=buf_min)).normalize()
+        to_dt = (preds["time"].max() + pd.Timedelta(minutes=buf_min)).normalize() + pd.Timedelta(days=1)
+        print(f"📂 ohlcv: BD ({args.base_tf}, {from_dt} → {to_dt})")
+        db = Database()
+        resample_arg = None if str(args.base_tf).lower() in ("1min", "1m") else args.base_tf
+        dm = DataManager.from_database_historical_2(
+            db, from_date=str(from_dt), to_date=str(to_dt), resample=resample_arg
+        )
+        ohlcv = dm.df[["time", "open", "high", "low", "close"]].copy()
     else:
-        ohlcv = pd.read_parquet(ohlcv_path)
-    ohlcv.columns = [c.lower() for c in ohlcv.columns]
+        if not args.ohlcv:
+            raise SystemExit("Debes pasar --ohlcv <path> o --from-db")
+        print(f"📂 ohlcv: {args.ohlcv}")
+        ohlcv_path = Path(args.ohlcv)
+        if ohlcv_path.suffix == ".csv":
+            ohlcv = pd.read_csv(ohlcv_path)
+        else:
+            ohlcv = pd.read_parquet(ohlcv_path)
+        ohlcv.columns = [c.lower() for c in ohlcv.columns]
     for c in ("time", "open", "high", "low", "close"):
         if c not in ohlcv.columns:
             raise SystemExit(f"❌ '{c}' no en OHLCV. Cols={list(ohlcv.columns)}")
     ohlcv["time"] = pd.to_datetime(ohlcv["time"])
-    ohlcv = ohlcv.sort_values("time").reset_index(drop=True)
+    ohlcv = ohlcv.dropna(subset=["close"]).sort_values("time").reset_index(drop=True)
+    ohlcv = ohlcv.drop_duplicates(subset="time", keep="first").reset_index(drop=True)
     print(f"   rows={len(ohlcv):,}  rango={ohlcv['time'].min()} → {ohlcv['time'].max()}")
 
     # ── ATR ──────────────────────────────────────────────────────────────
