@@ -1069,6 +1069,32 @@ class TradingSimulator:
 
         return df_p
 
+    @staticmethod
+    def _extract_side_proba(raw, side: str) -> np.ndarray:
+        """
+        Extrae la cabeza del lado correcto del output de model.predict().
+
+        - multitask: dict {'signal_long': arr, 'signal_short': arr}  → toma side
+        - multitask: list/tuple [out_long, out_short]                → idem por orden
+        - single-side: array (N, 1) o (N,)                           → reshape(-1)
+        - triple_class: (N, 3)                                       → P(TP) = col 2
+        """
+        if isinstance(raw, dict):
+            key = f"signal_{side}"
+            if key in raw:
+                return np.asarray(raw[key]).reshape(-1)
+            # fallback por keys conocidas
+            if "signal_long" in raw and "signal_short" in raw:
+                return np.asarray(raw[f"signal_{side}"]).reshape(-1)
+            raise ValueError(f"Output dict del modelo sin keys signal_long/short: {list(raw.keys())}")
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            idx = 0 if side == "long" else 1
+            return np.asarray(raw[idx]).reshape(-1)
+        arr = np.asarray(raw)
+        if arr.ndim == 2 and arr.shape[-1] == 3:
+            return arr[:, 2]
+        return arr.reshape(-1)
+
     def predict_side_pack(self, side_pack: dict, df: pd.DataFrame, side: str):
         X_seq_short = side_pack[side]['seq_short']
         X_seq_long = side_pack[side]['seq_long']
@@ -1080,9 +1106,10 @@ class TradingSimulator:
             return None, None, None
 
         model = self.models[side]
-        proba_raw = model.predict(
+        raw_out = model.predict(
             [X_seq_short, X_seq_long, X_context, X_time], verbose=1
-        ).reshape(-1)
+        )
+        proba_raw = self._extract_side_proba(raw_out, side)
 
         if side in self.calibrators:
             proba_cal = self.calibrators[side].predict(proba_raw)
@@ -1106,7 +1133,8 @@ class TradingSimulator:
         X = [data["seq_short"], data["seq_long"], data["context"], data["time"]]
 
         model = self.models[side]
-        p_raw = model.predict(X, batch_size=self.batch_size, verbose=0).reshape(-1).astype(np.float32)
+        raw_out = model.predict(X, batch_size=self.batch_size, verbose=0)
+        p_raw = self._extract_side_proba(raw_out, side).astype(np.float32)
 
         cal = self.calibrators[side]
         try:
@@ -1243,11 +1271,12 @@ class TradingSimulator:
             X_time    = pack['time'][-1:]
 
             model = self.models[side]
-            p_raw = model.predict(
+            raw_out = model.predict(
                 [X_short, X_long, X_context, X_time],
                 batch_size=1,
                 verbose=0,
-            ).reshape(-1).astype(np.float32)
+            )
+            p_raw = self._extract_side_proba(raw_out, side).astype(np.float32)
 
             cal = self.calibrators[side]
             try:
