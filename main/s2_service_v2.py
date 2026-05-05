@@ -7,6 +7,7 @@ from collections import deque
 from typing import Any, Dict, Optional, Set
 
 import pandas as pd
+import numpy as np
 import zmq
 
 from s2_state import RuntimeState, S3State
@@ -1001,6 +1002,7 @@ class S2Service:
             .dropna(subset=["close"])
             .reset_index()
         )
+        agg["id"] = np.arange(len(agg), dtype=np.int64)
         return agg
 
     def _should_process_basetf_close(self, tick_time_epoch) -> bool:
