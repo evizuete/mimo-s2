@@ -679,6 +679,24 @@ GRID_BY_RELEASE = {
         "loss_weight_long":  [1.0],
         "loss_weight_short": [1.0],
     },
+    # 202501: complemento de 202500 — set COMPLETO de features (97 sin
+    # reducir), solo vol-invariant. Hipotesis: el optimizador EV-net podría
+    # rescatar features que la AUC-PR/F0.25 descartaba pero que en términos
+    # de R-multiple sí aportan (e.g. señales de baja frecuencia con alto
+    # mean_R_expire). Mismo grid y barriers que 202500.
+    "202501": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        "conv1d_filters":    [48, 64, 96],
+        "lstm_units":        [64, 96, 128],
+        "dropout_seq":       [0.10, 0.15],
+        "dropout_lstm":      [0.20, 0.30, 0.40],
+        "dropout_dense":     [0.20, 0.30],
+        "learning_rate":     [5e-5, 1e-4, 2e-4, 3e-4],
+        "focal_alpha_long":  [0.25, 0.30, 0.35],
+        "focal_alpha_short": [0.25, 0.30, 0.35],
+        "loss_weight_long":  [1.0],
+        "loss_weight_short": [1.0],
+    },
 }
 
 
@@ -1281,6 +1299,24 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.20, "sl": 1.00},
         },
     },
+    # 202501: barriers idénticas a 202500 / 202300. La diferencia es feature
+    # set COMPLETO (97 features sin reducir).
+    "202501": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
     # 201100: barriers idénticas a 200900 (tp=2.0/sl=0.8, BE=0.286). La novedad
     # es target-type=triple_class (cabeza softmax(3) sobre {SL, TIMEOUT, TP}
     # con SparseCategoricalCrossentropy). Lanzar con --target-type=triple_class.
@@ -1400,6 +1436,10 @@ def parse_args() -> argparse.Namespace:
                     help="MDD permitido sin penalización; por encima penaliza score.")
     ap.add_argument("--ev-thr-lo", type=float, default=0.10)
     ap.add_argument("--ev-thr-hi", type=float, default=0.40)
+    ap.add_argument("--oof-epochs", type=int, default=90,
+                    help="Epochs máximos por fold OOF (early stopping aplica).")
+    ap.add_argument("--oof-patience", type=int, default=12,
+                    help="Patience del early stopping por fold OOF.")
     ap.add_argument(
         "--target-type",
         choices=["binary", "quantile", "magnitude", "triple_class", "multitask"],
@@ -1986,7 +2026,7 @@ def _tf_defaults(base_tf: str) -> Dict[str, int]:
     return {"seq_len_short": 64, "seq_len_long": 256, "price_norm_window": 200}
 
 
-_VOL_INVARIANT_RELEASES = {"202200", "202300", "202400", "202500"}
+_VOL_INVARIANT_RELEASES = {"202200", "202300", "202400", "202500", "202501"}
 _REDUCED_FEATURES_RELEASES = {"202300", "202400", "202500"}
 _ULTRA_REDUCED_FEATURES_RELEASES = {"202400"}
 
@@ -2007,12 +2047,14 @@ def build_trainer(
     max_drawdown_R: float = 30.0,
     ev_thr_lo: float = 0.10,
     ev_thr_hi: float = 0.40,
+    oof_epochs: int = 90,
+    oof_patience: int = 12,
 ) -> OptunaOOFTrainer:
     general = Config(
         release=release,
         use_oof=True,
         oof_splits=5,
-        oof_epochs=90,
+        oof_epochs=oof_epochs,
         save_oof_artifacts=True,
     )
 
@@ -2100,8 +2142,8 @@ def build_trainer(
         base_model_config=ModelConfig(
             seq_len_short=tf_defaults["seq_len_short"],
             seq_len_long=tf_defaults["seq_len_long"],
-            epochs=90,
-            patience=12,
+            epochs=oof_epochs,
+            patience=oof_patience,
             use_hierarchical_fusion=True,
             ranking_loss_weight=ranking_loss,
             target_type=model_target_type,
@@ -2642,6 +2684,8 @@ def main() -> None:
         max_drawdown_R=args.max_drawdown_R,
         ev_thr_lo=args.ev_thr_lo,
         ev_thr_hi=args.ev_thr_hi,
+        oof_epochs=args.oof_epochs,
+        oof_patience=args.oof_patience,
     )
     if args.objective == "ev_net":
         print(
