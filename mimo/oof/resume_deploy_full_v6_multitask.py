@@ -147,6 +147,92 @@ def load_best_params_from_db(trainer, target_type: str) -> None:
               if False else f"  ✅ best_params cargados para side={side}")
 
 
+def load_locked_params(
+    trainer,
+    target_type: str,
+    locked_path: Path,
+    locked_side_key: Optional[str],
+) -> Dict[str, Any]:
+    """Sobrescribe best_params_by_side / best_model_config_by_side directamente
+    desde un JSON con hyperparams locked (formato de extract_best_per_side o
+    dict plano de params), sin tocar la BD Optuna.
+
+    Returns: dict con metainfo (sides, trial origen, etc.) para logging.
+    """
+    if not locked_path.exists():
+        raise SystemExit(f"❌ --locked-params-json no existe: {locked_path}")
+
+    with locked_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    is_extract_report = "top_long" in payload or "top_short" in payload
+
+    info: Dict[str, Any] = {"path": str(locked_path), "sides": {}}
+
+    if target_type == "multitask":
+        # En multitask se entrena UN modelo. El usuario debe indicar de qué
+        # side toma los hyperparams (long o short del best_per_side, o pasa
+        # un dict plano).
+        if is_extract_report:
+            if not locked_side_key:
+                raise SystemExit(
+                    "❌ --locked-params-json es un best_per_side; pasa "
+                    "--locked-side-key {long,short} para indicar qué set "
+                    "de hyperparams aplicar al modelo multitask."
+                )
+            sub = payload.get(f"top_{locked_side_key}", [])
+            if not sub:
+                raise SystemExit(f"❌ top_{locked_side_key} vacío en {locked_path}.")
+            params = dict(sub[0].get("params", {}))
+            info["sides"]["multitask"] = {
+                "source": f"top_{locked_side_key}[0]",
+                "trial": sub[0].get("trial", "?"),
+                "params": params,
+            }
+        else:
+            params = dict(payload)
+            info["sides"]["multitask"] = {"source": "flat_dict", "params": params}
+
+        mc = trainer._model_config_from_params(params)
+        trainer.best_params_by_side["multitask"] = params
+        trainer.best_model_config_by_side["multitask"] = mc
+
+    elif target_type == "binary":
+        # En binary single-side cada side puede usar sus propios locked params.
+        # Solo aceptamos el report de extract_best_per_side; con dict plano no
+        # podemos diferenciar long de short.
+        if not is_extract_report:
+            raise SystemExit(
+                "❌ binary requiere best_per_side.json con top_long/top_short "
+                "para diferenciar hyperparams por side. Dict plano no es suficiente."
+            )
+        for side in ("long", "short"):
+            sub = payload.get(f"top_{side}", [])
+            if not sub:
+                print(f"  ⚠️  top_{side} vacío en {locked_path.name}; "
+                      f"saltando side={side}.")
+                continue
+            params = dict(sub[0].get("params", {}))
+            mc = trainer._model_config_from_params(params)
+            trainer.best_params_by_side[side] = params
+            trainer.best_model_config_by_side[side] = mc
+            info["sides"][side] = {
+                "source": f"top_{side}[0]",
+                "trial": sub[0].get("trial", "?"),
+                "params": params,
+            }
+    else:
+        raise ValueError(f"target_type desconocido para locked params: {target_type}")
+
+    print(f"\n🔒 [LOCKED PARAMS] {locked_path}")
+    for side, meta in info["sides"].items():
+        trial = meta.get("trial", "?")
+        print(f"   · side={side:9s}  source={meta['source']}  trial=#{trial}")
+        for k, v in sorted(meta["params"].items()):
+            print(f"        {k:>22s} : {v}")
+    return info
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Train + recalibrate (multitask)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -409,6 +495,18 @@ def parse_args():
     ap.add_argument("--oof-epochs", type=int, default=120)
     ap.add_argument("--oof-patience", type=int, default=15)
 
+    # Locked params: si se pasa, NO se cargan best_params del study Optuna;
+    # se usa el JSON directamente. Imprescindible para deploys de specialists.
+    ap.add_argument("--locked-params-json", type=str, default=None,
+                    help="JSON con hyperparams locked (best_per_side.json o "
+                         "dict plano). Si se pasa, omite la carga de best "
+                         "params desde la BD Optuna.")
+    ap.add_argument("--locked-side-key", choices=["long", "short"], default=None,
+                    help="En multitask con best_per_side.json: indica si tomar "
+                         "top_long[0] o top_short[0] como hyperparams del "
+                         "modelo multitask reentrenado. En binary se ignora "
+                         "(cada side toma su propio top_<side>[0]).")
+
     return ap.parse_args()
 
 
@@ -492,9 +590,20 @@ def main():
     )
     print("   ✅ trainer construido")
 
-    # 4. Cargar best_params del Optuna study
-    print("\n📥 Cargando best params desde Optuna DB...")
-    load_best_params_from_db(trainer, target_type)
+    # 4. Cargar best_params: desde JSON locked si --locked-params-json,
+    #    si no desde la BD Optuna del trainer.
+    locked_info: Optional[Dict[str, Any]] = None
+    if args.locked_params_json:
+        print("\n🔒 Cargando best params desde JSON locked (omitiendo Optuna DB)...")
+        locked_info = load_locked_params(
+            trainer,
+            target_type=target_type,
+            locked_path=Path(args.locked_params_json),
+            locked_side_key=args.locked_side_key,
+        )
+    else:
+        print("\n📥 Cargando best params desde Optuna DB...")
+        load_best_params_from_db(trainer, target_type)
 
     if args.validate_only:
         print("\n--validate-only: cargo artifacts existentes y valido.")
@@ -552,6 +661,11 @@ def main():
             "label_horizon_short": args.label_horizon_short,
             "variant_long": args.variant_long,
             "variant_short": args.variant_short,
+            "locked_params_json": (
+                str(args.locked_params_json) if args.locked_params_json else None
+            ),
+            "locked_side_key": args.locked_side_key,
+            "locked_info": locked_info,
             "note": (
                 "v6: trained on full-minus-tail; tail reserved for final "
                 "isotonic recalibration. Old Optuna OOF calibrator NOT "
