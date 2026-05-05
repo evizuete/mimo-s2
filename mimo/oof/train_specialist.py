@@ -34,7 +34,11 @@ from pathlib import Path
 
 def _build_cmd(args, side_key: str) -> list[str]:
     """Construye el comando para entrenar el especialista de un lado."""
+    # Si seed != 42, lo añadimos al sufijo del exp_tag para no pisar el run
+    # default (seed=42) cuando iteramos buscando un specialist más estable.
     suffix = f"_{side_key}_specialist"
+    if int(args.seed) != 42:
+        suffix += f"_seed{int(args.seed)}"
     cmd = [
         sys.executable, "-m", "mimo.oof.main_oof_regime_weights_v7",
         "--release", args.release,
@@ -62,7 +66,9 @@ def _build_cmd(args, side_key: str) -> list[str]:
         "--locked-params-json", args.best_per_side_json,
         "--locked-side-key", side_key,
         "--exp-tag-suffix", suffix,
-        "--notes", f"specialist_{side_key} from {Path(args.best_per_side_json).name}",
+        "--seed", str(args.seed),
+        "--notes",
+        f"specialist_{side_key} from {Path(args.best_per_side_json).name} (seed={args.seed})",
     ]
     return cmd
 
@@ -93,6 +99,11 @@ def main():
     ap.add_argument("--ev-thr-hi", type=float, default=0.40)
     ap.add_argument("--oof-epochs", type=int, default=120)
     ap.add_argument("--oof-patience", type=int, default=15)
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Seed global para Python random / numpy / TF / Optuna. "
+                         "Cambiar este valor produce specialists distintos. "
+                         "Si seed != 42 el exp_tag lleva sufijo '_seedN' para "
+                         "no pisar el specialist default. Default: 42.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Imprime los comandos pero no los ejecuta.")
     args = ap.parse_args()
@@ -152,6 +163,8 @@ def main():
     print("   Artifacts en:")
     for side_key in sides_to_train:
         suffix = f"_{side_key}_specialist"
+        if int(args.seed) != 42:
+            suffix += f"_seed{int(args.seed)}"
         print(
             f"     artifacts/{args.release}/oof/"
             f"rw_both_L{args.variant_long}_h{args.label_horizon_long}"

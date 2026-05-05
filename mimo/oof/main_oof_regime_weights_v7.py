@@ -1454,6 +1454,12 @@ def parse_args() -> argparse.Namespace:
                     help="Sufijo para experiment_tag (artifacts dir). "
                          "Útil para no pisar artifacts del run original "
                          "(ej. '_long_specialist').")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Seed global para Python random / numpy / TF + Optuna "
+                         "sampler. Cambiar este valor produce realizaciones "
+                         "distintas del entrenamiento (útil para iterar "
+                         "specialists hasta encontrar uno estable). "
+                         "Default: 42.")
     ap.add_argument(
         "--target-type",
         choices=["binary", "quantile", "magnitude", "triple_class", "multitask"],
@@ -2064,6 +2070,7 @@ def build_trainer(
     oof_epochs: int = 90,
     oof_patience: int = 12,
     study_prefix: str = "oof_study",
+    seed: int = 42,
 ) -> OptunaOOFTrainer:
     general = Config(
         release=release,
@@ -2167,7 +2174,7 @@ def build_trainer(
         out_dir=str(train_dir),
         optuna_db="mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db",
         study_prefix=study_prefix,
-        seed=42,
+        seed=seed,
         reload=False,
         temperature_long=1.0,
         temperature_short=1.0,
@@ -2572,9 +2579,30 @@ def run_side(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def set_global_seeds(seed: int) -> None:
+    """Fija seeds para Python random / numpy / TF / hash. NO habilita
+    determinismo CUDA (TF GPU sigue siendo no determinista por kernels
+    atomic en convs/LSTMs); para eso pasar también
+    TF_DETERMINISTIC_OPS=1 + TF_CUDNN_DETERMINISTIC=1 en el environment.
+
+    Cambiar el seed produce una realización distinta del entrenamiento
+    completo (init de pesos, dropout, shuffle de batches, etc.). Es
+    suficiente para iterar specialists buscando uno estable, sin pagar
+    el coste (~2x) del determinismo CUDA estricto.
+    """
+    import random as _random
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    _random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    print(f"🌱 [SEED] global seed fijado a {seed} (random/numpy/tf/hash).")
+
+
 def main() -> None:
     args = parse_args()
     start_time = time.perf_counter()
+
+    set_global_seeds(int(args.seed))
 
     label_h_long, label_h_short = resolve_label_horizons(args)
     regime_weights_by_side = resolve_regime_weights(args)
@@ -2750,6 +2778,7 @@ def main() -> None:
         oof_epochs=args.oof_epochs,
         oof_patience=args.oof_patience,
         study_prefix=study_prefix_override or "oof_study",
+        seed=int(args.seed),
     )
     if args.objective == "ev_net":
         print(
