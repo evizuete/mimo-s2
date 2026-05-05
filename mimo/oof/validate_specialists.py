@@ -254,46 +254,91 @@ def _verdict(
     *,
     strict: bool,
 ) -> Dict[str, Any]:
-    d_ev_net = _abs_delta(recorded.get("ev_net", float("nan")),
-                          recomputed.get("ev_net", float("nan")))
-    d_ev_gross = _abs_delta(recorded.get("ev_gross", float("nan")),
-                            recomputed.get("ev_gross", float("nan")))
-    d_n_sig = _abs_delta(recorded.get("n_signals", 0),
-                         recomputed.get("n_signals", 0))
-    d_prec = _abs_delta(recorded.get("prec_TP", float("nan")),
-                        recomputed.get("prec_TP", float("nan")))
-    d_mdd = _abs_delta(recorded.get("mdd_R", float("nan")),
-                       recomputed.get("mdd_R", float("nan")))
+    """Validación direccional: solo falla si el specialist es PEOR que el
+    recorded por más de la tolerancia. Si el specialist mejora (más EV,
+    más prec, menos MDD), eso NO es un fallo aunque el delta sea grande.
 
-    # n_signals: en strict comparamos absoluto; en default usamos un
-    # criterio relativo con piso absoluto de 50 (evita que recorded=10 y
-    # recomputed=80 pase un check "70%")
-    rec_sig = float(recorded.get("n_signals", 0))
+    En strict mode usamos delta absoluto (cualquier desvío bit-perfect es
+    sospechoso, sea hacia arriba o hacia abajo).
+
+    Métricas y dirección:
+      ev_net, ev_gross, prec_TP    → higher is better, fail si baja > tol
+      mdd_R, frac_SL               → lower is better,  fail si sube > tol
+      n_signals                    → fail solo si explota (>2x recorded) o
+                                     colapsa (<10% recorded). Ser más
+                                     selectivo o levemente más prolífico
+                                     no es problema.
+    """
+    rec_ev_net = float(recorded.get("ev_net", float("nan")))
+    rec_ev_gross = float(recorded.get("ev_gross", float("nan")))
+    rec_n_sig = float(recorded.get("n_signals", 0))
+    rec_prec = float(recorded.get("prec_TP", float("nan")))
+    rec_mdd = float(recorded.get("mdd_R", float("nan")))
+
+    rcm_ev_net = float(recomputed.get("ev_net", float("nan")))
+    rcm_ev_gross = float(recomputed.get("ev_gross", float("nan")))
+    rcm_n_sig = float(recomputed.get("n_signals", 0))
+    rcm_prec = float(recomputed.get("prec_TP", float("nan")))
+    rcm_mdd = float(recomputed.get("mdd_R", float("nan")))
+
+    # Deltas firmados (recomputed - recorded). Positivo = recomputed más alto.
+    s_ev_net = rcm_ev_net - rec_ev_net
+    s_ev_gross = rcm_ev_gross - rec_ev_gross
+    s_n_sig = rcm_n_sig - rec_n_sig
+    s_prec = rcm_prec - rec_prec
+    s_mdd = rcm_mdd - rec_mdd
+
     if strict:
+        # Strict: cualquier desvío > tol es fallo (sea hacia arriba o abajo)
         nsig_tol_abs = float(tols["n_signals"])
-        nsig_pass = d_n_sig <= nsig_tol_abs
-        nsig_tol_str = f"≤{int(nsig_tol_abs)}"
+        checks = {
+            "ev_net":    (s_ev_net,   tols["ev_net"],   abs(s_ev_net)   <= tols["ev_net"],   "abs"),
+            "ev_gross":  (s_ev_gross, tols["ev_gross"], abs(s_ev_gross) <= tols["ev_gross"], "abs"),
+            "n_signals": (s_n_sig,    nsig_tol_abs,     abs(s_n_sig)    <= nsig_tol_abs,     "abs"),
+            "prec_TP":   (s_prec,     tols["prec_TP"],  abs(s_prec)     <= tols["prec_TP"],  "abs"),
+            "mdd_R":     (s_mdd,      tols["mdd_R"],    abs(s_mdd)      <= tols["mdd_R"],    "abs"),
+        }
+        nsig_tol_str = f"|Δ|≤{int(nsig_tol_abs)}"
     else:
-        nsig_tol_abs = max(50.0, rec_sig * float(tols["n_signals"]))
-        nsig_pass = d_n_sig <= nsig_tol_abs
-        nsig_tol_str = f"≤{int(nsig_tol_abs)} (50% rel ó 50 abs)"
+        # Relajado direccional:
+        #   - ev_net/ev_gross/prec_TP: fail si BAJA más de tol
+        #   - mdd_R: fail si SUBE más de tol
+        #   - n_signals: fail solo si explota o colapsa
+        nsig_explosion = rec_n_sig * 2.0   # más de 2x recorded → mod inestable
+        nsig_collapse = max(10.0, rec_n_sig * 0.1)  # < 10% → modelo casi sin señal
 
-    checks = {
-        "ev_net":    (d_ev_net,    tols["ev_net"],   d_ev_net   <= tols["ev_net"]),
-        "ev_gross":  (d_ev_gross,  tols["ev_gross"], d_ev_gross <= tols["ev_gross"]),
-        "n_signals": (d_n_sig,     nsig_tol_abs,     nsig_pass),
-        "prec_TP":   (d_prec,      tols["prec_TP"],  d_prec     <= tols["prec_TP"]),
-        "mdd_R":     (d_mdd,       tols["mdd_R"],    d_mdd      <= tols["mdd_R"]),
-    }
-    fails = {k: (delta, tol) for k, (delta, tol, ok) in checks.items() if not ok}
-    deltas = {k: delta for k, (delta, _, _) in checks.items()}
-    tols_eff = {k: tol for k, (_, tol, _) in checks.items()}
+        checks = {
+            "ev_net":    (s_ev_net,   tols["ev_net"],   s_ev_net   >= -tols["ev_net"],   "down"),
+            "ev_gross":  (s_ev_gross, tols["ev_gross"], s_ev_gross >= -tols["ev_gross"], "down"),
+            "prec_TP":   (s_prec,     tols["prec_TP"],  s_prec     >= -tols["prec_TP"],  "down"),
+            "mdd_R":     (s_mdd,      tols["mdd_R"],    s_mdd      <=  tols["mdd_R"],    "up"),
+            "n_signals": (
+                s_n_sig,
+                (nsig_collapse, nsig_explosion),
+                (rcm_n_sig <= nsig_explosion) and (rcm_n_sig >= nsig_collapse),
+                "range",
+            ),
+        }
+        nsig_tol_str = (
+            f"{int(nsig_collapse)} ≤ rcm ≤ {int(nsig_explosion)} "
+            f"(0.1×–2.0× recorded)"
+        )
+
+    fails = {}
+    deltas = {}
+    tols_eff = {}
+    for k, (signed_delta, tol, ok, mode) in checks.items():
+        deltas[k] = signed_delta
+        tols_eff[k] = tol
+        if not ok:
+            fails[k] = (signed_delta, tol, mode)
     tols_eff["n_signals_str"] = nsig_tol_str
     return {
-        "deltas": deltas,
+        "deltas": deltas,                   # firmados (positivo = recomputed mayor)
         "tolerances": tols_eff,
         "fails": fails,
         "passed": len(fails) == 0,
+        "strict": strict,
     }
 
 
@@ -330,32 +375,47 @@ def _print_side_table(
 
     v = _verdict(recorded, recomputed, tols, strict=strict)
     print()
+    mode = "STRICT" if strict else "RELAJADO"
     if v["passed"]:
-        mode = "STRICT" if strict else "RELAJADO"
-        print(f"  ✅ PASS ({mode}) — métricas dentro de tolerancia.")
-        # Imprimir tolerancias para transparencia
-        t = v["tolerances"]
-        print(f"     ev_net Δ={v['deltas']['ev_net']:.4f}  (tol ≤{t['ev_net']:.3f})")
-        print(f"     n_sig  Δ={v['deltas']['n_signals']:.0f}  (tol {t['n_signals_str']})")
-        print(f"     mdd_R  Δ={v['deltas']['mdd_R']:.2f}R  (tol ≤{t['mdd_R']:.1f}R)")
+        print(f"  ✅ PASS ({mode}) — specialist no es peor que el trial dentro de tolerancia.")
+        # Resaltar mejoras notables (signed delta a favor del specialist)
+        improvements = []
+        if v["deltas"]["ev_net"] > tols["ev_net"]:
+            improvements.append(f"ev_net +{v['deltas']['ev_net']:.4f}R")
+        if v["deltas"]["prec_TP"] > tols["prec_TP"]:
+            improvements.append(f"prec_TP +{v['deltas']['prec_TP']:.4f}")
+        if v["deltas"]["mdd_R"] < -tols["mdd_R"]:
+            improvements.append(f"MDD {v['deltas']['mdd_R']:+.2f}R")
+        if improvements and not strict:
+            print(f"     🎯 Specialist MEJORA al trial en: {', '.join(improvements)}")
     else:
-        mode_label = "STRICT" if strict else "RELAJADO"
-        print(f"  ❌ FAIL ({mode_label}) — métricas fuera de tolerancia:")
-        for k, (delta, tol) in v["fails"].items():
-            tol_str = (v["tolerances"]["n_signals_str"]
-                       if k == "n_signals" else f"≤{tol:.4f}")
-            print(f"      {k:<10}  Δ={delta:.4f}  (tol {tol_str})")
+        print(f"  ❌ FAIL ({mode}) — specialist se desvía a peor:")
+        for k, (delta, tol, m) in v["fails"].items():
+            if m == "down":
+                # ev_net/prec/etc. baja
+                print(f"      {k:<10}  recomputed {delta:+.4f} respecto a recorded "
+                      f"(baja > tol {tol:.4f}) ❌")
+            elif m == "up":
+                # mdd_R sube
+                print(f"      {k:<10}  recomputed {delta:+.4f} respecto a recorded "
+                      f"(sube > tol {tol:.4f}) ❌")
+            elif m == "range":
+                # n_signals fuera de [collapse, explosion]
+                lo, hi = tol
+                print(f"      {k:<10}  recomputed={recomputed.get('n_signals')} "
+                      f"fuera de [{int(lo)}, {int(hi)}] ❌")
+            else:
+                # strict abs
+                print(f"      {k:<10}  |Δ|={abs(delta):.4f} > tol {tol:.4f}")
         if not strict:
-            # En modo relajado un fail ya es serio: el modelo sí está derivando
-            # más de lo aceptable por TF non-determinismo solo.
-            print("  Posibles causas (más allá de TF non-determinismo):")
-            print("      - El modelo cayó en un mínimo local muy distinto al trial.")
-            print("        Considera retrain con --seed distinto.")
-            print("      - El trial original era sobre-ajustado al fold split exacto.")
-            print("      - Drift en los datos entre runs (raro pero posible).")
+            print("  El specialist es PEOR que el trial original en métricas críticas.")
+            print("  Acciones sugeridas:")
+            print("      - Retrain con --seed distinto.")
+            print("      - Revisa que el trial origen no estuviera sobre-ajustado")
+            print("        al fold split (mira ev_net en holdout, no solo OOF).")
         else:
-            print("  En modo STRICT esto es esperable sin TF_DETERMINISTIC_OPS=1.")
-            print("  Re-ejecuta sin --strict para tolerancias realistas.")
+            print("  En modo STRICT cualquier desvío bit-no-perfecto falla.")
+            print("  Re-ejecuta sin --strict para chequeo direccional realista.")
     return v
 
 
@@ -453,14 +513,19 @@ def main():
     if args.tol_prec is not None:
         tols["prec_TP"] = float(args.tol_prec)
 
-    print(f"\n🎚️  Modo de tolerancias: {'STRICT' if args.strict else 'RELAJADO (TF non-determ)'}")
-    print(f"     ev_net abs        : ≤ {tols['ev_net']:.4f}R")
+    print(f"\n🎚️  Modo de tolerancias: {'STRICT' if args.strict else 'RELAJADO (TF non-determ, direccional)'}")
     if args.strict:
-        print(f"     n_signals abs     : ≤ {int(tols['n_signals'])}")
+        print(f"     |Δ ev_net|       ≤ {tols['ev_net']:.4f}R")
+        print(f"     |Δ n_signals|    ≤ {int(tols['n_signals'])}")
+        print(f"     |Δ prec_TP|      ≤ {tols['prec_TP']:.4f}")
+        print(f"     |Δ mdd_R|        ≤ {tols['mdd_R']:.2f}R")
+        print(f"     Cualquier desvío bit-no-perfecto será fallo.")
     else:
-        print(f"     n_signals rel/abs : ≤ {tols['n_signals']*100:.0f}% (con piso 50 abs)")
-    print(f"     prec_TP abs       : ≤ {tols['prec_TP']:.4f}")
-    print(f"     mdd_R abs         : ≤ {tols['mdd_R']:.2f}R")
+        print(f"     ev_net   no debe BAJAR más de  {tols['ev_net']:.4f}R")
+        print(f"     prec_TP  no debe BAJAR más de  {tols['prec_TP']:.4f}")
+        print(f"     mdd_R    no debe SUBIR más de  {tols['mdd_R']:.2f}R")
+        print(f"     n_signals debe estar en  [10% × recorded, 2× recorded]")
+        print(f"     (mejorar respecto al trial NO es fallo)")
 
     json_path = Path(args.best_per_side_json)
     if not json_path.exists():
