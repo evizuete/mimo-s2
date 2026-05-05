@@ -168,15 +168,22 @@ def compute_ev_at_best_threshold(
         ev_gross = float(sub_r.mean())
         ev_net = ev_gross - cost_per_signal
         mdd = _max_drawdown_R(sub_r - cost_per_signal)
-        # penalización suave por drawdown
+        # Penalización SUSTRACTIVA por exceso de drawdown: cuando MDD > max_drawdown_R
+        # restamos `softness * exceso_normalizado` al ev_net. Mantiene el orden
+        # natural — config catastrófica nunca es "mejor" que mediocre saneada.
         if mdd > max_drawdown_R:
-            penalty = max(
-                0.0,
-                1.0 - drawdown_softness * (mdd - max_drawdown_R) / max(max_drawdown_R, 1e-9),
-            )
+            mdd_excess = (mdd - max_drawdown_R) / max(max_drawdown_R, 1e-9)
+            penalty_R = drawdown_softness * mdd_excess
         else:
-            penalty = 1.0
-        score = ev_net * penalty
+            penalty_R = 0.0
+        # score = ev_net - penalty_R (no más multiplicación)
+        score = ev_net - penalty_R
+        # Para reporting: penalty_mdd 1.0 si limpio, fracción restante si penalizado.
+        # Lo dejamos sólo informativo — el ranking usa score puro.
+        if mdd > max_drawdown_R:
+            penalty_info = max(0.0, 1.0 - drawdown_softness * mdd_excess)
+        else:
+            penalty_info = 1.0
 
         n_tp = int((sub_outcome == 0).sum())
         n_sl = int((sub_outcome == 1).sum())
@@ -188,7 +195,8 @@ def compute_ev_at_best_threshold(
             "ev_net": float(ev_net),
             "ev_gross": float(ev_gross),
             "mdd_R": float(mdd),
-            "penalty_mdd": float(penalty),
+            "penalty_mdd": float(penalty_info),
+            "penalty_R": float(penalty_R),
             "sig_rate": float(sig / len(p)),
             "n_signals": sig,
             "n_TP": n_tp, "n_SL": n_sl, "n_EXPIRE": n_exp,
