@@ -237,13 +237,36 @@ def load_locked_params(
 # Train + recalibrate (multitask)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_production_multitask(trainer, df_rates: pd.DataFrame) -> TrainerArtifacts:
+def train_production_multitask(trainer, df_rates: pd.DataFrame,
+                               *, reuse_best_trial_oof: bool = True) -> TrainerArtifacts:
     """Reentrena el modelo MULTITASK sobre full-minus-tail."""
     print("\n[DEPLOY] Reentrenando MULTITASK production model sobre FULL-minus-tail")
+    if not reuse_best_trial_oof:
+        print("   ℹ️  reuse_best_trial_oof=False (locked params: regenerar OOF desde cero).")
     artifacts = trainer.prepare_production_model(
         df_rates=df_rates,
         side="multitask",
-        reuse_best_trial_oof=True,
+        reuse_best_trial_oof=reuse_best_trial_oof,
+    )
+    free_memory()
+    return artifacts
+
+
+def train_production_single_side(trainer, df_rates: pd.DataFrame, side: str,
+                                 *, reuse_best_trial_oof: bool = True) -> TrainerArtifacts:
+    """Reentrena un modelo single-side sobre full-minus-tail.
+
+    Equivalente a v5_train_single_side pero permite controlar reuse_best_trial_oof
+    (necesario con --locked-params-json: el study locked está vacío y el branch
+    de reuse intentaría leer study.best_trial → ValueError).
+    """
+    print(f"\n[DEPLOY] Preparing production {side.upper()} model based on FULL-minus-tail period")
+    if not reuse_best_trial_oof:
+        print("   ℹ️  reuse_best_trial_oof=False (locked params: regenerar OOF desde cero).")
+    artifacts = trainer.prepare_production_model(
+        df_rates=df_rates,
+        side=side,
+        reuse_best_trial_oof=reuse_best_trial_oof,
     )
     free_memory()
     return artifacts
@@ -679,8 +702,15 @@ def main():
     # 6. Reentrenar production model (multitask: 1 modelo; binary: 2 modelos)
     deploy_artifacts: Dict[str, Any] = {}
 
+    # Con locked params, el study Optuna está vacío (sin trials previos),
+    # así que reuse_best_trial_oof=True falla en study.best_trial. Forzar False
+    # cuando hay locked params: regenerar OOF desde cero con la config locked.
+    reuse_oof = not bool(args.locked_params_json)
+
     if target_type == "multitask":
-        artifacts_multi = train_production_multitask(trainer, df_deploy_train)
+        artifacts_multi = train_production_multitask(
+            trainer, df_deploy_train, reuse_best_trial_oof=reuse_oof,
+        )
         result = recalibrate_deploy_multitask(
             artifacts=artifacts_multi,
             deploy_dir=deploy_dir,
@@ -717,7 +747,9 @@ def main():
     elif target_type == "binary":
         sides = ["long", "short"] if args.side == "both" else [args.side]
         for side in sides:
-            art = v5_train_single_side(trainer, df_deploy_train, side)
+            art = train_production_single_side(
+                trainer, df_deploy_train, side, reuse_best_trial_oof=reuse_oof,
+            )
             art = v5_recalibrate_deploy_side(
                 artifacts=art,
                 deploy_dir=deploy_dir,
