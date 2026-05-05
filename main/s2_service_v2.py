@@ -1071,24 +1071,26 @@ class S2Service:
             self.db, last_n_rates=self.LAST_N_RATES
         )
 
-        # ── 2) Trigger del modelo solo en cierre de barra base_tf
-        # Para release 202500 (BASE_TF_MINUTES=5) saltamos los ticks que
-        # no caen en minuto múltiplo de 5. Así decide_live se invoca a la
-        # misma cadencia que entrenamiento (1 vez por bar 5m).
-        tick_time_epoch = data.get("time")
-        if not self._should_process_basetf_close(tick_time_epoch):
-            ts_dbg = pd.Timestamp(int(tick_time_epoch), unit="s") if tick_time_epoch else "n/a"
-            print(f"[S2][SKIP] tick @ {ts_dbg} no cierra bar {self.BASE_TF_MINUTES}m → skip decide_live")
-            return
-
-        # ── 3) Resamplea 1m → base_tf antes del modelo
+        # ── 2) Resamplea 1m → base_tf SIEMPRE (coste despreciable)
+        # Necesario para que _extract_pipeline_snapshot trabaje con bars
+        # del mismo TF que el modelo, y para que indicators reflejen la
+        # granularidad correcta en el keepalive a S3.
         df_rates = self._resample_to_base_tf(df_rates_1m)
         if len(df_rates) < 100:
             print(f"[S2][WARN] solo {len(df_rates)} bars {self.BASE_TF_MINUTES}m tras resample. "
                   f"Aborto este tick (warmup insuficiente).")
             return
-        print(f"[S2][TF] 1m → {self.BASE_TF_MINUTES}m: {len(df_rates_1m)} → {len(df_rates)} bars  "
-              f"último cierre: {df_rates['time'].iloc[-1]}")
+
+        # ── 3) Trigger del modelo solo en cierre de barra base_tf
+        # En ticks intermedios (minute % 5 != 0 para BASE_TF=5m) NO llamamos
+        # a decide_live, pero SÍ corremos keepalive + guards + position
+        # management en bloques posteriores de esta función. Esto evita que
+        # S3 marque posiciones como NOT_TRACKED por timeout (el keepalive
+        # se envía cada tick, no cada cierre 5m).
+        tick_time_epoch = data.get("time")
+        should_invoke_model = self._should_process_basetf_close(tick_time_epoch)
+        ts_dbg = (pd.Timestamp(int(tick_time_epoch), unit="s")
+                  if tick_time_epoch else "n/a")
 
         s3_n_pre = self.s3_state.n_positions()
         s3_n_local = len(self._s3_open_tickets_local)
@@ -1099,14 +1101,21 @@ class S2Service:
                 f"→ using effective={effective_positions}"
             )
 
-        live_order = self.simulator.decide_live(
-            df_rates=df_rates,
-            equity=float(equity),
-            current_positions=effective_positions,
-            max_positions=2,
-        )
-
-        model_diag = getattr(self.simulator, "_last_diag", None)
+        live_order = None
+        model_diag = None
+        if should_invoke_model:
+            print(f"[S2][TF] 1m → {self.BASE_TF_MINUTES}m: {len(df_rates_1m)} → {len(df_rates)} bars  "
+                  f"cierre @ {df_rates['time'].iloc[-1]}")
+            live_order = self.simulator.decide_live(
+                df_rates=df_rates,
+                equity=float(equity),
+                current_positions=effective_positions,
+                max_positions=2,
+            )
+            model_diag = getattr(self.simulator, "_last_diag", None)
+        else:
+            print(f"[S2][SKIP-MODEL] tick @ {ts_dbg} no cierra bar "
+                  f"{self.BASE_TF_MINUTES}m → keepalive only, decide_live skipped")
         _, pip_last, pip_prev, pip_get, bb_upper, bb_lower = self._extract_pipeline_snapshot(df_rates)
 
         current_indicators = self._build_current_indicators(
