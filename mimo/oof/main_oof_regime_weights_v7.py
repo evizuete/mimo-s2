@@ -2063,6 +2063,7 @@ def build_trainer(
     ev_thr_hi: float = 0.40,
     oof_epochs: int = 90,
     oof_patience: int = 12,
+    study_prefix: str = "oof_study",
 ) -> OptunaOOFTrainer:
     general = Config(
         release=release,
@@ -2165,7 +2166,7 @@ def build_trainer(
         ),
         out_dir=str(train_dir),
         optuna_db="mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db",
-        study_prefix="oof_study",
+        study_prefix=study_prefix,
         seed=42,
         reload=False,
         temperature_long=1.0,
@@ -2622,6 +2623,13 @@ def main() -> None:
     (train_dir / "reports").mkdir(parents=True, exist_ok=True)
 
     # ── Locked params: override del grid si se pasa --locked-params-json ──
+    # Cuando hay locked params, FORZAMOS un study Optuna separado: si reusásemos
+    # el study principal (oof_study_<release>_<target>), Optuna rechazaría el
+    # CategoricalDistribution singleton ([48]) por incompatibilidad con el
+    # espacio original del study ([32,48,64...]). Cada specialist tiene además
+    # su propio espacio de búsqueda (singleton), así que un study aislado por
+    # side_key es la opción correcta.
+    study_prefix_override: Optional[str] = None
     if args.locked_params_json:
         import json as _json
         locked_path = Path(args.locked_params_json)
@@ -2653,6 +2661,11 @@ def main() -> None:
         GRID_BY_RELEASE[str(args.release)] = singleton_grid
         for k, v in sorted(locked_params.items()):
             print(f"   {k:>22s} : {v}")
+        # Study prefix aislado: evita ValueError "CategoricalDistribution does
+        # not support dynamic value space" al reusar el study principal.
+        side_tag = args.locked_side_key or "plain"
+        study_prefix_override = f"oof_study_locked_{side_tag}"
+        print(f"   🧪 Optuna study aislado: {study_prefix_override}_<release>_<side>")
         print()
 
     Helper.save_meta(
@@ -2736,6 +2749,7 @@ def main() -> None:
         ev_thr_hi=args.ev_thr_hi,
         oof_epochs=args.oof_epochs,
         oof_patience=args.oof_patience,
+        study_prefix=study_prefix_override or "oof_study",
     )
     if args.objective == "ev_net":
         print(
