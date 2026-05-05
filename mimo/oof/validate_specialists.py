@@ -45,11 +45,75 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 
+import hashlib
+
 from mimo.oof.empirical_breakeven import wilder_atr
 from mimo.oof.ev_objective import (
     _simulate_outcomes_for_indices,
     _max_drawdown_R,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scaler comparison helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _md5_of_dir(path: Path) -> str:
+    if not path.exists():
+        return ""
+    h = hashlib.md5()
+    for f in sorted(path.rglob("*")):
+        if f.is_file():
+            h.update(f.relative_to(path).as_posix().encode())
+            h.update(f.read_bytes())
+    return h.hexdigest()
+
+
+def _compare_scalers(long_dir: Path, short_dir: Path, release: str) -> dict:
+    """Compara scalers_<release>/ entre los dos specialists. Devuelve
+    dict con md5s, flag de coincidencia y diagnóstico textual."""
+    sc_long = long_dir / f"scalers_{release}"
+    sc_short = short_dir / f"scalers_{release}"
+    md5_long = _md5_of_dir(sc_long)
+    md5_short = _md5_of_dir(sc_short)
+    same = (md5_long == md5_short) and md5_long != ""
+    info = {
+        "long_dir": str(sc_long),
+        "short_dir": str(sc_short),
+        "md5_long": md5_long,
+        "md5_short": md5_short,
+        "identical": same,
+        "long_exists": sc_long.exists(),
+        "short_exists": sc_short.exists(),
+    }
+    return info
+
+
+def _print_scaler_check(info: dict) -> bool:
+    """Imprime el resultado de la comparación. Devuelve True si los scalers
+    son idénticos (--strict-scalers de merge_specialists pasaría)."""
+    print("\n" + "=" * 78)
+    print("  CHECK DE SCALERS  (¿coinciden entre specialists?)")
+    print("=" * 78)
+    if not info["long_exists"]:
+        print(f"  ⚠️  long_dir no contiene scalers_<release>/: {info['long_dir']}")
+        return False
+    if not info["short_exists"]:
+        print(f"  ⚠️  short_dir no contiene scalers_<release>/: {info['short_dir']}")
+        return False
+    print(f"  long  md5 : {info['md5_long']}")
+    print(f"  short md5 : {info['md5_short']}")
+    if info["identical"]:
+        print("  ✅ Scalers idénticos. merge_specialists --strict-scalers pasará.")
+        return True
+    print("  ❌ Scalers DIFIEREN entre specialists.")
+    print("     Causa probable: alguno de los specialists alteró el feature set")
+    print("     (ej. distinto _REDUCED_FEATURES_RELEASES, masks, vol-invariant...).")
+    print("     Antes de merge_specialists:")
+    print("       - Confirma que ambos usaron release=202500 (mismo feature set).")
+    print("       - Si difieren legítimamente, decide --prefer-scalers-from {long,short}")
+    print("         con ojo crítico (el lado contrario podría predecir mal).")
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -384,13 +448,27 @@ def main():
         if not v["passed"]:
             overall_pass = False
 
+    # ── Check de scalers (solo cuando ambos specialists están disponibles) ──
+    scalers_ok = True
+    if args.specialist_long_dir and args.specialist_short_dir and args.side == "both":
+        sc_info = _compare_scalers(
+            Path(args.specialist_long_dir),
+            Path(args.specialist_short_dir),
+            args.release,
+        )
+        scalers_ok = _print_scaler_check(sc_info)
+
     # Veredicto global
     print("\n" + "=" * 78)
     print("  VEREDICTO GLOBAL")
     print("=" * 78)
-    if overall_pass:
+    if overall_pass and scalers_ok:
         print("  ✅ Todos los specialists reproducen el trial original.")
-        print("     Puedes seguir adelante con drift validation.")
+        print("     Scalers idénticos → merge_specialists --strict-scalers OK.")
+        print("     Puedes seguir adelante con merge_specialists + drift validation.")
+    elif overall_pass and not scalers_ok:
+        print("  ⚠️  Métricas reproducen OK pero scalers difieren.")
+        print("     Revisa la advertencia anterior antes de merge_specialists.")
     else:
         print("  ❌ Al menos un specialist NO reproduce el trial original.")
         print("     Revisa la configuración antes de drift validation:")
