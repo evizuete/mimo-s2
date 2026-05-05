@@ -662,6 +662,23 @@ GRID_BY_RELEASE = {
         "loss_weight_long":  [1.0],
         "loss_weight_short": [1.0],
     },
+    # 202500: misma feature set que 202300 (97 -> 72 reduced + vol-invariant)
+    # pero entrenado con OBJECTIVE = EV-net balanceado (replays triple barrier
+    # sobre OOF, descuenta coste, penaliza drawdown). Pensado para correr
+    # 30-50 trials con TPE. Las barriers son las mismas que 202300.
+    "202500": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        "conv1d_filters":    [48, 64, 96],
+        "lstm_units":        [64, 96, 128],
+        "dropout_seq":       [0.10, 0.15],
+        "dropout_lstm":      [0.20, 0.30, 0.40],
+        "dropout_dense":     [0.20, 0.30],
+        "learning_rate":     [5e-5, 1e-4, 2e-4, 3e-4],
+        "focal_alpha_long":  [0.25, 0.30, 0.35],
+        "focal_alpha_short": [0.25, 0.30, 0.35],
+        "loss_weight_long":  [1.0],
+        "loss_weight_short": [1.0],
+    },
 }
 
 
@@ -1246,6 +1263,24 @@ BARRIERS_BY_RELEASE = {
             "high_vol": {"tp": 2.20, "sl": 1.00},
         },
     },
+    # 202500: barriers idénticas a 202300 (tp 2.0 / sl 0.8 + variantes).
+    # Diferencia: objective EV-net balanceado en Optuna.
+    "202500": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
     # 201100: barriers idénticas a 200900 (tp=2.0/sl=0.8, BE=0.286). La novedad
     # es target-type=triple_class (cabeza softmax(3) sobre {SL, TIMEOUT, TP}
     # con SparseCategoricalCrossentropy). Lanzar con --target-type=triple_class.
@@ -1345,6 +1380,26 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--skip-optuna", action="store_true", help="Saltar optimize() y reusar best_params ya existentes.")
     ap.add_argument("--holdout-only", action="store_true", help="No entrena; evalúa artifacts existentes.")
     ap.add_argument("--notes", type=str, default="")
+    # ── EV-net objective (opcional) ─────────────────────────────────────
+    ap.add_argument(
+        "--objective",
+        choices=["aucpr", "ev_net"],
+        default="aucpr",
+        help=(
+            "Función objetivo de Optuna. 'aucpr' (legacy) maximiza AUC-PR. "
+            "'ev_net' replays triple barrier sobre OOF, descuenta coste y "
+            "penaliza drawdown excesivo. Para multitask devuelve "
+            "mean(EV_long, EV_short) tras penalización."
+        ),
+    )
+    ap.add_argument("--cost-per-signal", type=float, default=0.05,
+                    help="Coste round-trip en R-multiples por señal (--objective ev_net).")
+    ap.add_argument("--ev-min-signals", type=int, default=100,
+                    help="Mínimo de señales OOF para considerar un threshold válido.")
+    ap.add_argument("--max-drawdown-R", type=float, default=30.0,
+                    help="MDD permitido sin penalización; por encima penaliza score.")
+    ap.add_argument("--ev-thr-lo", type=float, default=0.10)
+    ap.add_argument("--ev-thr-hi", type=float, default=0.40)
     ap.add_argument(
         "--target-type",
         choices=["binary", "quantile", "magnitude", "triple_class", "multitask"],
@@ -1931,8 +1986,8 @@ def _tf_defaults(base_tf: str) -> Dict[str, int]:
     return {"seq_len_short": 64, "seq_len_long": 256, "price_norm_window": 200}
 
 
-_VOL_INVARIANT_RELEASES = {"202200", "202300", "202400"}
-_REDUCED_FEATURES_RELEASES = {"202300", "202400"}
+_VOL_INVARIANT_RELEASES = {"202200", "202300", "202400", "202500"}
+_REDUCED_FEATURES_RELEASES = {"202300", "202400", "202500"}
 _ULTRA_REDUCED_FEATURES_RELEASES = {"202400"}
 
 
@@ -1946,6 +2001,12 @@ def build_trainer(
     quantile_levels: tuple = (0.25, 0.50, 0.75),
     magnitude_m: float = 1.5,
     base_tf: str = "1min",
+    objective_kind: str = "aucpr",
+    cost_per_signal: float = 0.05,
+    ev_min_signals: int = 100,
+    max_drawdown_R: float = 30.0,
+    ev_thr_lo: float = 0.10,
+    ev_thr_hi: float = 0.40,
 ) -> OptunaOOFTrainer:
     general = Config(
         release=release,
@@ -2053,6 +2114,12 @@ def build_trainer(
         reload=False,
         temperature_long=1.0,
         temperature_short=1.0,
+        objective_kind=objective_kind,
+        cost_per_signal=cost_per_signal,
+        ev_min_signals=ev_min_signals,
+        max_drawdown_R=max_drawdown_R,
+        ev_thr_lo=ev_thr_lo,
+        ev_thr_hi=ev_thr_hi,
     )
     return trainer
 
@@ -2569,7 +2636,20 @@ def main() -> None:
         quantile_levels=quantile_levels_parsed,
         magnitude_m=args.magnitude_m,
         base_tf=args.base_tf,
+        objective_kind=args.objective,
+        cost_per_signal=args.cost_per_signal,
+        ev_min_signals=args.ev_min_signals,
+        max_drawdown_R=args.max_drawdown_R,
+        ev_thr_lo=args.ev_thr_lo,
+        ev_thr_hi=args.ev_thr_hi,
     )
+    if args.objective == "ev_net":
+        print(
+            f"💰 [EV OBJECTIVE] cost={args.cost_per_signal}R/sig | "
+            f"min_signals={args.ev_min_signals} | "
+            f"max_drawdown={args.max_drawdown_R}R | "
+            f"thr range [{args.ev_thr_lo:.2f}, {args.ev_thr_hi:.2f}]"
+        )
 
     combined_report = {
         "release": args.release,

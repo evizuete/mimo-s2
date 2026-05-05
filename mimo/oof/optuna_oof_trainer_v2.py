@@ -147,7 +147,15 @@ class OptunaOOFTrainer:
         reload: bool = False,
         calibration_temperature: float = 1.0,  # deprecated: usar temperature_long/temperature_short
         temperature_long: float = 1.0,
-        temperature_short: float = 1.2
+        temperature_short: float = 1.2,
+        # ── EV-net objective (opcional) ─────────────────────────────────
+        objective_kind: str = "aucpr",          # 'aucpr' (legacy) | 'ev_net'
+        cost_per_signal: float = 0.05,          # R-multiples por señal (round-trip)
+        ev_min_signals: int = 100,              # mínimo de señales para considerar un thr
+        max_drawdown_R: float = 30.0,           # MDD máximo permitido sin penalización
+        ev_thr_lo: float = 0.10,
+        ev_thr_hi: float = 0.40,
+        ev_n_thr: int = 60,
     ):
         self.grid_space = None
         self.general_config = general_config
@@ -168,6 +176,17 @@ class OptunaOOFTrainer:
         self.calibration_temperature = float(calibration_temperature)  # legacy
         self.temperature_long  = _t_long
         self.temperature_short = _t_short
+
+        # ── EV-net objective config ──────────────────────────────────────
+        if objective_kind not in ("aucpr", "ev_net"):
+            raise ValueError(f"objective_kind debe ser 'aucpr' o 'ev_net', recibido {objective_kind!r}")
+        self.objective_kind = objective_kind
+        self.cost_per_signal = float(cost_per_signal)
+        self.ev_min_signals = int(ev_min_signals)
+        self.max_drawdown_R = float(max_drawdown_R)
+        self.ev_thr_lo = float(ev_thr_lo)
+        self.ev_thr_hi = float(ev_thr_hi)
+        self.ev_n_thr = int(ev_n_thr)
 
         ensure_dir(self.out_dir)
 
@@ -426,7 +445,8 @@ class OptunaOOFTrainer:
             print(f"[QUANTILE OOF] pinball={pinball_oof:.4f} spearman={spearman:.4f} "
                   f"coverage={coverage:.3f} (target={target_coverage:.3f}) score={score:.4f}")
         elif target_type == 'multitask':
-            # Multi-task: AUC-PR media de las dos cabezas.
+            # Multi-task: AUC-PR media de las dos cabezas (legacy)
+            # o EV-net balanceado (objective_kind='ev_net').
             y_long = df_oof.loc[m, "signal_long"].to_numpy().astype(int)
             y_short = df_oof.loc[m, "signal_short"].to_numpy().astype(int)
             p_long = df_oof.loc[m, "oof_proba_long_cal"].to_numpy().astype(float)
@@ -444,9 +464,48 @@ class OptunaOOFTrainer:
                   f"AUC-PR short={auc_pr_short:.4f}")
 
             auc_pr = float(np.nanmean([auc_pr_long, auc_pr_short]))
-            score = auc_pr
             prec = float("nan")
             sr = float("nan")
+
+            if self.objective_kind == "ev_net":
+                from mimo.oof.ev_objective import compute_balanced_objective
+                # df_oof guarda time/high/low/close/atr (porque generate_oof_predictions
+                # parte de df_prepared, que es el frame post-features).
+                df_for_ev = df_oof.loc[m].copy()
+                tp_mult = float(self.feature_config.tp_barrier)
+                sl_mult = float(self.feature_config.sl_barrier)
+                horizon = int(self.feature_config.label_horizon)
+                ev_res = compute_balanced_objective(
+                    df_for_ev,
+                    long_proba_col="oof_proba_long_cal",
+                    short_proba_col="oof_proba_short_cal",
+                    horizon=horizon,
+                    tp_mult=tp_mult,
+                    sl_mult=sl_mult,
+                    cost_per_signal=self.cost_per_signal,
+                    n_thr=self.ev_n_thr,
+                    thr_lo=self.ev_thr_lo,
+                    thr_hi=self.ev_thr_hi,
+                    min_signals=self.ev_min_signals,
+                    max_drawdown_R=self.max_drawdown_R,
+                )
+                score = float(ev_res["score"])
+                long_d = ev_res["long"]
+                short_d = ev_res["short"]
+                print(f"[EV OBJ] score={score:+.4f}  "
+                      f"LONG  thr={long_d['thr']:.3f} ev_net={long_d['ev_net']:+.4f}R "
+                      f"sig={long_d['n_signals']} mdd={long_d['mdd_R']:.1f}R "
+                      f"penalty={long_d['penalty_mdd']:.2f}")
+                print(f"[EV OBJ]            "
+                      f"SHORT thr={short_d['thr']:.3f} ev_net={short_d['ev_net']:+.4f}R "
+                      f"sig={short_d['n_signals']} mdd={short_d['mdd_R']:.1f}R "
+                      f"penalty={short_d['penalty_mdd']:.2f}")
+                # Persistir detalle en el trial para inspección.
+                trial.set_user_attr("ev_score", score)
+                trial.set_user_attr("ev_long", long_d)
+                trial.set_user_attr("ev_short", short_d)
+            else:
+                score = auc_pr
         else:
             y = df_oof.loc[m, "signal"].to_numpy().astype(int)
             # triple_class: labels son {0,1,2}; binarizamos a is_TP para
