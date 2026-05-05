@@ -152,7 +152,7 @@ def main(release: str, mode: str = 'production'):
     general_config = Config(
         release=release,
         oof_splits=5,
-        oof_epochs=120
+        oof_epochs=80
     )
 
     model_config = ModelConfig(
@@ -162,7 +162,7 @@ def main(release: str, mode: str = 'production'):
         patience=12,
         use_hierarchical_fusion=True,
         ranking_loss_weight=0.0,
-        target_type='multitask'
+        target_type="multitask",
     )
 
     feature_config = FeatureConfig(
@@ -173,7 +173,7 @@ def main(release: str, mode: str = 'production'):
         sl_barrier=0.8,
         label_method_long="triple_barrier",
         regime_barriers_long={
-            "trending": {"tp": 2.0, "sl": 0.8},        # ← coincidir con release 202500
+            "trending": {"tp": 2.0, "sl": 0.8},
             "ranging":  {"tp": 1.8, "sl": 0.8},
             "low_vol":  {"tp": 1.8, "sl": 0.8},
             "high_vol": {"tp": 2.2, "sl": 1.0},
@@ -187,9 +187,17 @@ def main(release: str, mode: str = 'production'):
         },
         tp_barrier_short=None,
         sl_barrier_short=None,
+        use_vol_invariant_features=True,   # release 202500
+        use_reduced_features=True,          # release 202500
         feature_masks={
-            "long": {"ema_bull": True, "rsi_oversold": True, "macd_positive": True},
-            "short": {"ema_bear": True, "rsi_overbought": True, "macd_negative": True},
+            "long": {
+                "ema_bull": True,  "rsi_oversold": True,  "macd_positive": True,
+                "ema_bear": False, "rsi_overbought": False, "macd_negative": False,
+            },
+            "short": {
+                "ema_bear": True,  "rsi_overbought": True, "macd_negative": True,
+                "ema_bull": False, "rsi_oversold": False,  "macd_positive": False,
+            },
         },
     )
 
@@ -270,4 +278,4 @@ def main(release: str, mode: str = 'production'):
     service.run()
 
 if __name__ == "__main__":
-    main(release='202500', mode='production')
+    main(release='200383')

@@ -158,7 +158,6 @@ def build_simulator(
         rl_config=None,
         rl_train=False,
         rl_eval_deterministic=True,
-        rl_take_threshold=None,
         rl_policy_path=None,
         spread_price=0.07,
         mtm_use_bid_ask=True,
