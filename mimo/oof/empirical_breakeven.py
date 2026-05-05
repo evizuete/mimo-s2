@@ -171,6 +171,10 @@ def main():
     ap.add_argument("--thr-lo", type=float, default=0.10)
     ap.add_argument("--thr-hi", type=float, default=0.40)
     ap.add_argument("--min-signals", type=int, default=30)
+    ap.add_argument("--cost", type=float, default=0.0,
+                    help="Coste por señal (round-trip) en unidades de R. "
+                         "Ej: --cost 0.05  ≈ spread+slippage 5% del R-multiple. "
+                         "Aplica al EV_per_sig y al BE empírico.")
     args = ap.parse_args()
 
     # ── side ─────────────────────────────────────────────────────────────
@@ -306,10 +310,14 @@ def main():
         denom = frac_sl + frac_exp
         if denom > 1e-9:
             neg_avg_R = (frac_sl / denom) * (-args.sl) + (frac_exp / denom) * mean_r_exp
-            # EV = p*tp + (1-p)*neg_avg_R = 0 → p = -neg_avg_R / (tp - neg_avg_R)
-            be_emp = -neg_avg_R / (args.tp - neg_avg_R) if (args.tp - neg_avg_R) > 0 else float("nan")
+            # EV_net(p) = p*tp + (1-p)*neg_avg_R - cost = 0
+            #          → p = (cost - neg_avg_R) / (tp - neg_avg_R)
+            denom_be = args.tp - neg_avg_R
+            be_emp = (args.cost - neg_avg_R) / denom_be if denom_be > 0 else float("nan")
         else:
             be_emp = float("nan")
+
+        ev_net = mean_r - args.cost
 
         rows.append({
             "thr": float(thr),
@@ -321,9 +329,10 @@ def main():
             "frac_SL": frac_sl,
             "frac_EXP": frac_exp,
             "mean_R_exp": mean_r_exp,
-            "EV_per_sig": mean_r,
+            "EV_gross": mean_r,
+            "EV_net": ev_net,
             "BE_emp": be_emp,
-            "deployable_emp": prec_tp >= be_emp if np.isfinite(be_emp) else False,
+            "deployable_emp": (prec_tp >= be_emp) if np.isfinite(be_emp) else False,
         })
 
     res = pd.DataFrame(rows)
@@ -337,20 +346,21 @@ def main():
 
     # ── highlights ───────────────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("  HIGHLIGHTS")
+    print(f"  HIGHLIGHTS  (cost={args.cost:.4f}R por señal)")
     print("=" * 70)
-    best_ev = res.loc[res["EV_per_sig"].idxmax()]
-    print(f"  Mejor EV/señal: thr={best_ev['thr']:.3f}  "
-          f"EV={best_ev['EV_per_sig']:+.4f}R  sig={int(best_ev['sig'])}  "
-          f"prec_TP={best_ev['prec_TP']:.3f}  BE_emp={best_ev['BE_emp']:.3f}")
-    pos_ev = res[res["EV_per_sig"] > 0]
+    best_ev = res.loc[res["EV_net"].idxmax()]
+    print(f"  Mejor EV_net/señal: thr={best_ev['thr']:.3f}  "
+          f"EV_net={best_ev['EV_net']:+.4f}R  EV_gross={best_ev['EV_gross']:+.4f}R  "
+          f"sig={int(best_ev['sig'])}  prec_TP={best_ev['prec_TP']:.3f}  "
+          f"BE_emp={best_ev['BE_emp']:.3f}")
+    pos_ev = res[res["EV_net"] > 0]
     if not pos_ev.empty:
         max_sig = pos_ev.loc[pos_ev["sig"].idxmax()]
-        print(f"  Más señales con EV>0: thr={max_sig['thr']:.3f}  "
-              f"sig={int(max_sig['sig'])}  EV={max_sig['EV_per_sig']:+.4f}R  "
+        print(f"  Más señales con EV_net>0: thr={max_sig['thr']:.3f}  "
+              f"sig={int(max_sig['sig'])}  EV_net={max_sig['EV_net']:+.4f}R  "
               f"prec_TP={max_sig['prec_TP']:.3f}")
     else:
-        print("  ❌ Ningún threshold con EV>0.")
+        print("  ❌ Ningún threshold con EV_net>0 (probar coste menor).")
 
     # promedio de BE empírico (orientativo)
     be_emp_global = res["BE_emp"].dropna().median()
