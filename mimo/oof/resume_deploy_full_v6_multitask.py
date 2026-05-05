@@ -213,6 +213,19 @@ def load_locked_params(
                       f"saltando side={side}.")
                 continue
             params = dict(sub[0].get("params", {}))
+            # Multitask → binary: colapsar focal_alpha_<side> a focal_alpha
+            # escalar. _model_config_from_params construiría un dict
+            # {long, short} si ve ambos, lo que rompe ClippedBinaryFocalCrossentropy
+            # (binary head espera float, no dict).
+            other = "short" if side == "long" else "long"
+            if f"focal_alpha_{side}" in params:
+                params["focal_alpha"] = float(params.pop(f"focal_alpha_{side}"))
+                params.pop(f"focal_alpha_{other}", None)
+            # loss_weight_long/short solo se usan en compile multitask
+            # (loss_weights={'signal_long', 'signal_short'}). En binary el
+            # head es uno solo y el escalar no se aplica → drop ambos.
+            params.pop(f"loss_weight_long", None)
+            params.pop(f"loss_weight_short", None)
             mc = trainer._model_config_from_params(params)
             trainer.best_params_by_side[side] = params
             trainer.best_model_config_by_side[side] = mc
