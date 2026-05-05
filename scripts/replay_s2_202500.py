@@ -204,8 +204,10 @@ def summarize(result: Dict[str, Any], initial_equity: float, out_dir: Path) -> N
     out_dir.mkdir(parents=True, exist_ok=True)
 
     trades = pd.DataFrame(result.get("trades", []))
-    eq_curve = result.get("equity_curve_mtm", []) or []
-    eq_ts = result.get("equity_timestamps", []) or []
+    eq_curve_raw = result.get("equity_curve_mtm", None)
+    eq_ts_raw = result.get("equity_timestamps", None)
+    eq_curve = list(eq_curve_raw) if eq_curve_raw is not None and len(eq_curve_raw) > 0 else []
+    eq_ts = list(eq_ts_raw) if eq_ts_raw is not None and len(eq_ts_raw) > 0 else []
     final_eq = float(eq_curve[-1]) if eq_curve else initial_equity
 
     print("\n" + "═" * 78)

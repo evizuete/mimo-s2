@@ -278,4 +278,4 @@ def main(release: str, mode: str = 'production'):
     service.run()
 
 if __name__ == "__main__":
-    main(release='200383')
+    main(release='202500')
