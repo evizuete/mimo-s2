@@ -152,37 +152,38 @@ def main(release: str, mode: str = 'production'):
     general_config = Config(
         release=release,
         oof_splits=5,
-        oof_epochs=80
+        oof_epochs=120
     )
 
     model_config = ModelConfig(
-        seq_len_short=64,
-        seq_len_long=256,
-        epochs=80,
+        seq_len_short=24,
+        seq_len_long=96,
+        epochs=90,
         patience=12,
         use_hierarchical_fusion=True,
-        ranking_loss_weight=0.2,
+        ranking_loss_weight=0.0,
+        target_type='multitask'
     )
 
     feature_config = FeatureConfig(
         ema_periods=[9, 21, 50],
         label_method="triple_barrier",
-        label_horizon=10,
-        tp_barrier=2.5,
-        sl_barrier=1.5,
+        label_horizon=3,
+        tp_barrier=2.0,
+        sl_barrier=0.8,
         label_method_long="triple_barrier",
         regime_barriers_long={
-            "trending": {"tp": 3.5, "sl": 1.25},
-            "ranging": {"tp": 2.25, "sl": 1.25},
-            "low_vol": {"tp": 2.75, "sl": 1.00},
-            "high_vol": {"tp": 3.50, "sl": 2.00},
+            "trending": {"tp": 2.0, "sl": 0.8},        # ← coincidir con release 202500
+            "ranging":  {"tp": 1.8, "sl": 0.8},
+            "low_vol":  {"tp": 1.8, "sl": 0.8},
+            "high_vol": {"tp": 2.2, "sl": 1.0},
         },
         label_method_short="triple_barrier",
         regime_barriers_short={
-            "trending": {"tp": 3.0, "sl": 1.25},
-            "ranging": {"tp": 2.25, "sl": 1.25},
-            "low_vol": {"tp": 2.50, "sl": 1.00},
-            "high_vol": {"tp": 3.25, "sl": 2.00},
+            "trending": {"tp": 2.0, "sl": 0.8},
+            "ranging":  {"tp": 1.8, "sl": 0.8},
+            "low_vol":  {"tp": 1.8, "sl": 0.8},
+            "high_vol": {"tp": 2.2, "sl": 1.0},
         },
         tp_barrier_short=None,
         sl_barrier_short=None,
@@ -269,4 +270,4 @@ def main(release: str, mode: str = 'production'):
     service.run()
 
 if __name__ == "__main__":
-    main(release='200383')
+    main(release='202500', mode='production')

@@ -35,10 +35,10 @@ warnings.filterwarnings("ignore")
 # CONFIGURACIÓN — ajusta estas fechas a tu entorno
 # ─────────────────────────────────────────────────────────────────────────────
 
-TRAIN_FROM   = datetime(2025,  10,  1)
-TRAIN_TO     = datetime(2026,  1, 31)
-HOLDOUT_FROM = datetime(2026, 2, 1)
-HOLDOUT_TO   = datetime(2026,  4, 10)
+TRAIN_FROM   = datetime(2024,  1,  1)
+TRAIN_TO     = datetime(2025,  10, 31)
+HOLDOUT_FROM = datetime(2025, 11, 1)
+HOLDOUT_TO   = datetime(2026,  5, 2)
 
 # Thresholds de alerta PSI
 PSI_WARNING  = 0.10   # cambio moderado
