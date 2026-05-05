@@ -1440,6 +1440,20 @@ def parse_args() -> argparse.Namespace:
                     help="Epochs máximos por fold OOF (early stopping aplica).")
     ap.add_argument("--oof-patience", type=int, default=12,
                     help="Patience del early stopping por fold OOF.")
+    # ── Locked-params (specialist retraining) ─────────────────────────
+    ap.add_argument("--locked-params-json", type=str, default=None,
+                    help="JSON con un dict de hyperparams (de extract_best_per_side). "
+                         "Si se pasa, el grid de Optuna se reduce a un único punto "
+                         "con esos params — efectivamente fija el modelo para reentrenar.")
+    ap.add_argument("--locked-side-key", type=str, default=None,
+                    choices=[None, "long", "short"],
+                    help="Si --locked-params-json apunta a un best_per_side.json "
+                         "con top_long/top_short/top_combined, indica qué subset usar. "
+                         "Si se pasa el JSON con la lista de params 'plana', omitir.")
+    ap.add_argument("--exp-tag-suffix", type=str, default="",
+                    help="Sufijo para experiment_tag (artifacts dir). "
+                         "Útil para no pisar artifacts del run original "
+                         "(ej. '_long_specialist').")
     ap.add_argument(
         "--target-type",
         choices=["binary", "quantile", "magnitude", "triple_class", "multitask"],
@@ -2598,12 +2612,48 @@ def main() -> None:
         experiment_tag += "_customL"
     if args.regime_weights_short_json:
         experiment_tag += "_customS"
+    if args.exp_tag_suffix:
+        experiment_tag += args.exp_tag_suffix
 
     base_dir = Path("../../artifacts") / args.release / "oof"
     train_dir = base_dir / experiment_tag
     train_dir.mkdir(parents=True, exist_ok=True)
     (train_dir / "data").mkdir(parents=True, exist_ok=True)
     (train_dir / "reports").mkdir(parents=True, exist_ok=True)
+
+    # ── Locked params: override del grid si se pasa --locked-params-json ──
+    if args.locked_params_json:
+        import json as _json
+        locked_path = Path(args.locked_params_json)
+        if not locked_path.exists():
+            raise SystemExit(f"❌ --locked-params-json no existe: {locked_path}")
+        with locked_path.open("r", encoding="utf-8") as f:
+            locked_payload = _json.load(f)
+        # Aceptamos dos formas:
+        #   (a) dict plano de params: {conv1d_filters:64, lstm_units:96, ...}
+        #   (b) reporte de extract_best_per_side: {top_long:[{params:...}], top_short:[...]}
+        if "top_long" in locked_payload or "top_short" in locked_payload:
+            if not args.locked_side_key:
+                raise SystemExit(
+                    "❌ --locked-params-json es un reporte de extract_best_per_side; "
+                    "pasa --locked-side-key {long,short} para indicar qué sublista usar."
+                )
+            sub = locked_payload.get(f"top_{args.locked_side_key}", [])
+            if not sub:
+                raise SystemExit(f"❌ top_{args.locked_side_key} vacío en el reporte.")
+            locked_params = dict(sub[0].get("params", {}))
+            chosen_trial = sub[0].get("trial", "?")
+            print(f"\n🔒 [LOCKED PARAMS] Origen: top_{args.locked_side_key}[0] (trial #{chosen_trial})")
+        else:
+            locked_params = dict(locked_payload)
+            print("\n🔒 [LOCKED PARAMS] Origen: dict plano")
+        # Convertir a singleton-grid (cada param es lista de un solo valor)
+        singleton_grid = {k: [v] for k, v in locked_params.items()}
+        # Override de la entrada del release en GRID_BY_RELEASE para este proceso
+        GRID_BY_RELEASE[str(args.release)] = singleton_grid
+        for k, v in sorted(locked_params.items()):
+            print(f"   {k:>22s} : {v}")
+        print()
 
     Helper.save_meta(
         {
