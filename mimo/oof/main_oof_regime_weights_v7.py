@@ -2659,6 +2659,7 @@ def main() -> None:
     # side_key es la opción correcta.
     study_prefix_override: Optional[str] = None
     if args.locked_params_json:
+        import hashlib as _hashlib
         import json as _json
         locked_path = Path(args.locked_params_json)
         if not locked_path.exists():
@@ -2668,6 +2669,7 @@ def main() -> None:
         # Aceptamos dos formas:
         #   (a) dict plano de params: {conv1d_filters:64, lstm_units:96, ...}
         #   (b) reporte de extract_best_per_side: {top_long:[{params:...}], top_short:[...]}
+        chosen_trial: Any = None
         if "top_long" in locked_payload or "top_short" in locked_payload:
             if not args.locked_side_key:
                 raise SystemExit(
@@ -2678,7 +2680,7 @@ def main() -> None:
             if not sub:
                 raise SystemExit(f"❌ top_{args.locked_side_key} vacío en el reporte.")
             locked_params = dict(sub[0].get("params", {}))
-            chosen_trial = sub[0].get("trial", "?")
+            chosen_trial = sub[0].get("trial", None)
             print(f"\n🔒 [LOCKED PARAMS] Origen: top_{args.locked_side_key}[0] (trial #{chosen_trial})")
         else:
             locked_params = dict(locked_payload)
@@ -2690,9 +2692,22 @@ def main() -> None:
         for k, v in sorted(locked_params.items()):
             print(f"   {k:>22s} : {v}")
         # Study prefix aislado: evita ValueError "CategoricalDistribution does
-        # not support dynamic value space" al reusar el study principal.
+        # not support dynamic value space". Cada combinación de locked params
+        # necesita su propio study porque el singleton grid de Optuna debe ser
+        # consistente entre trials del mismo study. Usamos:
+        #   1. side_key (long/short/plain)
+        #   2. trial number si viene de extract_best_per_side
+        #   3. hash MD5 corto del locked_params como fallback (cubre cambios
+        #      en el JSON con mismo trial number, p.ej. distintas runs Optuna)
         side_tag = args.locked_side_key or "plain"
-        study_prefix_override = f"oof_study_locked_{side_tag}"
+        params_blob = _json.dumps(locked_params, sort_keys=True, default=str).encode()
+        params_hash = _hashlib.md5(params_blob).hexdigest()[:8]
+        if isinstance(chosen_trial, int):
+            study_prefix_override = (
+                f"oof_study_locked_{side_tag}_t{chosen_trial}_{params_hash}"
+            )
+        else:
+            study_prefix_override = f"oof_study_locked_{side_tag}_{params_hash}"
         print(f"   🧪 Optuna study aislado: {study_prefix_override}_<release>_<side>")
         print()
 
