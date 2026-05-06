@@ -187,7 +187,12 @@ def main():
     ap.add_argument("--start", required=True, help="Inicio (YYYY-MM-DD).")
     ap.add_argument("--end", required=True, help="Fin (YYYY-MM-DD).")
     ap.add_argument("--optuna-every", type=int, default=4,
-                    help="Optuna se corre cada N semanas (default 4 = mensual).")
+                    help="Optuna se corre cada N semanas (default 4 = mensual). "
+                         "Se ignora si --no-optuna está activo.")
+    ap.add_argument("--no-optuna", action="store_true",
+                    help="Desactiva Optuna por completo: todas las semanas usan "
+                         "weight-only con --bootstrap-locked-params como locked_params. "
+                         "Requiere --bootstrap-locked-params.")
     ap.add_argument("--optuna-trials", type=int, default=40)
     ap.add_argument("--train-months", type=int, default=24,
                     help="Tamaño de la ventana de training en meses (default 24).")
@@ -214,6 +219,12 @@ def main():
     if not cutoffs:
         sys.exit("❌ No hay lunes en el rango especificado.")
 
+    if args.no_optuna and args.bootstrap_locked_params is None:
+        sys.exit(
+            "❌ --no-optuna requiere --bootstrap-locked-params apuntando a un "
+            "best_params_flat.json (ej: el extraído del 202500)."
+        )
+
     artifacts_root = args.artifacts_root.resolve()
     wf_root = args.wf_root.resolve()
     state_path = wf_root / "_state.json"
@@ -224,7 +235,11 @@ def main():
     print(f"  WALK-FORWARD ORCHESTRATOR")
     print("═" * 80)
     print(f"  rango     : {fmt_date(cutoffs[0])} … {fmt_date(cutoffs[-1])}  ({len(cutoffs)} semanas)")
-    print(f"  optuna    : cada {args.optuna_every} semanas ({args.optuna_trials} trials/run)")
+    if args.no_optuna:
+        print(f"  optuna    : DESACTIVADO  (todas las semanas weight-only con bootstrap)")
+        print(f"  bootstrap : {args.bootstrap_locked_params}")
+    else:
+        print(f"  optuna    : cada {args.optuna_every} semanas ({args.optuna_trials} trials/run)")
     print(f"  train     : {args.train_months}m  |  holdout: {args.holdout_months}m  |  calib: {args.calib_days}d")
     print(f"  artifacts : {artifacts_root}")
     print(f"  state     : {state_path}")
@@ -232,7 +247,7 @@ def main():
     print("─" * 80)
     print("  plan:")
     for i, t in enumerate(cutoffs):
-        is_optuna = (i % args.optuna_every == 0)
+        is_optuna = (not args.no_optuna) and (i % args.optuna_every == 0)
         marker = "  ⚙ OPTUNA  " if is_optuna else "    weight "
         print(f"    {i:2d}. {marker}  {fmt_date(t)}  → {release_tag_for(t)}")
     print("═" * 80)
@@ -252,7 +267,7 @@ def main():
             print(f"\n⏭  [{fmt_date(cutoff)}] ya completada — skip")
             continue
 
-        is_optuna_week = (i % args.optuna_every == 0)
+        is_optuna_week = (not args.no_optuna) and (i % args.optuna_every == 0)
         release = release_tag_for(cutoff)
         wf_step_dir = wf_root / fmt_date(cutoff)
         wf_step_dir.mkdir(parents=True, exist_ok=True)
