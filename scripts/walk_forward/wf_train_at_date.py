@@ -202,10 +202,11 @@ def stage_oof_training(window: WindowSpec, release: str,
             )
         if not locked_params_json.exists():
             raise SystemExit(f"❌ locked_params_json no existe: {locked_params_json}")
-        cmd += [
-            "--skip-optuna",
-            "--locked-params-json", str(locked_params_json),
-        ]
+        # Modo weight-only: pasamos solo --locked-params-json, SIN --skip-optuna.
+        # v7 reduce el grid_space a un único punto (singleton) y corre 1 trial
+        # con GridSampler — entrena pesos con los hyperparams fijados sin
+        # necesidad de un Optuna study previo en la DB.
+        cmd += ["--locked-params-json", str(locked_params_json)]
     return cmd
 
 
