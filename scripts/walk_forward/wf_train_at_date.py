@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -43,6 +44,13 @@ from typing import Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# v7 (main_oof_regime_weights_v7.py) y otras stages escriben artifacts vía
+# Path("../../artifacts") relativo al CWD. Para que "../../artifacts" resuelva
+# a <REPO_ROOT>/artifacts, hay que lanzar los subprocesos desde una subcarpeta
+# 2 niveles bajo REPO_ROOT. Usamos REPO_ROOT/mimo/oof (existe siempre) y
+# añadimos REPO_ROOT a PYTHONPATH para que `python -m mimo.oof.X` siga funcionando.
+SUBPROCESS_CWD = REPO_ROOT / "mimo" / "oof"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -136,6 +144,12 @@ def run_stage(name: str, cmd: list[str], log_dir: Path,
     print(f"\n▶ [{name}] start  (log → {log_path})")
     print(f"  cmd: {' '.join(cmd)}")
 
+    env = os.environ.copy()
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(REPO_ROOT) + (
+        os.pathsep + existing_pp if existing_pp else ""
+    )
+
     with log_path.open("w", encoding="utf-8") as fh:
         fh.write(f"# {' '.join(cmd)}\n# started {datetime.now().isoformat()}\n\n")
         fh.flush()
@@ -143,7 +157,8 @@ def run_stage(name: str, cmd: list[str], log_dir: Path,
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            cwd=str(REPO_ROOT),
+            cwd=str(SUBPROCESS_CWD),
+            env=env,
             bufsize=1,
             text=True,
         )

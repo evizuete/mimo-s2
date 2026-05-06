@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -44,6 +45,11 @@ from typing import Any, Dict, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Mismo motivo que en wf_train_at_date: v7 y stages downstream usan paths
+# relativos al CWD. Lanzamos sub-procesos desde REPO_ROOT/mimo/oof y
+# añadimos REPO_ROOT a PYTHONPATH para `python -m`.
+SUBPROCESS_CWD = REPO_ROOT / "mimo" / "oof"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,12 +120,18 @@ def run_cmd(name: str, cmd: list[str], log_path: Path,
     log_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"\n▶ [{name}]\n  cmd: {' '.join(cmd)}\n  log: {log_path}")
     started = time.time()
+    env = os.environ.copy()
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(REPO_ROOT) + (
+        os.pathsep + existing_pp if existing_pp else ""
+    )
+
     with log_path.open("w", encoding="utf-8") as fh:
         fh.write(f"# {' '.join(cmd)}\n# {datetime.now().isoformat()}\n\n")
         fh.flush()
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            cwd=str(REPO_ROOT), bufsize=1, text=True,
+            cwd=str(SUBPROCESS_CWD), env=env, bufsize=1, text=True,
         )
         assert proc.stdout is not None
         for line in proc.stdout:
