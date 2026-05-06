@@ -348,7 +348,14 @@ def deploy_done(release: str, artifacts_root: Path,
 
 
 def thresholds_done(release: str, deploy_dir: Path) -> bool:
-    """select_thresholds escribe selected_threshold dentro de percentiles_*.json."""
+    """Stage 3 (select_thresholds_from_tail) ya corrió si percentiles_*.json
+    tiene `_meta.threshold_source == "ev_net_tail_replay"` para AMBOS sides.
+
+    OJO: v6 (resume_deploy) ya escribe `_meta.selected_threshold` con el valor
+    F1 y `threshold_source == "deploy_calibration_tail"`. Comprobar solo la
+    existencia del threshold haría que esta stage se saltara siempre y el
+    threshold F1 (sub-óptimo en EV-net) llegara a drift_metrics y al replay.
+    """
     for side in ("long", "short"):
         p = deploy_dir / f"percentiles_{release}_{side}.json"
         if not p.exists():
@@ -357,8 +364,10 @@ def thresholds_done(release: str, deploy_dir: Path) -> bool:
             data = json.loads(p.read_text())
         except json.JSONDecodeError:
             return False
-        thr = data.get("_meta", {}).get("selected_threshold")
-        if thr is None:
+        meta = data.get("_meta", {})
+        if meta.get("selected_threshold") is None:
+            return False
+        if meta.get("threshold_source") != "ev_net_tail_replay":
             return False
     return True
 
