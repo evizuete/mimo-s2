@@ -1075,7 +1075,14 @@ RISK_PROFILES = {
         "be_offset_points": 15,         # BE más holgado para cubrir spread/slippage sin volver a negativo
         "trail_points": 60,             # distancia del trailing desde el máximo favorable (era 40)
         "trail_step_points": 20,        # mover SL solo si mejora al menos 20pts (~33% de trail_points)
-        "max_hold_seconds": 900,
+        # 1100s = label_horizon (3×5min=15min) + ~3min buffer.
+        # 900s coincidía exacto con el horizonte de entrenamiento, sin margen para:
+        #   (a) latencia OPEN entre cierre 5m en S2 y ejecución en MT5 (1-5min típico),
+        #   (b) que triple-barrier evalúa EXPIRE en el cierre del bar 3, no a los 900s netos,
+        #   (c) volatilidad de ticks/spread cerca del límite.
+        # Resultado anterior: cierres MAX_HOLD_TIME prematuros que perdían la cola TP que
+        # el etiquetado del modelo sí capturaba como TP-first.
+        "max_hold_seconds": 1100,
         'min_hold_seconds': 15,         # mínimo 15s antes de permitir cierre virtual
         'max_spread_points': 20,        # v15.1: subido de 15 → 20pts. Con spread normal
                                         # ~10pts y picos típicos de 15-18pts en noticias,
