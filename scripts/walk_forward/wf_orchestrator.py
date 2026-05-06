@@ -192,11 +192,13 @@ def cmd_train_at_date(cutoff: datetime, run_optuna: bool, optuna_trials: int,
     return cmd
 
 
-def cmd_drift_metrics(release: str, artifacts_root: Path) -> list[str]:
+def cmd_drift_metrics(release: str, artifacts_root: Path,
+                      deploy_subdir: str) -> list[str]:
     return [
         sys.executable, "-m", "scripts.walk_forward.wf_drift_metrics",
         "--release", release,
         "--artifacts-root", str(artifacts_root),
+        "--deploy-subdir", deploy_subdir,
     ]
 
 
@@ -415,7 +417,10 @@ def main():
         # ── Stage B: drift_metrics → promote? ───────────────────────────────
         rc = run_cmd(
             f"drift@{fmt_date(cutoff)}",
-            cmd_drift_metrics(release, artifacts_root),
+            cmd_drift_metrics(
+                release, artifacts_root,
+                resolve_deploy_subdir(args.mode, args.deploy_subdir),
+            ),
             wf_step_dir / "02_drift.log",
             allowed_rc=(0, 10),  # 10 = no promovido (no es error fatal)
         )
