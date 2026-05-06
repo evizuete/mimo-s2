@@ -337,13 +337,11 @@ def stage_resume_deploy_specialist(window: WindowSpec, release: str,
     """Corre v6 deploy SOBRE el dir de un specialist.
 
     Trick: --train-artifacts-dir apunta al specialist dir (explícito), y
-    --deploy-subdir apunta al MISMO path relativo (bajo artifacts/<release>/oof/),
-    de modo que v6 escribe percentiles + calibrator + tail dentro del dir
-    del specialist, alineado con lo que merge_specialists espera leer.
+    --deploy-subdir es solo el basename del specialist dir, ya que v6 lo
+    interpreta como relativo a artifacts/<release>/oof/. Resultado: v6
+    escribe percentiles + calibrator + tail dentro del propio dir del
+    specialist, alineado con lo que merge_specialists espera leer.
     """
-    rel_subdir = specialist_dir.relative_to(
-        specialist_dir.parents[1]  # = artifacts/<release>/oof
-    )
     cmd = [
         sys.executable, "-m", "mimo.oof.resume_deploy_full_v6_multitask",
         "--release", release,
@@ -359,7 +357,7 @@ def stage_resume_deploy_specialist(window: WindowSpec, release: str,
         "--holdout-to", window.fmt(window.holdout_to),
         "--deploy-calib-days", str(window.calib_days),
         "--train-artifacts-dir", str(specialist_dir),
-        "--deploy-subdir", str(rel_subdir),
+        "--deploy-subdir", specialist_dir.name,
         "--locked-params-json", str(best_per_side_json),
         "--locked-side-key", side_key,
     ]
