@@ -2233,6 +2233,43 @@ class S3Service:
                     })
                 # ─────────────────────────────────────────────────────────────
 
+                # ── FIX v30.1: be_trigger proporcional al SL real ────────────
+                # Con SLs muy variables entre trades (variabilidad ATR: 234-595
+                # pts observados en sesión 12/2026), un be_trigger fijo de
+                # 100pts arma BE al 17-43% del riesgo según el SL del trade.
+                # Cuando es 17% (SL grande), BE entra demasiado pronto: un whip
+                # de mercado normal (~30-50pts) dispara el cierre por
+                # be_offset y mata el winner antes de que pueda correr al TP.
+                # Sesión 12/2026: trades 344007146 (BE@109pts→cierre@27s,+2pts)
+                # y 344009971 (BE@150pts→cierre@40s,+7pts), ambos con SL ~590pts.
+                # Fix: be_trigger = max(profile_floor, virtual_sl_points · ratio).
+                # ratio=0.50 → BE arma cuando precio recorre la mitad del SL
+                # hacia el TP, momento estadísticamente razonable para proteger.
+                # Mantener el max() preserva el floor del profile (100pts) para
+                # SLs pequeños donde 50%·vSL sería ridículo (ej. vSL=80pts).
+                _BE_TRIGGER_RATIO_OF_SL = 0.50
+                if tr.virtual_sl_points > 0 and risk_cfg.be_trigger_points > 0:
+                    _proportional_trigger = int(round(
+                        tr.virtual_sl_points * _BE_TRIGGER_RATIO_OF_SL
+                    ))
+                    _new_trigger = max(
+                        risk_cfg.be_trigger_points, _proportional_trigger
+                    )
+                    if _new_trigger != risk_cfg.be_trigger_points:
+                        _old_trigger = risk_cfg.be_trigger_points
+                        risk_cfg.be_trigger_points = _new_trigger
+                        tr.risk = risk_cfg
+                        self._send({
+                            "event": "BE_TRIGGER_RESCALED_TO_SL_RATIO",
+                            "ticket": ticket,
+                            "symbol": symbol,
+                            "virtual_sl_points": tr.virtual_sl_points,
+                            "old_be_trigger_points": _old_trigger,
+                            "new_be_trigger_points": _new_trigger,
+                            "ratio_of_sl": _BE_TRIGGER_RATIO_OF_SL,
+                        })
+                # ─────────────────────────────────────────────────────────────
+
                 # ── Guardar indicadores iniciales si vienen con el comando ──
                 indicators = cmd.get("indicators", {})
                 if indicators:
