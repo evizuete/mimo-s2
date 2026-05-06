@@ -1071,18 +1071,11 @@ RISK_PROFILES = {
         # Análisis log 13/04/2026: 30 cierres por vSL, 0 VIRTUAL_TP_TRIGGERED en 34 trades.
         # Subir be_trigger a 100pts (~32% del vSL) da margen para que el precio respire
         # sin disparar el BE prematuramente. trail=60 (vs 40) amplía el corredor de trailing.
-        "be_trigger_points": 100,       # armar BE cuando precio avanza 100pts (era 40)
-        "be_offset_points": 15,         # BE más holgado para cubrir spread/slippage sin volver a negativo
+        "be_trigger_points": 180,       # armar BE cuando precio avanza 100pts (era 40)
+        "be_offset_points": 30,         # BE más holgado para cubrir spread/slippage sin volver a negativo
         "trail_points": 60,             # distancia del trailing desde el máximo favorable (era 40)
         "trail_step_points": 20,        # mover SL solo si mejora al menos 20pts (~33% de trail_points)
-        # 1100s = label_horizon (3×5min=15min) + ~3min buffer.
-        # 900s coincidía exacto con el horizonte de entrenamiento, sin margen para:
-        #   (a) latencia OPEN entre cierre 5m en S2 y ejecución en MT5 (1-5min típico),
-        #   (b) que triple-barrier evalúa EXPIRE en el cierre del bar 3, no a los 900s netos,
-        #   (c) volatilidad de ticks/spread cerca del límite.
-        # Resultado anterior: cierres MAX_HOLD_TIME prematuros que perdían la cola TP que
-        # el etiquetado del modelo sí capturaba como TP-first.
-        "max_hold_seconds": 1100,
+        "max_hold_seconds": 1800,
         'min_hold_seconds': 15,         # mínimo 15s antes de permitir cierre virtual
         'max_spread_points': 20,        # v15.1: subido de 15 → 20pts. Con spread normal
                                         # ~10pts y picos típicos de 15-18pts en noticias,
@@ -1377,8 +1370,8 @@ class S3Service:
         # Nuevo criterio: el trailing solo se habilita cuando han pasado al
         # menos TRAILING_AFTER_BE_MIN_SECS desde BE_ARMED y el precio además
         # ha avanzado una ganancia adicional mínima sobre el trigger del BE.
-        self.TRAILING_AFTER_BE_MIN_SECS: float = 12.0
-        self.TRAILING_AFTER_BE_EXTRA_PTS: int = 40
+        self.TRAILING_AFTER_BE_MIN_SECS: float = 5.0
+        self.TRAILING_AFTER_BE_EXTRA_PTS: int = 20
         self.TRAILING_AFTER_BE_EXTRA_R: float = 0.15
         self.TRAILING_UNLOCK_HYSTERESIS_PTS: int = 8   # v30.0: evita ON/OFF cerca del umbral
         self.INTENTIONAL_CLOSE_GRACE_SECS: float = 5.0  # v30.0: suprime POSITION_CLOSED_EXTERNAL tras cierres propios
