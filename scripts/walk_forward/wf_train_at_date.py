@@ -11,7 +11,7 @@ ejecutando las 4 stages que componen el pipeline 202500:
     [4] mimo.oof.compute_state_percentiles          (percentiles → policy stub)
 
 Ventanas (defaults):
-    train_from   = cutoff - (train_years + holdout_months/12) años
+    train_from   = cutoff - (train_months + holdout_months) meses
     train_to     = cutoff - holdout_months                       (= holdout_from)
     holdout_from = cutoff - holdout_months
     holdout_to   = cutoff
@@ -92,12 +92,12 @@ class WindowSpec:
         return dt.strftime("%Y-%m-%d")
 
 
-def compute_windows(cutoff: datetime, train_years: int,
+def compute_windows(cutoff: datetime, train_months: int,
                     holdout_months: int, calib_days: int) -> WindowSpec:
     holdout_to = cutoff
     holdout_from = cutoff - relativedelta_safe(months=holdout_months)
     train_to = holdout_from
-    train_from = train_to - relativedelta_safe(years=train_years)
+    train_from = train_to - relativedelta_safe(months=train_months)
     return WindowSpec(
         cutoff=cutoff,
         train_from=train_from,
@@ -358,7 +358,8 @@ def main():
                     help="Fecha de corte (YYYY-MM-DD), final del holdout.")
     ap.add_argument("--release-tag", default=None,
                     help="Tag del release (default: wf_<YYYYMMDD> derivado del cutoff).")
-    ap.add_argument("--train-years", type=int, default=2)
+    ap.add_argument("--train-months", type=int, default=24,
+                    help="Tamaño de la ventana de training en meses (default 24).")
     ap.add_argument("--holdout-months", type=int, default=6)
     ap.add_argument("--calib-days", type=int, default=21)
     ap.add_argument("--run-optuna", action="store_true",
@@ -386,7 +387,7 @@ def main():
     release = args.release_tag or f"wf_{cutoff.strftime('%Y%m%d')}"
     skip = {s.strip() for s in args.skip_stages.split(",") if s.strip()}
 
-    window = compute_windows(cutoff, args.train_years,
+    window = compute_windows(cutoff, args.train_months,
                              args.holdout_months, args.calib_days)
 
     artifacts_root = args.artifacts_root.resolve()

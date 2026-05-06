@@ -135,12 +135,12 @@ def run_cmd(name: str, cmd: list[str], log_path: Path,
 
 def cmd_train_at_date(cutoff: datetime, run_optuna: bool, optuna_trials: int,
                       locked_params_json: Optional[Path],
-                      train_years: int, holdout_months: int, calib_days: int,
+                      train_months: int, holdout_months: int, calib_days: int,
                       artifacts_root: Path) -> list[str]:
     cmd = [
         sys.executable, "-m", "scripts.walk_forward.wf_train_at_date",
         "--cutoff", fmt_date(cutoff),
-        "--train-years", str(train_years),
+        "--train-months", str(train_months),
         "--holdout-months", str(holdout_months),
         "--calib-days", str(calib_days),
         "--artifacts-root", str(artifacts_root),
@@ -189,7 +189,8 @@ def main():
     ap.add_argument("--optuna-every", type=int, default=4,
                     help="Optuna se corre cada N semanas (default 4 = mensual).")
     ap.add_argument("--optuna-trials", type=int, default=40)
-    ap.add_argument("--train-years", type=int, default=2)
+    ap.add_argument("--train-months", type=int, default=24,
+                    help="Tamaño de la ventana de training en meses (default 24).")
     ap.add_argument("--holdout-months", type=int, default=6)
     ap.add_argument("--calib-days", type=int, default=21)
     ap.add_argument("--artifacts-root", type=Path,
@@ -224,7 +225,7 @@ def main():
     print("═" * 80)
     print(f"  rango     : {fmt_date(cutoffs[0])} … {fmt_date(cutoffs[-1])}  ({len(cutoffs)} semanas)")
     print(f"  optuna    : cada {args.optuna_every} semanas ({args.optuna_trials} trials/run)")
-    print(f"  train     : {args.train_years}y  |  holdout: {args.holdout_months}m  |  calib: {args.calib_days}d")
+    print(f"  train     : {args.train_months}m  |  holdout: {args.holdout_months}m  |  calib: {args.calib_days}d")
     print(f"  artifacts : {artifacts_root}")
     print(f"  state     : {state_path}")
     print(f"  resume    : last_completed_week={state.get('last_completed_week')}")
@@ -287,7 +288,7 @@ def main():
                 run_optuna=is_optuna_week,
                 optuna_trials=args.optuna_trials,
                 locked_params_json=locked_params_path,
-                train_years=args.train_years,
+                train_months=args.train_months,
                 holdout_months=args.holdout_months,
                 calib_days=args.calib_days,
                 artifacts_root=artifacts_root,
