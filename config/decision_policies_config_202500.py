@@ -32,29 +32,27 @@ gate_by_action_and_state = {
     },
     'production': {
         "long": {
-            # ÚNICO estado rentable
-            "trend_down":         85,   # afloja para mantener
+            "trend_down":         85,   # ÚNICO setup permitido
             # Bloqueos
             "trend_up":           99,
             "range":              99,
+            "transition_up":      99,
+            "transition_down":    99,
             "breakout_wait_up":   99,
             "breakout_wait_down": 99,
-            "transition_up":      99,
-            "transition_down":    99,
             "volatile":           99,
             "low_vol":            99,
-            "_global":            99,   # solo Q5
+            "_global":            99,
         },
         "short": {
-            # Estados rentables
-            "trend_down":         85,
-            "breakout_wait_up":   90,
+            "trend_up":           85,   # ÚNICO setup permitido
             # Bloqueos
-            "trend_up":           99,
+            "trend_down":         99,
             "range":              99,
-            "breakout_wait_down": 99,
             "transition_up":      99,
             "transition_down":    99,
+            "breakout_wait_up":   99,
+            "breakout_wait_down": 99,
             "volatile":           99,
             "low_vol":            99,
             "_global":            99,
@@ -84,8 +82,12 @@ risk_mult_by_state = {
         "volatile": 0.00, "low_vol": 0.00,
     },
     "production": {
-        "transition": 0.0,  # bloqueo total — ningún transition rentable
-        "range": 0.0,
-        "breakout": 0.40,  # solo SHORT en BO_UP rinde, LONG en BO_*  no
+        "trend_up": 1.00,
+        "trend_down": 1.00,
+        "transition": 0.00,  # bloqueo total
+        "range": 0.00,  # bloqueo total
+        "breakout": 0.00,  # bloqueo total
+        "volatile": 0.00,
+        "low_vol": 0.00,
     },
 }
