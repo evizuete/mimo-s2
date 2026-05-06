@@ -542,6 +542,13 @@ def parse_args():
                          "top_long[0] o top_short[0] como hyperparams del "
                          "modelo multitask reentrenado. En binary se ignora "
                          "(cada side toma su propio top_<side>[0]).")
+    ap.add_argument(
+        "--inherit-config-from", default=None,
+        help="Release alias para los lookups de config en v7 "
+             "(BARRIERS_BY_RELEASE, _VOL_INVARIANT_RELEASES, "
+             "_REDUCED_FEATURES_RELEASES, _ULTRA_REDUCED_FEATURES_RELEASES, "
+             "GRID_BY_RELEASE). Útil para walk-forward.",
+    )
 
     return ap.parse_args()
 
@@ -553,6 +560,40 @@ def parse_args():
 def main():
     args = parse_args()
     start = time.perf_counter()
+
+    # ── INHERIT CONFIG ─────────────────────────────────────────────────────────
+    # Si se pasa --inherit-config-from, alias del release actual al config de
+    # otro release base (igual que v7). build_trainer hace los lookups por
+    # release, así que el alias debe estar registrado ANTES de construirlo.
+    if getattr(args, "inherit_config_from", None):
+        from mimo.oof.main_oof_regime_weights_v7 import (
+            BARRIERS_BY_RELEASE,
+            GRID_BY_RELEASE,
+            _VOL_INVARIANT_RELEASES,
+            _REDUCED_FEATURES_RELEASES,
+            _ULTRA_REDUCED_FEATURES_RELEASES,
+        )
+        src = str(args.inherit_config_from)
+        dst = str(args.release)
+        if dst != src:
+            inherited = []
+            if src in BARRIERS_BY_RELEASE:
+                BARRIERS_BY_RELEASE[dst] = BARRIERS_BY_RELEASE[src]
+                inherited.append("BARRIERS")
+            if src in GRID_BY_RELEASE:
+                GRID_BY_RELEASE[dst] = GRID_BY_RELEASE[src]
+                inherited.append("GRID")
+            if src in _VOL_INVARIANT_RELEASES:
+                _VOL_INVARIANT_RELEASES.add(dst)
+                inherited.append("VOL_INVARIANT")
+            if src in _REDUCED_FEATURES_RELEASES:
+                _REDUCED_FEATURES_RELEASES.add(dst)
+                inherited.append("REDUCED")
+            if src in _ULTRA_REDUCED_FEATURES_RELEASES:
+                _ULTRA_REDUCED_FEATURES_RELEASES.add(dst)
+                inherited.append("ULTRA_REDUCED")
+            print(f"🧬 [INHERIT-CONFIG] release '{dst}' heredando de '{src}': "
+                  f"{', '.join(inherited) if inherited else '(nada)'}")
 
     base_dir = Path("../../artifacts") / args.release / "oof"
     deploy_dir = base_dir / args.deploy_subdir

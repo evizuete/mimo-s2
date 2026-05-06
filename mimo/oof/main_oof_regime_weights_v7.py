@@ -1406,6 +1406,15 @@ def parse_args() -> argparse.Namespace:
         description="Experimento OOF con regime weights finos (sample_weight por estado) para LONG y SHORT."
     )
     ap.add_argument("--release", default="200382")
+    ap.add_argument(
+        "--inherit-config-from", default=None,
+        help="Release alias para los lookups de config (BARRIERS_BY_RELEASE, "
+             "_VOL_INVARIANT_RELEASES, _REDUCED_FEATURES_RELEASES, "
+             "_ULTRA_REDUCED_FEATURES_RELEASES, GRID_BY_RELEASE). Si se pasa, "
+             "se usa ese release para todos los lookups en lugar de --release. "
+             "Útil para walk-forward (releases 'wf_*' que heredan la config de "
+             "un release base como 202500).",
+    )
     ap.add_argument("--side", choices=["long", "short", "both"], default="both")
     ap.add_argument("--variant-long", choices=sorted(LONG_VARIANTS.keys()), default="moderate")
     ap.add_argument("--variant-short", choices=sorted(SHORT_VARIANTS.keys()), default="moderate")
@@ -2601,6 +2610,36 @@ def set_global_seeds(seed: int) -> None:
 def main() -> None:
     args = parse_args()
     start_time = time.perf_counter()
+
+    # ── INHERIT CONFIG ─────────────────────────────────────────────────────────
+    # Si se pasa --inherit-config-from <src>, aliasamos el release actual al
+    # mismo bucket de configuración que <src>. Esto afecta a TODOS los lookups
+    # por release (barriers, vol_invariant, reduced, ultra_reduced, grid).
+    # Pensado para walk-forward: 'wf_20260105' hereda de '202500'.
+    if getattr(args, "inherit_config_from", None):
+        src = str(args.inherit_config_from)
+        dst = str(args.release)
+        if dst == src:
+            pass  # nada que hacer
+        else:
+            inherited = []
+            if src in BARRIERS_BY_RELEASE:
+                BARRIERS_BY_RELEASE[dst] = BARRIERS_BY_RELEASE[src]
+                inherited.append("BARRIERS")
+            if src in GRID_BY_RELEASE:
+                GRID_BY_RELEASE[dst] = GRID_BY_RELEASE[src]
+                inherited.append("GRID")
+            if src in _VOL_INVARIANT_RELEASES:
+                _VOL_INVARIANT_RELEASES.add(dst)
+                inherited.append("VOL_INVARIANT")
+            if src in _REDUCED_FEATURES_RELEASES:
+                _REDUCED_FEATURES_RELEASES.add(dst)
+                inherited.append("REDUCED")
+            if src in _ULTRA_REDUCED_FEATURES_RELEASES:
+                _ULTRA_REDUCED_FEATURES_RELEASES.add(dst)
+                inherited.append("ULTRA_REDUCED")
+            print(f"🧬 [INHERIT-CONFIG] release '{dst}' heredando de '{src}': "
+                  f"{', '.join(inherited) if inherited else '(nada — src sin entradas)'}")
 
     set_global_seeds(int(args.seed))
 

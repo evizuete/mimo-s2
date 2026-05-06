@@ -67,6 +67,11 @@ SL_BARRIER = 0.8
 OOF_EPOCHS = 120
 OOF_PATIENCE = 15
 
+# Release base del que heredan la config (barriers, vol_invariant, reduced,
+# grid Optuna). v7/v6 buscan el release exact en sus dicts; nuestros wf_*
+# no están, así que les hacemos heredar de 202500 vía --inherit-config-from.
+INHERIT_CONFIG_FROM = "202500"
+
 # Optuna (cuando run_optuna=True)
 EV_NET_OBJECTIVE = "ev_net"
 COST_PER_SIGNAL = 0.05
@@ -187,6 +192,7 @@ def stage_oof_training(window: WindowSpec, release: str,
     cmd = [
         sys.executable, "-m", "mimo.oof.main_oof_regime_weights_v7",
         "--release", release,
+        "--inherit-config-from", INHERIT_CONFIG_FROM,
         "--side", "both",
         "--target-type", TARGET_TYPE,
         "--base-tf", BASE_TF,
@@ -231,6 +237,7 @@ def stage_resume_deploy(window: WindowSpec, release: str,
     cmd = [
         sys.executable, "-m", "mimo.oof.resume_deploy_full_v6_multitask",
         "--release", release,
+        "--inherit-config-from", INHERIT_CONFIG_FROM,
         "--target-type", TARGET_TYPE,
         "--base-tf", BASE_TF,
         "--variant-long", VARIANT_LONG,
