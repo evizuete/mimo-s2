@@ -51,6 +51,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # añadimos REPO_ROOT a PYTHONPATH para `python -m`.
 SUBPROCESS_CWD = REPO_ROOT / "mimo" / "oof"
 
+# Importamos el helper de wf_train_at_date para resolver el deploy_subdir
+# en modo specialists (= base_tag_combined). Mantiene la convención en un
+# único sitio y evita drift.
+sys.path.insert(0, str(REPO_ROOT))
+from scripts.walk_forward.wf_train_at_date import (
+    base_exp_tag as _wf_base_exp_tag,
+)
+
+
+def resolve_deploy_subdir(mode: str, default_subdir: str) -> str:
+    """En specialists mode, el deploy real es <base_tag>_combined. En single
+    mode es el subdir tal cual (default deploy_full)."""
+    if mode == "specialists":
+        return f"{_wf_base_exp_tag()}_combined"
+    return default_subdir
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers de fechas
@@ -147,11 +163,14 @@ def run_cmd(name: str, cmd: list[str], log_path: Path,
 
 def cmd_train_at_date(cutoff: datetime, run_optuna: bool, optuna_trials: int,
                       locked_params_json: Optional[Path],
+                      locked_best_per_side_json: Optional[Path],
+                      mode: str,
                       train_months: int, holdout_months: int, calib_days: int,
                       artifacts_root: Path) -> list[str]:
     cmd = [
         sys.executable, "-m", "scripts.walk_forward.wf_train_at_date",
         "--cutoff", fmt_date(cutoff),
+        "--mode", mode,
         "--train-months", str(train_months),
         "--holdout-months", str(holdout_months),
         "--calib-days", str(calib_days),
@@ -160,9 +179,16 @@ def cmd_train_at_date(cutoff: datetime, run_optuna: bool, optuna_trials: int,
     if run_optuna:
         cmd += ["--run-optuna", "--optuna-trials", str(optuna_trials)]
     else:
-        if locked_params_json is None:
-            raise RuntimeError("WEIGHT-ONLY pero no hay locked_params_json")
-        cmd += ["--locked-params-json", str(locked_params_json)]
+        if mode == "specialists":
+            if locked_best_per_side_json is None:
+                raise RuntimeError(
+                    "WEIGHT-ONLY mode=specialists pero no hay locked_best_per_side_json"
+                )
+            cmd += ["--locked-best-per-side-json", str(locked_best_per_side_json)]
+        else:
+            if locked_params_json is None:
+                raise RuntimeError("WEIGHT-ONLY pero no hay locked_params_json")
+            cmd += ["--locked-params-json", str(locked_params_json)]
     return cmd
 
 
@@ -219,7 +245,16 @@ def main():
     ap.add_argument("--bootstrap-locked-params", type=Path, default=None,
                     help="Si la primera semana NO es Optuna, "
                          "best_params_flat.json a usar como bootstrap "
-                         "(p.ej. del 202500).")
+                         "(p.ej. del 202500). Solo aplica en --mode single.")
+    ap.add_argument("--mode", choices=["single", "specialists"], default="single",
+                    help="single: un solo modelo multitask por release (default). "
+                         "specialists: dos modelos especializados por side, "
+                         "consolidados con merge_specialists. Requiere "
+                         "--bootstrap-best-per-side si la primera semana no es Optuna.")
+    ap.add_argument("--bootstrap-best-per-side", type=Path, default=None,
+                    help="En --mode specialists, si la primera semana NO es Optuna, "
+                         "best_per_side.json a usar como bootstrap (generado con "
+                         "wf_extract_best_per_side, p.ej. del 202500).")
     ap.add_argument("--dry-run", action="store_true",
                     help="Calcula y muestra el plan sin ejecutar nada.")
     args = ap.parse_args()
@@ -231,11 +266,18 @@ def main():
     if not cutoffs:
         sys.exit("❌ No hay lunes en el rango especificado.")
 
-    if args.no_optuna and args.bootstrap_locked_params is None:
-        sys.exit(
-            "❌ --no-optuna requiere --bootstrap-locked-params apuntando a un "
-            "best_params_flat.json (ej: el extraído del 202500)."
-        )
+    if args.no_optuna:
+        if args.mode == "single" and args.bootstrap_locked_params is None:
+            sys.exit(
+                "❌ --no-optuna --mode single requiere --bootstrap-locked-params "
+                "(ej: el best_params_flat.json del 202500)."
+            )
+        if args.mode == "specialists" and args.bootstrap_best_per_side is None:
+            sys.exit(
+                "❌ --no-optuna --mode specialists requiere --bootstrap-best-per-side "
+                "(ej: el best_per_side.json del 202500, generado con "
+                "wf_extract_best_per_side)."
+            )
 
     artifacts_root = args.artifacts_root.resolve()
     wf_root = args.wf_root.resolve()
@@ -247,11 +289,19 @@ def main():
     print(f"  WALK-FORWARD ORCHESTRATOR")
     print("═" * 80)
     print(f"  rango     : {fmt_date(cutoffs[0])} … {fmt_date(cutoffs[-1])}  ({len(cutoffs)} semanas)")
+    print(f"  pipeline  : mode={args.mode}")
     if args.no_optuna:
         print(f"  optuna    : DESACTIVADO  (todas las semanas weight-only con bootstrap)")
-        print(f"  bootstrap : {args.bootstrap_locked_params}")
+        if args.mode == "specialists":
+            print(f"  bootstrap : {args.bootstrap_best_per_side}  (best_per_side)")
+        else:
+            print(f"  bootstrap : {args.bootstrap_locked_params}  (best_params_flat)")
     else:
         print(f"  optuna    : cada {args.optuna_every} semanas ({args.optuna_trials} trials/run)")
+        if args.mode == "specialists" and args.bootstrap_best_per_side:
+            print(f"  bootstrap : {args.bootstrap_best_per_side}  (best_per_side, semanas weight-only previas a 1er Optuna)")
+        elif args.mode == "single" and args.bootstrap_locked_params:
+            print(f"  bootstrap : {args.bootstrap_locked_params}  (best_params_flat)")
     print(f"  train     : {args.train_months}m  |  holdout: {args.holdout_months}m  |  calib: {args.calib_days}d")
     print(f"  artifacts : {artifacts_root}")
     print(f"  state     : {state_path}")
@@ -285,22 +335,41 @@ def main():
         wf_step_dir.mkdir(parents=True, exist_ok=True)
 
         # locked_params resolución para WEIGHT-ONLY
+        # En mode=single: best_params_flat.json (un solo modelo).
+        # En mode=specialists: best_per_side.json (params per-side).
         locked_params_path: Optional[Path] = None
+        locked_best_per_side_path: Optional[Path] = None
         if not is_optuna_week:
-            if state.get("last_optuna_release"):
-                locked_params_path = (
-                    artifacts_root / state["last_optuna_release"]
-                    / "best_params_flat.json"
-                )
-            elif args.bootstrap_locked_params:
-                locked_params_path = args.bootstrap_locked_params.resolve()
+            if args.mode == "specialists":
+                if state.get("last_optuna_release"):
+                    locked_best_per_side_path = (
+                        artifacts_root / state["last_optuna_release"]
+                        / "best_per_side.json"
+                    )
+                elif args.bootstrap_best_per_side:
+                    locked_best_per_side_path = args.bootstrap_best_per_side.resolve()
+                else:
+                    sys.exit(
+                        f"❌ semana {fmt_date(cutoff)} es WEIGHT-ONLY (specialists) "
+                        "pero no hay best_per_side previo ni --bootstrap-best-per-side."
+                    )
+                if not locked_best_per_side_path.exists():
+                    sys.exit(f"❌ best_per_side no existe: {locked_best_per_side_path}")
             else:
-                sys.exit(
-                    f"❌ semana {fmt_date(cutoff)} es WEIGHT-ONLY pero no hay "
-                    "best_params previo ni --bootstrap-locked-params."
-                )
-            if not locked_params_path.exists():
-                sys.exit(f"❌ locked_params no existe: {locked_params_path}")
+                if state.get("last_optuna_release"):
+                    locked_params_path = (
+                        artifacts_root / state["last_optuna_release"]
+                        / "best_params_flat.json"
+                    )
+                elif args.bootstrap_locked_params:
+                    locked_params_path = args.bootstrap_locked_params.resolve()
+                else:
+                    sys.exit(
+                        f"❌ semana {fmt_date(cutoff)} es WEIGHT-ONLY pero no hay "
+                        "best_params previo ni --bootstrap-locked-params."
+                    )
+                if not locked_params_path.exists():
+                    sys.exit(f"❌ locked_params no existe: {locked_params_path}")
 
         print("\n" + "█" * 80)
         print(f"  WEEK {i+1}/{len(cutoffs)}  {fmt_date(cutoff)}  "
@@ -315,6 +384,8 @@ def main():
                 run_optuna=is_optuna_week,
                 optuna_trials=args.optuna_trials,
                 locked_params_json=locked_params_path,
+                locked_best_per_side_json=locked_best_per_side_path,
+                mode=args.mode,
                 train_months=args.train_months,
                 holdout_months=args.holdout_months,
                 calib_days=args.calib_days,
@@ -325,14 +396,21 @@ def main():
         if rc != 0:
             sys.exit(f"❌ train falló semana {fmt_date(cutoff)} (rc={rc}); aborto orquestador")
 
-        # Si fue Optuna, registramos best_params_flat
+        # Si fue Optuna, registramos el release como fuente de params para
+        # las semanas weight-only siguientes (mode-aware).
         if is_optuna_week:
-            best_path = artifacts_root / release / "best_params_flat.json"
-            if not best_path.exists():
-                print(f"⚠️  Optuna terminó pero no encuentro {best_path.name}. "
+            if args.mode == "specialists":
+                src_path = artifacts_root / release / "best_per_side.json"
+                src_label = "best_per_side"
+            else:
+                src_path = artifacts_root / release / "best_params_flat.json"
+                src_label = "best_params_flat"
+            if not src_path.exists():
+                print(f"⚠️  Optuna terminó pero no encuentro {src_path.name}. "
                       "Las semanas siguientes weight-only podrían fallar.")
             else:
                 state["last_optuna_release"] = release
+                print(f"📌 last_optuna_release ← {release}  ({src_label})")
 
         # ── Stage B: drift_metrics → promote? ───────────────────────────────
         rc = run_cmd(
@@ -372,7 +450,7 @@ def main():
                 f"replay@{fmt_date(cutoff)}",
                 cmd_replay(
                     release=active_release,
-                    deploy_subdir=args.deploy_subdir,
+                    deploy_subdir=resolve_deploy_subdir(args.mode, args.deploy_subdir),
                     policy_module=policy_module,
                     from_dt=replay_from,
                     to_dt=replay_to,

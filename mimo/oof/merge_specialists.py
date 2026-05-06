@@ -198,6 +198,11 @@ def main():
         (f"data/calibration_dataset_{release}_short.parquet", short_dir, "calibration_dataset_short"),
         (f"data/holdout_predictions_{release}_long.parquet",  long_dir,  "holdout_predictions_long"),
         (f"data/holdout_predictions_{release}_short.parquet", short_dir, "holdout_predictions_short"),
+        # deploy_calibration_tail: lo consume select_thresholds_from_tail leyendo
+        # <deploy_dir>/data/deploy_calibration_tail_<release>_<side>.parquet, así
+        # que también hay que llevarlo al combined para el sweep EV-net.
+        (f"data/deploy_calibration_tail_{release}_long.parquet",  long_dir,  "deploy_calibration_tail_long"),
+        (f"data/deploy_calibration_tail_{release}_short.parquet", short_dir, "deploy_calibration_tail_short"),
     ]
     for rel, src_dir, label in pairs:
         src = src_dir / rel
