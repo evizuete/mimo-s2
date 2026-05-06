@@ -63,20 +63,25 @@ def main():
         sys.exit("❌ el study no tiene best_trial")
 
     params = dict(study.best_trial.params)
-    payload = {
+    # IMPORTANTE: v7 (--locked-params-json) espera un dict PLANO de hyperparams,
+    # NO un envoltorio con metadata. La metadata va a un sidecar _meta.json.
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(params, indent=2))
+
+    meta_path = args.out.with_name(args.out.stem + "_meta.json")
+    meta = {
         "release": args.release,
         "study_name": study_name,
         "best_value": float(study.best_value)
             if study.best_value is not None else None,
         "best_trial_number": study.best_trial.number,
-        "params": params,
+        "params_file": args.out.name,
     }
+    meta_path.write_text(json.dumps(meta, indent=2))
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(payload, indent=2))
-
-    print(f"\n✅ best_params_flat → {args.out}")
-    print(f"   trial #{study.best_trial.number}, value={payload['best_value']:.6f}")
+    print(f"\n✅ best_params_flat → {args.out}  (dict plano, {len(params)} params)")
+    print(f"   metadata        → {meta_path}")
+    print(f"   trial #{study.best_trial.number}, value={meta['best_value']:.6f}")
     print(f"   params:")
     for k, v in sorted(params.items()):
         print(f"     {k:>22s} : {v}")

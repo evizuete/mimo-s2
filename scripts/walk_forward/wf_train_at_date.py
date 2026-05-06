@@ -333,18 +333,25 @@ def export_best_params_flat(release: str, artifacts_root: Path,
         print(f"⚠️  study sin best_trial: {e}")
         return None
 
-    payload = {
+    # IMPORTANTE: v7 (--locked-params-json) espera un dict PLANO de hyperparams.
+    # Metadata va a un sidecar para debugging.
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(params, indent=2))
+
+    meta_path = out_path.with_name(out_path.stem + "_meta.json")
+    meta = {
         "release": release,
         "study_name": study_name,
         "best_value": float(study.best_value)
             if study.best_value is not None else None,
         "best_trial_number": study.best_trial.number,
-        "params": params,
+        "params_file": out_path.name,
     }
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2))
-    print(f"✅ best_params_flat → {out_path}  (trial #{study.best_trial.number}, "
-          f"value={payload['best_value']:.4f})")
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+    print(f"✅ best_params_flat → {out_path}  (dict plano, {len(params)} params)")
+    print(f"   meta → {meta_path}  (trial #{study.best_trial.number}, "
+          f"value={meta['best_value']:.4f})")
     return out_path
 
 
