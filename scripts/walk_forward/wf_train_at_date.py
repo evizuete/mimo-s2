@@ -226,8 +226,9 @@ def stage_oof_training(window: WindowSpec, release: str,
 
 
 def stage_resume_deploy(window: WindowSpec, release: str,
-                        deploy_subdir: str) -> list[str]:
-    return [
+                        deploy_subdir: str,
+                        locked_params_json: Optional[Path] = None) -> list[str]:
+    cmd = [
         sys.executable, "-m", "mimo.oof.resume_deploy_full_v6_multitask",
         "--release", release,
         "--target-type", TARGET_TYPE,
@@ -243,6 +244,12 @@ def stage_resume_deploy(window: WindowSpec, release: str,
         "--train-artifacts-subdir", "auto",
         "--deploy-subdir", deploy_subdir,
     ]
+    # Si stage 1 corrió con --locked-params-json, el study Optuna está aislado
+    # con un nombre custom; v6 también necesita el flag para evitar buscar el
+    # study por defecto (que estaría vacío).
+    if locked_params_json is not None:
+        cmd += ["--locked-params-json", str(locked_params_json)]
+    return cmd
 
 
 def stage_select_thresholds(release: str, deploy_dir: Path) -> list[str]:
@@ -527,7 +534,10 @@ def main():
     elif not args.force and deploy_done(release, artifacts_root, args.deploy_subdir):
         print(f"⏭  [deploy] ya completada (percentiles_*.json encontrado)")
     else:
-        cmd = stage_resume_deploy(window, release, args.deploy_subdir)
+        cmd = stage_resume_deploy(
+            window, release, args.deploy_subdir,
+            locked_params_json=(None if args.run_optuna else args.locked_params_json),
+        )
         rc = run_stage("02_resume_deploy", cmd, log_dir)
         if rc != 0:
             sys.exit(rc)
