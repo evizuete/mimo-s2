@@ -268,10 +268,19 @@ def summarize(result: Dict[str, Any], initial_equity: float, out_dir: Path) -> N
         eq_df.to_parquet(eq_path, index=False)
         print(f"📁 equity → {eq_path}")
 
+    max_dd_pct_val = 0.0
+    if eq_curve and eq_ts:
+        _eq = pd.Series(eq_curve, index=pd.to_datetime(eq_ts))
+        _peak = _eq.cummax()
+        _dd = (_eq - _peak) / _peak
+        max_dd_pct_val = float(_dd.min() * 100)
+
     summary = {
         "initial_equity": initial_equity,
         "final_equity": final_eq,
+        "pnl_total": final_eq - initial_equity,
         "pnl_pct": (final_eq / initial_equity - 1) * 100,
+        "max_drawdown_pct": max_dd_pct_val,
         "n_trades": int(len(trades)),
         "win_rate_pct": 100 * float((trades.get("pnl", pd.Series([])) > 0).mean())
             if not trades.empty else 0.0,
