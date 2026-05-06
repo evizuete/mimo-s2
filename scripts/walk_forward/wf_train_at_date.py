@@ -281,22 +281,56 @@ def stage_compute_percentiles(release: str, deploy_dir: Path,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def oof_done(release: str, artifacts_root: Path) -> bool:
-    """OOF terminó si existe al menos un holdout_predictions parquet."""
-    base = artifacts_root / release / "oof"
-    if not base.exists():
-        return False
-    matches = list(base.rglob(f"holdout_predictions_{release}_*.parquet"))
-    return len(matches) > 0
+    """OOF terminó si existe al menos un holdout_predictions parquet.
+    Busca en varias ubicaciones plausibles (cwd-dependent o absoluto)."""
+    candidates = [
+        artifacts_root / release / "oof",
+        REPO_ROOT / "artifacts" / release / "oof",
+        Path.cwd() / ".." / ".." / "artifacts" / release / "oof",
+    ]
+    seen = set()
+    for base in candidates:
+        try:
+            base = base.resolve()
+        except Exception:
+            continue
+        if base in seen or not base.exists():
+            continue
+        seen.add(base)
+        matches = list(base.rglob(f"holdout_predictions_{release}_*.parquet"))
+        if matches:
+            print(f"  [oof_done] ✅ encontrado en {base} ({len(matches)} parquets)")
+            return True
+        print(f"  [oof_done] ⚠️  base existe pero sin parquets: {base}")
+    print(f"  [oof_done] ❌ no encontrado. buscado en:")
+    for c in candidates:
+        try:
+            print(f"            {c.resolve()}  exists={c.resolve().exists()}")
+        except Exception as e:
+            print(f"            {c}  err={e}")
+    return False
 
 
 def deploy_done(release: str, artifacts_root: Path,
                 deploy_subdir: str) -> bool:
     """Deploy terminó si existen percentiles_<release>_<side>.json."""
-    deploy_dir = artifacts_root / release / "oof" / deploy_subdir
-    return all(
-        (deploy_dir / f"percentiles_{release}_{side}.json").exists()
-        for side in ("long", "short")
-    )
+    candidates = [
+        artifacts_root / release / "oof" / deploy_subdir,
+        REPO_ROOT / "artifacts" / release / "oof" / deploy_subdir,
+    ]
+    for deploy_dir in candidates:
+        try:
+            deploy_dir = deploy_dir.resolve()
+        except Exception:
+            continue
+        if not deploy_dir.exists():
+            continue
+        if all(
+            (deploy_dir / f"percentiles_{release}_{side}.json").exists()
+            for side in ("long", "short")
+        ):
+            return True
+    return False
 
 
 def thresholds_done(release: str, deploy_dir: Path) -> bool:
