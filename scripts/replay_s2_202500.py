@@ -64,6 +64,41 @@ def build_simulator(
     score_cap_by_state = pol.score_cap_by_state
     risk_mult_by_state = pol.risk_mult_by_state
 
+    # 1.5. Detectar si el deploy es multitask: si existe `model_<release>_multitask.keras`,
+    # el modelo único maneja ambas heads y necesita el contexto UNIÓN (25 cols).
+    # En binary cada side tiene su propio modelo entrenado con su máscara (24 cols).
+    if artifacts_root is None:
+        _artifacts_root_for_detect = base_dir.parent / "artifacts"
+    else:
+        _artifacts_root_for_detect = artifacts_root
+    _deploy_dir = _artifacts_root_for_detect / release / "oof" / deploy_subdir
+    _multitask_keras = _deploy_dir / f"model_{release}_multitask.keras"
+    is_multitask_deploy = _multitask_keras.exists()
+    if is_multitask_deploy:
+        print(f"🧠 Deploy multitask detectado ({_multitask_keras.name}); usando máscaras UNIÓN.")
+    else:
+        print(f"🧠 Deploy binary (no se encontró {_multitask_keras.name}); máscaras por-side.")
+
+    # Las direccionales se invierten en multitask: ambos sides ven todas las features.
+    if is_multitask_deploy:
+        _mask_long = {
+            "ema_bull": True, "rsi_oversold": True, "macd_positive": True,
+            "ema_bear": True, "rsi_overbought": True, "macd_negative": True,
+        }
+        _mask_short = {
+            "ema_bull": True, "rsi_oversold": True, "macd_positive": True,
+            "ema_bear": True, "rsi_overbought": True, "macd_negative": True,
+        }
+    else:
+        _mask_long = {
+            "ema_bull": True,  "rsi_oversold": True,  "macd_positive": True,
+            "ema_bear": False, "rsi_overbought": False, "macd_negative": False,
+        }
+        _mask_short = {
+            "ema_bear": True,  "rsi_overbought": True, "macd_negative": True,
+            "ema_bull": False, "rsi_oversold": False,  "macd_positive": False,
+        }
+
     # 2. Configs alineadas con el run de v6 deploy de 202500
     general_config = Config(
         release=release,
@@ -106,14 +141,8 @@ def build_simulator(
         use_vol_invariant_features=True,   # release 202500
         use_reduced_features=True,          # release 202500
         feature_masks={
-            "long": {
-                "ema_bull": True,  "rsi_oversold": True,  "macd_positive": True,
-                "ema_bear": False, "rsi_overbought": False, "macd_negative": False,
-            },
-            "short": {
-                "ema_bear": True,  "rsi_overbought": True, "macd_negative": True,
-                "ema_bull": False, "rsi_oversold": False,  "macd_positive": False,
-            },
+            "long": _mask_long,
+            "short": _mask_short,
         },
     )
 
