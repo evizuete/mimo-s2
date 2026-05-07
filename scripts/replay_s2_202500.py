@@ -79,24 +79,54 @@ def build_simulator(
     # que internamente son modelos multitask renombrados; se detecta por el
     # meta.json con source_long_dir/source_short_dir.
     if not is_multitask_deploy:
-        _meta_path = _deploy_dir / "meta.json"
-        if _meta_path.exists():
+        # merge_specialists escribe `merge_specialists_meta.json` con claves
+        # `long_specialist` y `short_specialist` apuntando a los dirs origen.
+        for _meta_name in ("merge_specialists_meta.json", "meta.json"):
+            _meta_path = _deploy_dir / _meta_name
+            if not _meta_path.exists():
+                continue
             try:
                 import json as _json
                 with _meta_path.open("r", encoding="utf-8") as _f:
                     _meta = _json.load(_f)
-                if "source_long_dir" in _meta and "source_short_dir" in _meta:
+                if (
+                    ("long_specialist" in _meta and "short_specialist" in _meta)
+                    or ("source_long_dir" in _meta and "source_short_dir" in _meta)
+                ):
                     is_multitask_deploy = True
                     is_specialists_merged = True
+                    print(f"🧠 Deploy specialists-merged detectado ({_meta_name}); usando máscaras UNIÓN.")
+                    break
             except Exception as _e:
-                print(f"⚠️  Error leyendo meta.json: {_e}")
+                print(f"⚠️  Error leyendo {_meta_name}: {_e}")
+
+    if not is_multitask_deploy and not is_specialists_merged:
+        # Fallback final: inspeccionar el shape del context scaler.
+        # 25 cols → modelo multitask renombrado. 24 cols → binary single-side.
+        try:
+            import joblib as _joblib
+            import glob as _glob
+            _scaler_dir = _deploy_dir / f"scalers_{release}"
+            _candidates = list(_scaler_dir.glob("*context*.pkl")) + list(_scaler_dir.glob("*context*.joblib"))
+            for _ctx_scaler_path in _candidates:
+                _ctx_scaler = _joblib.load(_ctx_scaler_path)
+                _n = getattr(_ctx_scaler, "n_features_in_", None)
+                if _n is None:
+                    _n = getattr(_ctx_scaler, "n_features", None)
+                if _n is not None and int(_n) >= 25:
+                    is_multitask_deploy = True
+                    is_specialists_merged = True
+                    print(f"🧠 Deploy specialists-merged inferido por scaler {_ctx_scaler_path.name} (n_features={_n}); máscaras UNIÓN.")
+                    break
+        except Exception as _e:
+            print(f"⚠️  Error inspeccionando context scaler: {_e}")
 
     if is_specialists_merged:
-        print(f"🧠 Deploy specialists-merged detectado (meta.json con source_*_dir); usando máscaras UNIÓN.")
+        pass  # ya se imprimió arriba
     elif is_multitask_deploy:
         print(f"🧠 Deploy multitask detectado ({_multitask_keras.name}); usando máscaras UNIÓN.")
     else:
-        print(f"🧠 Deploy binary (no se encontró {_multitask_keras.name} ni meta.json de specialists); máscaras por-side.")
+        print(f"🧠 Deploy binary (no se encontró {_multitask_keras.name} ni meta de specialists ni scaler 25-col); máscaras por-side.")
 
     # Las direccionales se invierten en multitask: ambos sides ven todas las features.
     if is_multitask_deploy:
