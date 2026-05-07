@@ -74,10 +74,29 @@ def build_simulator(
     _deploy_dir = _artifacts_root_for_detect / release / "oof" / deploy_subdir
     _multitask_keras = _deploy_dir / f"model_{release}_multitask.keras"
     is_multitask_deploy = _multitask_keras.exists()
-    if is_multitask_deploy:
+    is_specialists_merged = False
+    # merge_specialists produce un dir con archivos *_long.keras / *_short.keras
+    # que internamente son modelos multitask renombrados; se detecta por el
+    # meta.json con source_long_dir/source_short_dir.
+    if not is_multitask_deploy:
+        _meta_path = _deploy_dir / "meta.json"
+        if _meta_path.exists():
+            try:
+                import json as _json
+                with _meta_path.open("r", encoding="utf-8") as _f:
+                    _meta = _json.load(_f)
+                if "source_long_dir" in _meta and "source_short_dir" in _meta:
+                    is_multitask_deploy = True
+                    is_specialists_merged = True
+            except Exception as _e:
+                print(f"⚠️  Error leyendo meta.json: {_e}")
+
+    if is_specialists_merged:
+        print(f"🧠 Deploy specialists-merged detectado (meta.json con source_*_dir); usando máscaras UNIÓN.")
+    elif is_multitask_deploy:
         print(f"🧠 Deploy multitask detectado ({_multitask_keras.name}); usando máscaras UNIÓN.")
     else:
-        print(f"🧠 Deploy binary (no se encontró {_multitask_keras.name}); máscaras por-side.")
+        print(f"🧠 Deploy binary (no se encontró {_multitask_keras.name} ni meta.json de specialists); máscaras por-side.")
 
     # Las direccionales se invierten en multitask: ambos sides ven todas las features.
     if is_multitask_deploy:
