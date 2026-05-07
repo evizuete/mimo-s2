@@ -200,7 +200,12 @@ def load_ohlcv(from_date: str, to_date: str, base_tf: str = "1min") -> pd.DataFr
 # Resumen de métricas
 # ─────────────────────────────────────────────────────────────────────────────
 
-def summarize(result: Dict[str, Any], initial_equity: float, out_dir: Path) -> None:
+def summarize(
+    result: Dict[str, Any],
+    initial_equity: float,
+    out_dir: Path,
+    eval_from: Optional[str] = None,
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     trades = pd.DataFrame(result.get("trades", []))
@@ -208,6 +213,43 @@ def summarize(result: Dict[str, Any], initial_equity: float, out_dir: Path) -> N
     eq_ts_raw = result.get("equity_timestamps", None)
     eq_curve = list(eq_curve_raw) if eq_curve_raw is not None and len(eq_curve_raw) > 0 else []
     eq_ts = list(eq_ts_raw) if eq_ts_raw is not None and len(eq_ts_raw) > 0 else []
+
+    # Filtrado por ventana de evaluación: las barras anteriores a `eval_from`
+    # son warmup (popular features) y no cuentan para PnL/equity reportados.
+    if eval_from is not None:
+        eval_from_ts = pd.to_datetime(eval_from)
+        if eq_curve and eq_ts:
+            eq_ts_dt = pd.to_datetime(eq_ts)
+            mask_eq = eq_ts_dt >= eval_from_ts
+            n_pre = int((~mask_eq).sum())
+            if n_pre > 0 and mask_eq.any():
+                # Rebase: el equity al inicio de la ventana de eval pasa a ser
+                # el "initial_equity" reportado, para que pnl_pct refleje SOLO
+                # la ventana evaluable.
+                pre_eq = [e for e, m in zip(eq_curve, mask_eq) if not m]
+                rebased_initial = float(pre_eq[-1]) if pre_eq else initial_equity
+                eq_curve = [e for e, m in zip(eq_curve, mask_eq) if m]
+                eq_ts = [t for t, m in zip(eq_ts, mask_eq) if m]
+                print(f"\nℹ️  Warmup: descartadas {n_pre} barras de equity "
+                      f"anteriores a {eval_from}.")
+                print(f"   equity rebased: {initial_equity:,.2f} → {rebased_initial:,.2f} "
+                      f"(equity al cierre del warmup)")
+                initial_equity = rebased_initial
+
+        if not trades.empty:
+            entry_col = next(
+                (c for c in ("entry_time", "open_time", "ts_open", "time") if c in trades.columns),
+                None,
+            )
+            if entry_col is not None:
+                trades[entry_col] = pd.to_datetime(trades[entry_col])
+                n_trades_pre = len(trades)
+                trades = trades[trades[entry_col] >= eval_from_ts].reset_index(drop=True)
+                n_dropped = n_trades_pre - len(trades)
+                if n_dropped > 0:
+                    print(f"   trades descartados (warmup): {n_dropped} "
+                          f"(quedan {len(trades)} en la ventana de eval)")
+
     final_eq = float(eq_curve[-1]) if eq_curve else initial_equity
 
     print("\n" + "═" * 78)
@@ -304,9 +346,15 @@ def main() -> None:
                     help="Subdir bajo artifacts/<release>/oof/ donde están "
                          "los modelos y scalers (default: deploy_full).")
     ap.add_argument("--from", dest="from_date", required=True,
-                    help="YYYY-MM-DD inicio.")
+                    help="YYYY-MM-DD inicio de la ventana evaluable.")
     ap.add_argument("--to", dest="to_date", required=True,
                     help="YYYY-MM-DD fin.")
+    ap.add_argument("--warmup-from", dest="warmup_from", default=None,
+                    help="YYYY-MM-DD opcional. Si se pasa, se carga OHLCV "
+                         "desde aquí pero las barras anteriores a --from "
+                         "se usan SOLO para popular features multi-TF y NO "
+                         "cuentan en PnL/equity/trades reportados. "
+                         "Default: igual que --from (sin warmup).")
     ap.add_argument("--initial-equity", type=float, default=10_000.0)
     ap.add_argument("--base-tf", default="1min",
                     help="Timeframe del OHLCV cargado de la BD. El feature "
@@ -339,7 +387,11 @@ def main() -> None:
     )
 
     # 2. Cargar OHLCV
-    df = load_ohlcv(args.from_date, args.to_date, args.base_tf)
+    load_from = args.warmup_from if args.warmup_from else args.from_date
+    if args.warmup_from:
+        print(f"\n🔥 Warmup activo: cargando desde {load_from} pero solo "
+              f"contabilizando trades desde {args.from_date}.")
+    df = load_ohlcv(load_from, args.to_date, args.base_tf)
     if len(df) < 8000:
         print(f"⚠️  Solo {len(df)} filas. Multi-TF features (1h) "
               "necesitan ≥7500 1m bars. Pasa un rango más amplio.")
@@ -355,7 +407,12 @@ def main() -> None:
 
     # 4. Resumen
     out_dir = Path(args.out)
-    summarize(result, initial_equity=float(args.initial_equity), out_dir=out_dir)
+    summarize(
+        result,
+        initial_equity=float(args.initial_equity),
+        out_dir=out_dir,
+        eval_from=args.from_date if args.warmup_from else None,
+    )
 
     print("\n" + "═" * 78)
     print("✅ Replay completado.")
