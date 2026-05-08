@@ -108,6 +108,14 @@ def parse_policy_grid(grid_str: str) -> Dict[str, List[Any]]:
             v = v.strip().strip("'\"").strip()
             if not v:
                 continue
+            # Detectar el error típico: separar keys con "," en lugar de ";".
+            # En ese caso un "valor" contiene "=" (otra key embebida).
+            if "=" in v:
+                raise ValueError(
+                    f"Encontré '=' en un valor ('{v}') de la key '{k}'. "
+                    f"Probablemente separaste keys con ',' en vez de ';'. "
+                    f"Formato correcto: 'k1=v1,v2;k2=v1,v2' (";" entre keys, "
+                    f"',' entre valores).")
             try:
                 values.append(cast(v))
             except Exception as e:
