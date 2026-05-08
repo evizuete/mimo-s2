@@ -75,12 +75,21 @@ _POLICY_GRID_SCHEMA: Dict[str, Dict[str, Any]] = {
 
 
 def parse_policy_grid(grid_str: str) -> Dict[str, List[Any]]:
-    """Parsea 'k1=v1,v2;k2=v1,v2' → {k1: [v1,v2], k2: [v1,v2]} con cast por key."""
+    """Parsea 'k1=v1,v2;k2=v1,v2' → {k1: [v1,v2], k2: [v1,v2]} con cast por key.
+
+    Robusto a comillas extras alrededor del string completo o de keys/values
+    individuales (caso típico cuando el shell — PyCharm run config, cmd.exe —
+    no procesa las comillas simples y deja literales en el argv).
+    """
+    if not grid_str:
+        return {}
+    # Strip comillas envolventes del string completo (p.ej. "'k=v;k2=v2'")
+    grid_str = grid_str.strip().strip("'\"").strip()
     if not grid_str:
         return {}
     grid: Dict[str, List[Any]] = {}
     for item in grid_str.split(";"):
-        item = item.strip()
+        item = item.strip().strip("'\"").strip()
         if not item:
             continue
         if "=" not in item:
@@ -88,7 +97,7 @@ def parse_policy_grid(grid_str: str) -> Dict[str, List[Any]]:
                 f"Formato inválido en --policy-grid: '{item}' "
                 f"(esperado 'key=v1,v2')")
         k, vs = item.split("=", 1)
-        k = k.strip()
+        k = k.strip().strip("'\"").strip()
         if k not in _POLICY_GRID_SCHEMA:
             raise ValueError(
                 f"Key '{k}' no soportada en --policy-grid. "
@@ -96,7 +105,7 @@ def parse_policy_grid(grid_str: str) -> Dict[str, List[Any]]:
         cast = _POLICY_GRID_SCHEMA[k]["cast"]
         values = []
         for v in vs.split(","):
-            v = v.strip()
+            v = v.strip().strip("'\"").strip()
             if not v:
                 continue
             try:
