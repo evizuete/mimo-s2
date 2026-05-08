@@ -119,12 +119,29 @@ def parse_policy_grid(grid_str: str) -> Dict[str, List[Any]]:
 
 
 def combos_from_grid(grid: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
-    """Producto cartesiano de la grid. Si vacía, devuelve [{}] (1 run con defaults)."""
+    """Producto cartesiano de la grid. Si vacía, devuelve [{}] (1 run con defaults).
+
+    Filtra combos inválidos (score_low_quantile >= score_high_quantile) con
+    warning, porque la fórmula score = (pct - low) / (high - low) explota si
+    low ≥ high.
+    """
     if not grid:
         return [{}]
     keys = list(grid.keys())
     value_lists = [grid[k] for k in keys]
-    return [dict(zip(keys, combo)) for combo in itertools.product(*value_lists)]
+    raw = [dict(zip(keys, combo)) for combo in itertools.product(*value_lists)]
+    valid: List[Dict[str, Any]] = []
+    n_dropped = 0
+    for combo in raw:
+        lo = combo.get("score_low_quantile")
+        hi = combo.get("score_high_quantile")
+        if lo is not None and hi is not None and lo >= hi:
+            n_dropped += 1
+            continue
+        valid.append(combo)
+    if n_dropped > 0:
+        print(f"⚠️  Descartados {n_dropped} combo(s) por score_low_quantile >= score_high_quantile.")
+    return valid
 
 
 def apply_combo(simulator, combo: Dict[str, Any]) -> None:
