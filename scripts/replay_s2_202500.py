@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import itertools
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -43,6 +44,99 @@ from mimo.models.model_builder import ModelConfig, Config
 from mimo.strategies.decision_engine import DecisionPolicy, RiskConfig
 from mimo.strategies.regime_detector import RegimeConfig
 from mimo.strategies.trading_simulator_v3 import TradingSimulator
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Policy grid: parámetros mutables in-situ entre iteraciones de sweep
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _bool(s: Any) -> bool:
+    s = str(s).strip().lower()
+    if s in ("true", "1", "yes", "y", "t"):
+        return True
+    if s in ("false", "0", "no", "n", "f"):
+        return False
+    raise ValueError(f"bool inválido: {s!r}")
+
+
+# Para cada parámetro soportado: (caster, ruta de mutación)
+# La ruta es una lista de atributos sobre el simulator: ['decision_engine', 'policy']
+# significa simulator.decision_engine.policy.<key> = value
+_POLICY_GRID_SCHEMA: Dict[str, Dict[str, Any]] = {
+    "score_low_quantile":     {"cast": int,   "path": ["decision_engine", "policy"]},
+    "score_high_quantile":    {"cast": int,   "path": ["decision_engine", "policy"]},
+    "min_delta_rel":          {"cast": float, "path": ["decision_engine", "policy"]},
+    "require_delta_rel":      {"cast": _bool, "path": ["decision_engine", "policy"]},
+    "allow_volatile":         {"cast": _bool, "path": ["decision_engine", "policy"]},
+    "max_positions":          {"cast": int,   "path": ["risk_config"]},
+    "signal_cooldown_bars":   {"cast": int,   "path": ["decision_engine", "antinat_config"]},
+    "anomaly_block_threshold":{"cast": float, "path": ["decision_engine", "antinat_config"]},
+}
+
+
+def parse_policy_grid(grid_str: str) -> Dict[str, List[Any]]:
+    """Parsea 'k1=v1,v2;k2=v1,v2' → {k1: [v1,v2], k2: [v1,v2]} con cast por key."""
+    if not grid_str:
+        return {}
+    grid: Dict[str, List[Any]] = {}
+    for item in grid_str.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(
+                f"Formato inválido en --policy-grid: '{item}' "
+                f"(esperado 'key=v1,v2')")
+        k, vs = item.split("=", 1)
+        k = k.strip()
+        if k not in _POLICY_GRID_SCHEMA:
+            raise ValueError(
+                f"Key '{k}' no soportada en --policy-grid. "
+                f"Soportadas: {sorted(_POLICY_GRID_SCHEMA)}")
+        cast = _POLICY_GRID_SCHEMA[k]["cast"]
+        values = []
+        for v in vs.split(","):
+            v = v.strip()
+            if not v:
+                continue
+            try:
+                values.append(cast(v))
+            except Exception as e:
+                raise ValueError(f"No se puede castear '{v}' como {cast.__name__} para key '{k}': {e}")
+        if not values:
+            raise ValueError(f"No hay valores para key '{k}'")
+        grid[k] = values
+    return grid
+
+
+def combos_from_grid(grid: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
+    """Producto cartesiano de la grid. Si vacía, devuelve [{}] (1 run con defaults)."""
+    if not grid:
+        return [{}]
+    keys = list(grid.keys())
+    value_lists = [grid[k] for k in keys]
+    return [dict(zip(keys, combo)) for combo in itertools.product(*value_lists)]
+
+
+def apply_combo(simulator, combo: Dict[str, Any]) -> None:
+    """Aplica un combo de parámetros mutando atributos del simulator en sitio."""
+    for key, value in combo.items():
+        spec = _POLICY_GRID_SCHEMA[key]
+        target = simulator
+        for attr in spec["path"]:
+            target = getattr(target, attr)
+        if not hasattr(target, key):
+            raise AttributeError(
+                f"Target {'.'.join(spec['path'])} no tiene atributo '{key}' "
+                f"(¿cambió la API del simulator?)")
+        setattr(target, key, value)
+
+
+def combo_label(combo: Dict[str, Any]) -> str:
+    """Etiqueta corta para imprimir en logs/tablas."""
+    if not combo:
+        return "(defaults)"
+    return ", ".join(f"{k}={v}" for k, v in combo.items())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -457,11 +551,17 @@ def main() -> None:
                          "Debe existir en config/.")
     ap.add_argument("--out", default="/tmp/replay_s2",
                     help="Dir donde persistir trades, equity y resumen.")
-    ap.add_argument("--score-low-quantiles", default="80",
-                    help="CSV de valores de score_low_quantile a evaluar "
-                         "(p.ej. '60,70,75,80,85'). Si hay más de uno, se "
-                         "ejecuta predict() una sola vez y se reutiliza "
-                         "para cada quantile. Default: '80'.")
+    ap.add_argument("--score-low-quantiles", default=None,
+                    help="[DEPRECATED — usa --policy-grid] CSV de valores de "
+                         "score_low_quantile (p.ej. '60,70,80'). Se traduce "
+                         "internamente a --policy-grid 'score_low_quantile=...'.")
+    ap.add_argument("--policy-grid", default="",
+                    help="Sweep multi-parámetro. Formato: 'k1=v1,v2;k2=v1,v2'. "
+                         f"Keys soportadas: {sorted(_POLICY_GRID_SCHEMA)}. "
+                         "Producto cartesiano. Predict() se ejecuta UNA vez y "
+                         "se reutiliza para todos los combos. Ejemplo: "
+                         "'score_low_quantile=70,80,85;min_delta_rel=0.10,0.20;"
+                         "signal_cooldown_bars=3,6'.")
     args = ap.parse_args()
 
     base_dir = Path(__file__).resolve().parent
@@ -472,24 +572,39 @@ def main() -> None:
     if config_dir.exists() and str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-    # 1. Parsear lista de score_low_quantile
+    # 1. Parsear --policy-grid (+ back-compat con --score-low-quantiles)
     try:
-        quantile_list = [int(q.strip()) for q in args.score_low_quantiles.split(",") if q.strip()]
+        grid = parse_policy_grid(args.policy_grid)
     except ValueError as e:
-        raise SystemExit(f"❌ --score-low-quantiles inválido: {e}")
-    if not quantile_list:
-        raise SystemExit("❌ --score-low-quantiles vacío.")
-    sweep_mode = len(quantile_list) > 1
+        raise SystemExit(f"❌ --policy-grid inválido: {e}")
+    if args.score_low_quantiles:
+        if "score_low_quantile" in grid:
+            raise SystemExit(
+                "❌ --score-low-quantiles y --policy-grid 'score_low_quantile=...' "
+                "son mutuamente excluyentes.")
+        try:
+            grid["score_low_quantile"] = [
+                int(q.strip()) for q in args.score_low_quantiles.split(",") if q.strip()
+            ]
+        except ValueError as e:
+            raise SystemExit(f"❌ --score-low-quantiles inválido: {e}")
+    combos = combos_from_grid(grid)
+    sweep_mode = len(combos) > 1
+    if sweep_mode:
+        print(f"\n🧪 Policy grid: {len(combos)} combos a evaluar")
+        for k, vs in grid.items():
+            print(f"     · {k}: {vs}")
 
-    # 2. Construir simulador con el primer quantile
+    # 2. Construir simulador (con el primer combo si lo hay, para arrancar coherente)
     print("\n🔧 Construyendo TradingSimulator...")
+    initial_slq = grid.get("score_low_quantile", [80])[0]
     simulator = build_simulator(
         release=args.release,
         deploy_subdir=args.deploy_subdir,
         policy_module=f"config.{args.policy_config}",
         base_dir=base_dir,
         artifacts_root=repo_root / "artifacts",
-        score_low_quantile=quantile_list[0],
+        score_low_quantile=initial_slq,
     )
 
     # 3. Cargar OHLCV
@@ -506,20 +621,23 @@ def main() -> None:
     df_for_backtest = df
     df_is_predicted = False
     if sweep_mode:
-        print(f"\n🔮 Sweep mode: predict() una vez para reusar en {len(quantile_list)} quantiles...")
+        print(f"\n🔮 Sweep mode: predict() una vez para reusar en {len(combos)} combos...")
         df_for_backtest = simulator.predict(df, simulation=True)
         df_is_predicted = True
 
-    # 5. Bucle por quantile
+    # 5. Bucle por combo
     out_root = Path(args.out)
-    summaries_by_q: Dict[int, Dict[str, Any]] = {}
-    for q in quantile_list:
+    rows: List[Dict[str, Any]] = []
+    for i, combo in enumerate(combos, 1):
         if sweep_mode:
             print("\n" + "═" * 78)
-            print(f"  RUN: score_low_quantile = {q}")
+            print(f"  RUN {i}/{len(combos)}: {combo_label(combo)}")
             print("═" * 78)
-        # Mutar la policy en sitio (las predicciones no dependen de q).
-        simulator.decision_policy.score_low_quantile = int(q)
+        # Mutar simulator in-situ (predicciones no dependen de policy).
+        try:
+            apply_combo(simulator, combo)
+        except (AttributeError, KeyError) as e:
+            raise SystemExit(f"❌ apply_combo falló: {e}")
 
         print("\n🏁 Ejecutando simulator.backtest()...")
         if not df_is_predicted:
@@ -532,42 +650,58 @@ def main() -> None:
             df_is_predicted=df_is_predicted,
         )
 
-        out_dir = (out_root / f"q{q}") if sweep_mode else out_root
+        # Subdir por combo en sweep mode
+        if sweep_mode:
+            slug = "_".join(f"{k}{v}" for k, v in combo.items()).replace(".", "p")
+            out_dir = out_root / slug
+        else:
+            out_dir = out_root
         summary = summarize(
             result,
             initial_equity=float(args.initial_equity),
             out_dir=out_dir,
             eval_from=args.from_date if args.warmup_from else None,
         )
-        summaries_by_q[q] = summary
+        rows.append({"combo": combo, **summary})
 
     # 6. Tabla comparativa si sweep
     if sweep_mode:
-        print("\n" + "═" * 78)
-        print(f"  SWEEP RESULTS — score_low_quantile")
-        print("═" * 78)
-        print(f"  {'q':>4} | {'PnL%':>8} | {'trades':>7} | {'L/S':>9} | "
-              f"{'win%':>6} | {'MDD%':>7} | {'wks+':>6} | {'avgR':>7}")
-        print(f"  {'-'*4}-+-{'-'*8}-+-{'-'*7}-+-{'-'*9}-+-{'-'*6}-+-{'-'*7}-+-{'-'*6}-+-{'-'*7}")
-        for q in quantile_list:
-            s = summaries_by_q[q]
-            pnl_pct = s.get("pnl_pct", 0.0)
-            n_trades = s.get("n_trades", 0)
-            n_long = s.get("n_long", 0)
-            n_short = s.get("n_short", 0)
-            wr = s.get("win_rate_pct", 0.0)
-            mdd = s.get("max_drawdown_pct", 0.0)
-            wp = s.get("weeks_positive", 0)
-            wt = s.get("weeks_total", 0)
-            avgR = s.get("ev_net_avg_R", float("nan"))
-            print(f"  {q:>4} | {pnl_pct:>+7.2f}% | {n_trades:>7d} | "
+        grid_keys = list(grid.keys())
+        print("\n" + "═" * 100)
+        print(f"  SWEEP RESULTS — ordenados por PnL% desc")
+        print("═" * 100)
+        # cabecera dinámica
+        header_combo = " | ".join(f"{k:>10}" for k in grid_keys)
+        print(f"  {header_combo} || {'PnL%':>8} | {'trades':>7} | "
+              f"{'L/S':>9} | {'win%':>6} | {'MDD%':>7} | {'wks+':>5} | {'avgR':>7}")
+        sep = "+-".join("-" * 10 for _ in grid_keys)
+        print(f"  {sep}-++-{'-'*8}-+-{'-'*7}-+-{'-'*9}-+-{'-'*6}-+-{'-'*7}-+-{'-'*5}-+-{'-'*7}")
+        # ordenar por PnL% desc
+        rows_sorted = sorted(rows, key=lambda r: r.get("pnl_pct", float("-inf")), reverse=True)
+        for r in rows_sorted:
+            combo = r["combo"]
+            combo_str = " | ".join(f"{str(combo[k]):>10}" for k in grid_keys)
+            pnl_pct = r.get("pnl_pct", 0.0)
+            n_trades = r.get("n_trades", 0)
+            n_long = r.get("n_long", 0)
+            n_short = r.get("n_short", 0)
+            wr = r.get("win_rate_pct", 0.0)
+            mdd = r.get("max_drawdown_pct", 0.0)
+            wp = r.get("weeks_positive", 0)
+            wt = r.get("weeks_total", 0)
+            avgR = r.get("ev_net_avg_R", float("nan"))
+            print(f"  {combo_str} || {pnl_pct:>+7.2f}% | {n_trades:>7d} | "
                   f"{n_long:>4d}/{n_short:<4d} | {wr:>5.1f}% | "
-                  f"{mdd:>+6.2f}% | {wp:>2d}/{wt:<2d}  | {avgR:>+6.3f}R")
+                  f"{mdd:>+6.2f}% | {wp:>2d}/{wt:<2d} | {avgR:>+6.3f}R")
         # Persistir tabla resumida
-        sweep_path = out_root / "sweep_summary.json"
         out_root.mkdir(parents=True, exist_ok=True)
+        sweep_path = out_root / "sweep_summary.json"
         sweep_path.write_text(
-            json.dumps({str(q): summaries_by_q[q] for q in quantile_list}, indent=2, default=str)
+            json.dumps(
+                {"grid": {k: list(v) for k, v in grid.items()}, "results": rows},
+                indent=2,
+                default=str,
+            )
         )
         print(f"\n📁 sweep summary → {sweep_path}")
 
