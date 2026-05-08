@@ -114,8 +114,8 @@ def parse_policy_grid(grid_str: str) -> Dict[str, List[Any]]:
                 raise ValueError(
                     f"Encontré '=' en un valor ('{v}') de la key '{k}'. "
                     f"Probablemente separaste keys con ',' en vez de ';'. "
-                    f"Formato correcto: 'k1=v1,v2;k2=v1,v2' (";" entre keys, "
-                    f"',' entre valores).")
+                    f"Formato correcto: 'k1=v1,v2;k2=v1,v2' "
+                    f"(';' separa keys, ',' separa valores).")
             try:
                 values.append(cast(v))
             except Exception as e:
@@ -151,6 +151,15 @@ def combos_from_grid(grid: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
         print(f"⚠️  Descartados {n_dropped} combo(s) por score_low_quantile >= score_high_quantile.")
     return valid
 
+def reset_simulator_runtime_state(simulator) -> None:
+    """Resetea contadores stateful del DecisionEngine para que cada iteración
+    de sweep arranque desde cero."""
+    eng = getattr(simulator, "decision_engine", None)
+    if eng is None:
+        return
+    for attr in ("signal_cooldown_left", "cooldown_left"):
+        if hasattr(eng, attr):
+            setattr(eng, attr, 0)
 
 def apply_combo(simulator, combo: Dict[str, Any]) -> None:
     """Aplica un combo de parámetros mutando atributos del simulator en sitio."""
@@ -164,6 +173,8 @@ def apply_combo(simulator, combo: Dict[str, Any]) -> None:
                 f"Target {'.'.join(spec['path'])} no tiene atributo '{key}' "
                 f"(¿cambió la API del simulator?)")
         setattr(target, key, value)
+
+    reset_simulator_runtime_state(simulator)
 
 
 def combo_label(combo: Dict[str, Any]) -> str:

@@ -1,0 +1,151 @@
+RELEASE=202500
+TAG=rw_both_Lvol_boost_td_down_h3_Svol_boost_h3
+BEST_JSON=artifacts/${RELEASE}/oof/${TAG}/reports/best_per_side.json
+
+# 4a) LONG specialist deploy
+python -m mimo.oof.resume_deploy_full_v6_multitask \
+  --release ${RELEASE} \
+  --target-type multitask \
+  --base-tf 5min \
+  --variant-long vol_boost_td_down --variant-short vol_boost \
+  --label-horizon-long 3 --label-horizon-short 3 \
+  --train-from 2024-01-01 \
+  --holdout-from 2025-11-01 \
+  --holdout-to 2026-03-31 \
+  --deploy-calib-days 21 \
+  --train-artifacts-subdir ${TAG}_long_specialist_seed47 \
+  --deploy-subdir deploy_2026_04_long_specialist_seed47 \
+  --locked-params-json ${BEST_JSON} \
+  --locked-side-key long \
+  --objective ev_net --cost-per-signal 0.05 --max-drawdown-R 30
+
+# 4b) SHORT specialist deploy
+python -m mimo.oof.resume_deploy_full_v6_multitask \
+  --release ${RELEASE} \
+  --target-type multitask \
+  --base-tf 5min \
+  --variant-long vol_boost_td_down --variant-short vol_boost \
+  --label-horizon-long 3 --label-horizon-short 3 \
+  --train-from 2024-01-01 \
+  --holdout-from 2025-11-01 \
+  --holdout-to 2026-03-31 \
+  --deploy-calib-days 21 \
+  --train-artifacts-subdir ${TAG}_short_specialist_seed47 \
+  --deploy-subdir deploy_2026_04_short_specialist_seed47 \
+  --locked-params-json ${BEST_JSON} \
+  --locked-side-key short \
+  --objective ev_net --cost-per-signal 0.05 --max-drawdown-R 30
+
+# Etapa 5 — merge_specialists
+python -m mimo.oof.merge_specialists \
+  --release ${RELEASE} \
+  --long-dir  artifacts/${RELEASE}/oof/deploy_2026_04_long_specialist_seed47 \
+  --short-dir artifacts/${RELEASE}/oof/deploy_2026_04_short_specialist_seed47 \
+  --out-dir   artifacts/${RELEASE}/oof/deploy_2026_04_specialists_seed47_combined
+
+# Etapa 6 — select_thresholds_from_tail
+python -m mimo.oof.select_thresholds_from_tail \
+  --release ${RELEASE} \
+  --deploy-dir artifacts/${RELEASE}/oof/deploy_2026_04_specialists_seed47_combined \
+  --side both \
+  --tp-long 2.0 --sl-long 0.8 --horizon-long 3 \
+  --tp-short 2.0 --sl-short 0.8 --horizon-short 3 \
+  --cost 0.05 \
+  --thr-lo 0.10 --thr-hi 0.45 --n-points 70 \
+  --min-signals 30
+
+# Etapa 7 — compute_state_percentiles
+python -m mimo.oof.compute_state_percentiles \
+  --release ${RELEASE} \
+  --deploy-dir artifacts/${RELEASE}/oof/deploy_2026_04_specialists_seed47_combined \
+  --emit-config-stub
+
+# Etapa 8 — replay con warmup
+python scripts/replay_s2_202500.py \
+  --deploy-subdir deploy_2026_04_specialists_seed47_combined \
+  --warmup-from 2026-03-17 \
+  --from 2026-04-01 \
+  --to 2026-04-30
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ ETAPA 1 — ENTRENAR EL MODELO (Optuna OOF)                            │
+│                                                                      │
+│ Script:    mimo.oof.main_oof_regime_weights_v7                       │
+│ Qué hace:  Optuna prueba miles de combinaciones de hyperparámetros   │
+│            con cross-validation OOF y elige la mejor. Genera el      │
+│            modelo .keras + isotonic OOF + percentiles OOF.           │
+│ Output:    /artifacts/<release>/oof/<train_subdir>/                  │
+│              · model_<release>_multitask.keras                       │
+│              · oof_calibrator_<release>_multitask.joblib             │
+│              · percentiles_<release>_<side>.json                     │
+│ En tu caso: YA ESTÁ HECHO. release=202500, datos 2024-01-01 →        │
+│             2025-10-30. NO tienes que volver a correr esto.          │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ ETAPA 2 — DEPLOY (re-train + isotonic + percentiles iniciales)       │
+│                                                                      │
+│ Script:    mimo.oof.resume_deploy_full_v6_multitask                  │
+│ Qué hace:                                                            │
+│   1. Carga datos de --train-from a --holdout-to                      │
+│   2. Parte: full-minus-tail | tail (últimos --deploy-calib-days)     │
+│   3. Reentrena el modelo sobre full-minus-tail (mismos hyperparams   │
+│      que ETAPA 1)                                                    │
+│   4. Predice sobre la tail → ajusta isotonic LONG y SHORT            │
+│   5. Calcula threshold inicial por F1 sobre la tail                  │
+│   6. Calcula percentiles por estado desde la tail                    │
+│ Output:    /artifacts/<release>/oof/<deploy_subdir>/                 │
+│              · model_<release>_multitask.keras  (reentrenado)        │
+│              · oof_calibrator_<release>_multitask.joblib  (refit)    │
+│              · percentiles_<release>_<side>.json  (con _meta y       │
+│                bloque por estado)                                    │
+│              · data/deploy_calibration_tail_<release>_<side>.parquet │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ ETAPA 3 — SUBIR EL THRESHOLD DE F1 A EV-NET                          │
+│                                                                      │
+│ Script:    mimo.oof.select_thresholds_from_tail                      │
+│ Qué hace:                                                            │
+│   1. Lee data/deploy_calibration_tail_<release>_<side>.parquet       │
+│   2. Para cada fila simula triple barrier (TP=2*ATR, SL=0.8*ATR,     │
+│      horizonte=3 barras)                                             │
+│   3. Sweep de thresholds → calcula EV_net = mean_R - cost            │
+│   4. Elige el thr con MAYOR EV_net que cumpla --min-signals          │
+│   5. Sobrescribe _meta.selected_threshold del JSON                   │
+│ Output:    El mismo percentiles_<release>_<side>.json, mutado:       │
+│              · _meta.selected_threshold ← thr nuevo                  │
+│              · _meta.selected_threshold_old_f1 ← thr viejo (backup)  │
+│              · _meta.threshold_source = "ev_net_tail_replay"         │
+│              · _meta.threshold_replay = {tp, sl, horizon, ev_net,…}  │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ ETAPA 4 — CALCULAR LOS GATES POR ESTADO                              │
+│                                                                      │
+│ Script:    mimo.oof.compute_state_percentiles                        │
+│ Qué hace:                                                            │
+│   1. Lee percentiles_<release>_<side>.json                           │
+│   2. Coge _meta.selected_threshold (el global)                       │
+│   3. Para cada estado (TREND_UP, RANGE, …) interpola a qué           │
+│      percentil corresponde ese threshold dentro de la distribución   │
+│      del estado                                                      │
+│   4. Redondea al disponible más cercano (50, 60, 70, 75, 85, 90,     │
+│      95, 96, 97, 98, 99)                                             │
+│   5. Imprime tabla y opcionalmente emite stub Python para            │
+│      decision_policies_config_<release>.py                           │
+│ Output:                                                              │
+│   · Tabla en consola (estado → percentil)                            │
+│   · Stub para pegar en config/decision_policies_config_<release>.py  │
+│     con el dict gate_by_action_and_state                             │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                         REPLAY / LIVE
+                  (replay_s2_202500.py o s2_main)
+                  carga modelo + calibrador +
+                  percentiles + policy y opera
