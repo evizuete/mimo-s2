@@ -55,6 +55,7 @@ def build_simulator(
     policy_module: str,
     base_dir: Path,
     artifacts_root: Optional[Path] = None,
+    score_low_quantile: int = 80,
 ) -> TradingSimulator:
     """Construye el TradingSimulator con la misma config que s2_main.py."""
 
@@ -201,7 +202,7 @@ def build_simulator(
         gate_by_action_and_state=gate_by_action_and_state["production"],
         score_cap_by_state=score_cap_by_state["production"],
         risk_mult_by_state=risk_mult_by_state["production"],
-        score_low_quantile=80,
+        score_low_quantile=int(score_low_quantile),
         score_high_quantile=99,
         require_delta_rel=True,
         min_delta_rel=0.20,
@@ -283,7 +284,7 @@ def summarize(
     initial_equity: float,
     out_dir: Path,
     eval_from: Optional[str] = None,
-) -> None:
+) -> Dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     trades = pd.DataFrame(result.get("trades", []))
@@ -408,9 +409,21 @@ def summarize(
     if "r_multiple" in trades.columns and not trades.empty:
         summary["ev_net_avg_R"] = float(trades["r_multiple"].mean())
         summary["total_R"] = float(trades["r_multiple"].sum())
+    if not trades.empty and "side" in trades.columns:
+        summary["n_long"] = int((trades["side"] == "long").sum())
+        summary["n_short"] = int((trades["side"] == "short").sum())
+    if eq_curve and eq_ts:
+        eq_idx = pd.to_datetime(eq_ts)
+        eq_series = pd.Series(eq_curve, index=eq_idx)
+        weekly = eq_series.resample("W-MON").last().dropna()
+        weekly_pct = weekly.pct_change().dropna()
+        if not weekly_pct.empty:
+            summary["weeks_positive"] = int((weekly_pct > 0).sum())
+            summary["weeks_total"] = int(len(weekly_pct))
     summary_path = out_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=str))
     print(f"📁 summary → {summary_path}")
+    return summary
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -444,6 +457,11 @@ def main() -> None:
                          "Debe existir en config/.")
     ap.add_argument("--out", default="/tmp/replay_s2",
                     help="Dir donde persistir trades, equity y resumen.")
+    ap.add_argument("--score-low-quantiles", default="80",
+                    help="CSV de valores de score_low_quantile a evaluar "
+                         "(p.ej. '60,70,75,80,85'). Si hay más de uno, se "
+                         "ejecuta predict() una sola vez y se reutiliza "
+                         "para cada quantile. Default: '80'.")
     args = ap.parse_args()
 
     base_dir = Path(__file__).resolve().parent
@@ -454,7 +472,16 @@ def main() -> None:
     if config_dir.exists() and str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-    # 1. Construir simulador
+    # 1. Parsear lista de score_low_quantile
+    try:
+        quantile_list = [int(q.strip()) for q in args.score_low_quantiles.split(",") if q.strip()]
+    except ValueError as e:
+        raise SystemExit(f"❌ --score-low-quantiles inválido: {e}")
+    if not quantile_list:
+        raise SystemExit("❌ --score-low-quantiles vacío.")
+    sweep_mode = len(quantile_list) > 1
+
+    # 2. Construir simulador con el primer quantile
     print("\n🔧 Construyendo TradingSimulator...")
     simulator = build_simulator(
         release=args.release,
@@ -462,9 +489,10 @@ def main() -> None:
         policy_module=f"config.{args.policy_config}",
         base_dir=base_dir,
         artifacts_root=repo_root / "artifacts",
+        score_low_quantile=quantile_list[0],
     )
 
-    # 2. Cargar OHLCV
+    # 3. Cargar OHLCV
     load_from = args.warmup_from if args.warmup_from else args.from_date
     if args.warmup_from:
         print(f"\n🔥 Warmup activo: cargando desde {load_from} pero solo "
@@ -474,34 +502,78 @@ def main() -> None:
         print(f"⚠️  Solo {len(df)} filas. Multi-TF features (1h) "
               "necesitan ≥7500 1m bars. Pasa un rango más amplio.")
 
-    # 3. Backtest
-    print("\n🏁 Ejecutando simulator.backtest()...")
-    print("   (esto ejecuta predict() sobre todo el rango + decisión per-bar)")
-    result = simulator.backtest(
-        df_rates=df,
-        initial_equity=float(args.initial_equity),
-        df_is_predicted=False,
-    )
+    # 4. Si sweep, predict() una sola vez para amortizar
+    df_for_backtest = df
+    df_is_predicted = False
+    if sweep_mode:
+        print(f"\n🔮 Sweep mode: predict() una vez para reusar en {len(quantile_list)} quantiles...")
+        df_for_backtest = simulator.predict(df, simulation=True)
+        df_is_predicted = True
 
-    # 4. Resumen
-    out_dir = Path(args.out)
-    summarize(
-        result,
-        initial_equity=float(args.initial_equity),
-        out_dir=out_dir,
-        eval_from=args.from_date if args.warmup_from else None,
-    )
+    # 5. Bucle por quantile
+    out_root = Path(args.out)
+    summaries_by_q: Dict[int, Dict[str, Any]] = {}
+    for q in quantile_list:
+        if sweep_mode:
+            print("\n" + "═" * 78)
+            print(f"  RUN: score_low_quantile = {q}")
+            print("═" * 78)
+        # Mutar la policy en sitio (las predicciones no dependen de q).
+        simulator.decision_policy.score_low_quantile = int(q)
+
+        print("\n🏁 Ejecutando simulator.backtest()...")
+        if not df_is_predicted:
+            print("   (esto ejecuta predict() sobre todo el rango + decisión per-bar)")
+        else:
+            print("   (predict() reutilizado; solo decisión per-bar)")
+        result = simulator.backtest(
+            df_rates=df_for_backtest,
+            initial_equity=float(args.initial_equity),
+            df_is_predicted=df_is_predicted,
+        )
+
+        out_dir = (out_root / f"q{q}") if sweep_mode else out_root
+        summary = summarize(
+            result,
+            initial_equity=float(args.initial_equity),
+            out_dir=out_dir,
+            eval_from=args.from_date if args.warmup_from else None,
+        )
+        summaries_by_q[q] = summary
+
+    # 6. Tabla comparativa si sweep
+    if sweep_mode:
+        print("\n" + "═" * 78)
+        print(f"  SWEEP RESULTS — score_low_quantile")
+        print("═" * 78)
+        print(f"  {'q':>4} | {'PnL%':>8} | {'trades':>7} | {'L/S':>9} | "
+              f"{'win%':>6} | {'MDD%':>7} | {'wks+':>6} | {'avgR':>7}")
+        print(f"  {'-'*4}-+-{'-'*8}-+-{'-'*7}-+-{'-'*9}-+-{'-'*6}-+-{'-'*7}-+-{'-'*6}-+-{'-'*7}")
+        for q in quantile_list:
+            s = summaries_by_q[q]
+            pnl_pct = s.get("pnl_pct", 0.0)
+            n_trades = s.get("n_trades", 0)
+            n_long = s.get("n_long", 0)
+            n_short = s.get("n_short", 0)
+            wr = s.get("win_rate_pct", 0.0)
+            mdd = s.get("max_drawdown_pct", 0.0)
+            wp = s.get("weeks_positive", 0)
+            wt = s.get("weeks_total", 0)
+            avgR = s.get("ev_net_avg_R", float("nan"))
+            print(f"  {q:>4} | {pnl_pct:>+7.2f}% | {n_trades:>7d} | "
+                  f"{n_long:>4d}/{n_short:<4d} | {wr:>5.1f}% | "
+                  f"{mdd:>+6.2f}% | {wp:>2d}/{wt:<2d}  | {avgR:>+6.3f}R")
+        # Persistir tabla resumida
+        sweep_path = out_root / "sweep_summary.json"
+        out_root.mkdir(parents=True, exist_ok=True)
+        sweep_path.write_text(
+            json.dumps({str(q): summaries_by_q[q] for q in quantile_list}, indent=2, default=str)
+        )
+        print(f"\n📁 sweep summary → {sweep_path}")
 
     print("\n" + "═" * 78)
     print("✅ Replay completado.")
     print("═" * 78)
-    print(f"\n📊 Compara con tus expectativas de holdout 202500:")
-    print(f"   • EV_net LONG  esperado: +0.05R … +0.20R/sig "
-          f"(fue +0.38R en tail)")
-    print(f"   • EV_net SHORT esperado: +0.03R … +0.15R/sig "
-          f"(fue +0.15R en tail)")
-    print(f"   • Si EV_net replay ≥ +0.05R/sig en cada side → señal de viabilidad")
-    print(f"     para mini-producción con tamaño 0.25× (base_risk_pct=0.0008).")
 
 
 if __name__ == "__main__":
