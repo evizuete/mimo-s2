@@ -411,6 +411,13 @@ _DEFAULT_GRID = {
     "use_gate": [True],
     "epochs": [90],
     "patience": [12],
+    # Defaults no-op para retrocompat: el trainer solo lee estos params
+    # si la release tiene una entrada explícita en su grid_space (ver
+    # _suggest_model_config). Aquí están para documentar y como fallback
+    # en GRID_BY_RELEASE[release]={**_DEFAULT_GRID, ...}.
+    "ranking_loss_weight": [0.0],
+    "seq_len_short": [64],
+    "use_hierarchical_fusion": [False],
 }
 
 GRID_BY_RELEASE = {
@@ -696,6 +703,43 @@ GRID_BY_RELEASE = {
         "focal_alpha_short": [0.25, 0.30, 0.35],
         "loss_weight_long":  [1.0],
         "loss_weight_short": [1.0],
+    },
+    # 202600: continuación de 202500 con espacio de hiperparámetros EXPANDIDO.
+    # Mismo feature set (reduced 72 + vol-invariant) y mismas barriers que
+    # 202500. Tres cambios respecto a 202500:
+    #   1) DEAD PARAMS resucitados: l2_reg, head_units, batch_size, focal_gamma,
+    #      loss_weight_short pasan de valor único a distribución real.
+    #   2) Continuous distributions (dicts en lugar de listas): TPE explora
+    #      mejor log-scale en LR/l2_reg y step continuo en dropouts/alphas.
+    #      Sólo compatible con --use-tpe; --use-grid requiere listas.
+    #   3) NUEVOS hiperparámetros: ranking_loss_weight (ListNet head, 0.0-0.3),
+    #      seq_len_short (lookback corto, 48/64/96) y use_hierarchical_fusion
+    #      (v3 build con fusión market/entry separada).
+    # Requiere: --use-tpe --optuna-trials >= 50 (idealmente 100). Con
+    # GridSampler los dicts NO funcionan.
+    "202600": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        # Capacidad / arquitectura — categóricos (categorical funciona con TPE y Grid)
+        "conv1d_filters":    [32, 48, 64, 96, 128],
+        "lstm_units":        [48, 64, 96, 128, 160],
+        "context_units":     [32, 48, 64, 96],
+        "head_units":        [32, 64, 96],
+        "batch_size":        [4096, 8192, 16384],
+        "seq_len_short":     [48, 64, 96],
+        "use_hierarchical_fusion": [False, True],
+        # Continuous distributions (TPE-only). Cada dict se interpreta como
+        # trial.suggest_float(low, high, step=step, log=log) en el trainer.
+        "learning_rate":       {"low": 3e-5, "high": 5e-4, "log": True},
+        "l2_reg":              {"low": 1e-6, "high": 1e-3, "log": True},
+        "dropout_seq":         {"low": 0.05, "high": 0.25, "step": 0.05},
+        "dropout_lstm":        {"low": 0.15, "high": 0.45, "step": 0.05},
+        "dropout_dense":       {"low": 0.15, "high": 0.40, "step": 0.05},
+        "focal_alpha_long":    {"low": 0.15, "high": 0.45, "step": 0.05},
+        "focal_alpha_short":   {"low": 0.15, "high": 0.45, "step": 0.05},
+        "focal_gamma":         {"low": 1.0, "high": 4.0, "step": 0.5},
+        "loss_weight_long":    {"low": 0.5, "high": 2.5, "step": 0.25},
+        "loss_weight_short":   {"low": 0.5, "high": 2.5, "step": 0.25},
+        "ranking_loss_weight": {"low": 0.0, "high": 0.3, "step": 0.05},
     },
 }
 
@@ -1302,6 +1346,24 @@ BARRIERS_BY_RELEASE = {
     # 202501: barriers idénticas a 202500 / 202300. La diferencia es feature
     # set COMPLETO (97 features sin reducir).
     "202501": {
+        "tp_base": 2.0,
+        "sl_base": 0.80,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.00, "sl": 0.80},
+            "ranging":  {"tp": 1.80, "sl": 0.80},
+            "low_vol":  {"tp": 1.80, "sl": 0.80},
+            "high_vol": {"tp": 2.20, "sl": 1.00},
+        },
+    },
+    # 202600: barriers idénticas a 202500. Sólo cambia GRID (espacio de
+    # hiperparámetros expandido en GRID_BY_RELEASE["202600"]).
+    "202600": {
         "tp_base": 2.0,
         "sl_base": 0.80,
         "regime_barriers_long": {
@@ -2055,8 +2117,8 @@ def _tf_defaults(base_tf: str) -> Dict[str, int]:
     return {"seq_len_short": 64, "seq_len_long": 256, "price_norm_window": 200}
 
 
-_VOL_INVARIANT_RELEASES = {"202200", "202300", "202400", "202500", "202501"}
-_REDUCED_FEATURES_RELEASES = {"202300", "202400", "202500"}
+_VOL_INVARIANT_RELEASES = {"202200", "202300", "202400", "202500", "202501", "202600"}
+_REDUCED_FEATURES_RELEASES = {"202300", "202400", "202500", "202600"}
 _ULTRA_REDUCED_FEATURES_RELEASES = {"202400"}
 
 
@@ -2622,13 +2684,24 @@ def main() -> None:
         if dst == src:
             pass  # nada que hacer
         else:
+            # Inherit es NO destructivo: si dst ya tiene entrada explícita en
+            # BARRIERS/GRID, NO la sobreescribimos. Esto permite definir releases
+            # como 202600 con su propio grid sin que el --inherit-config-from
+            # del script las machaque silenciosamente.
             inherited = []
+            skipped = []
             if src in BARRIERS_BY_RELEASE:
-                BARRIERS_BY_RELEASE[dst] = BARRIERS_BY_RELEASE[src]
-                inherited.append("BARRIERS")
+                if dst in BARRIERS_BY_RELEASE:
+                    skipped.append("BARRIERS")
+                else:
+                    BARRIERS_BY_RELEASE[dst] = BARRIERS_BY_RELEASE[src]
+                    inherited.append("BARRIERS")
             if src in GRID_BY_RELEASE:
-                GRID_BY_RELEASE[dst] = GRID_BY_RELEASE[src]
-                inherited.append("GRID")
+                if dst in GRID_BY_RELEASE:
+                    skipped.append("GRID")
+                else:
+                    GRID_BY_RELEASE[dst] = GRID_BY_RELEASE[src]
+                    inherited.append("GRID")
             if src in _VOL_INVARIANT_RELEASES:
                 _VOL_INVARIANT_RELEASES.add(dst)
                 inherited.append("VOL_INVARIANT")
@@ -2638,8 +2711,11 @@ def main() -> None:
             if src in _ULTRA_REDUCED_FEATURES_RELEASES:
                 _ULTRA_REDUCED_FEATURES_RELEASES.add(dst)
                 inherited.append("ULTRA_REDUCED")
-            print(f"🧬 [INHERIT-CONFIG] release '{dst}' heredando de '{src}': "
-                  f"{', '.join(inherited) if inherited else '(nada — src sin entradas)'}")
+            msg = f"🧬 [INHERIT-CONFIG] release '{dst}' heredando de '{src}': "
+            msg += ', '.join(inherited) if inherited else '(nada — src sin entradas)'
+            if skipped:
+                msg += f" | NO sobreescritos (dst ya tiene): {', '.join(skipped)}"
+            print(msg)
 
     set_global_seeds(int(args.seed))
 

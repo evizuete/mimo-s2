@@ -255,21 +255,21 @@ class OptunaOOFTrainer:
         model_config = ModelConfig(**vars(self.base_model_config))
 
         # Arquitectura
-        model_config.conv1d_filters = trial.suggest_categorical('conv1d_filters', self._choices('conv1d_filters'))
-        model_config.lstm_units = trial.suggest_categorical('lstm_units', self._choices('lstm_units'))
-        model_config.context_units = trial.suggest_categorical('context_units', self._choices('context_units'))
-        model_config.time_units = trial.suggest_categorical('time_units', self._choices('time_units'))
-        model_config.head_units = trial.suggest_categorical('head_units', self._choices('head_units'))
+        model_config.conv1d_filters = self._suggest(trial, 'conv1d_filters')
+        model_config.lstm_units = self._suggest(trial, 'lstm_units')
+        model_config.context_units = self._suggest(trial, 'context_units')
+        model_config.time_units = self._suggest(trial, 'time_units')
+        model_config.head_units = self._suggest(trial, 'head_units')
 
         # Regularización
-        model_config.dropout_seq = trial.suggest_categorical('dropout_seq', self._choices('dropout_seq'))
-        model_config.dropout_dense = trial.suggest_categorical('dropout_dense', self._choices('dropout_dense'))
-        model_config.dropout_lstm = trial.suggest_categorical('dropout_lstm', self._choices('dropout_lstm'))
-        model_config.l2_reg = trial.suggest_categorical('l2_reg', self._choices('l2_reg'))
+        model_config.dropout_seq = self._suggest(trial, 'dropout_seq')
+        model_config.dropout_dense = self._suggest(trial, 'dropout_dense')
+        model_config.dropout_lstm = self._suggest(trial, 'dropout_lstm')
+        model_config.l2_reg = self._suggest(trial, 'l2_reg')
 
         # Entrenamiento
-        model_config.learning_rate = trial.suggest_categorical('learning_rate', self._choices('learning_rate'))
-        model_config.batch_size = trial.suggest_categorical('batch_size', self._choices('batch_size'))
+        model_config.learning_rate = self._suggest(trial, 'learning_rate')
+        model_config.batch_size = self._suggest(trial, 'batch_size')
 
         # Focal loss
         # Multitask: si el grid trae focal_alpha_long y focal_alpha_short, los
@@ -279,31 +279,38 @@ class OptunaOOFTrainer:
         has_alpha_long = self.grid_space and 'focal_alpha_long' in self.grid_space
         has_alpha_short = self.grid_space and 'focal_alpha_short' in self.grid_space
         if has_alpha_long and has_alpha_short:
-            a_long = trial.suggest_categorical('focal_alpha_long', self._choices('focal_alpha_long'))
-            a_short = trial.suggest_categorical('focal_alpha_short', self._choices('focal_alpha_short'))
+            a_long = self._suggest(trial, 'focal_alpha_long')
+            a_short = self._suggest(trial, 'focal_alpha_short')
             model_config.focal_alpha = {'long': float(a_long), 'short': float(a_short)}
         else:
-            model_config.focal_alpha = trial.suggest_categorical('focal_alpha', self._choices('focal_alpha'))
-        model_config.focal_gamma = trial.suggest_categorical('focal_gamma', self._choices('focal_gamma'))
+            model_config.focal_alpha = self._suggest(trial, 'focal_alpha')
+        model_config.focal_gamma = self._suggest(trial, 'focal_gamma')
 
         # Loss weights por cabeza (multitask). Si el grid no los trae, se
         # quedan en el default de ModelConfig (1.0/1.0).
         if self.grid_space and 'loss_weight_long' in self.grid_space:
-            model_config.loss_weight_long = float(trial.suggest_categorical(
-                'loss_weight_long', self._choices('loss_weight_long')
-            ))
+            model_config.loss_weight_long = float(self._suggest(trial, 'loss_weight_long'))
         if self.grid_space and 'loss_weight_short' in self.grid_space:
-            model_config.loss_weight_short = float(trial.suggest_categorical(
-                'loss_weight_short', self._choices('loss_weight_short')
-            ))
+            model_config.loss_weight_short = float(self._suggest(trial, 'loss_weight_short'))
 
         # Flags
-        model_config.use_attention = trial.suggest_categorical('use_attention', self._choices('use_attention'))
-        model_config.use_gate = trial.suggest_categorical('use_gate', self._choices('use_gate'))
+        model_config.use_attention = self._suggest(trial, 'use_attention')
+        model_config.use_gate = self._suggest(trial, 'use_gate')
 
         # OOF epochs por fold (ligero para Optuna)
-        model_config.epochs = trial.suggest_categorical('epochs', self._choices('epochs'))
-        model_config.patience = trial.suggest_categorical('patience', self._choices('patience'))
+        model_config.epochs = self._suggest(trial, 'epochs')
+        model_config.patience = self._suggest(trial, 'patience')
+
+        # Params nuevos (202600+). Sólo se tunean si la release los declara
+        # explícitamente en su grid_space. Si no, se queda el default del
+        # ModelConfig (ranking_loss_weight=0.0, seq_len_short=64,
+        # use_hierarchical_fusion=False) → retrocompat con releases viejas.
+        if self.grid_space and 'ranking_loss_weight' in self.grid_space:
+            model_config.ranking_loss_weight = float(self._suggest(trial, 'ranking_loss_weight'))
+        if self.grid_space and 'seq_len_short' in self.grid_space:
+            model_config.seq_len_short = int(self._suggest(trial, 'seq_len_short'))
+        if self.grid_space and 'use_hierarchical_fusion' in self.grid_space:
+            model_config.use_hierarchical_fusion = bool(self._suggest(trial, 'use_hierarchical_fusion'))
 
         return model_config
 
@@ -577,6 +584,34 @@ class OptunaOOFTrainer:
             raise RuntimeError(f'No grid space for {name}')
 
         return self.grid_space[name]
+
+    def _suggest(self, trial: optuna.Trial, name: str):
+        """Detecta el formato de grid_space[name] y delega al método Optuna correcto.
+
+            - list  → trial.suggest_categorical (compatible con GridSampler)
+            - dict  → trial.suggest_float / suggest_int (TPE-only). Formato:
+                       {"low": ..., "high": ..., "log": bool, "step": float|int|None}
+                       Si low y high son ambos int y log==False, usa suggest_int.
+
+        Para releases que mezclan listas y dicts en el mismo grid_space:
+        usar siempre --use-tpe (--use-grid sólo soporta listas).
+        """
+        spec = self._choices(name)
+        if isinstance(spec, dict):
+            low = spec["low"]
+            high = spec["high"]
+            log = bool(spec.get("log", False))
+            step = spec.get("step", None)
+            is_int_range = (
+                isinstance(low, int) and isinstance(high, int)
+                and not log
+                and (step is None or isinstance(step, int))
+            )
+            if is_int_range:
+                return trial.suggest_int(name, int(low), int(high), step=int(step) if step else 1)
+            return trial.suggest_float(name, float(low), float(high), step=step, log=log)
+        # list / tuple → categorical (default histórico)
+        return trial.suggest_categorical(name, spec)
 
     # --------
     # 3) Optimize
