@@ -14,13 +14,14 @@ Cambios respecto a versión anterior:
 
 import ctypes
 import gc
-from typing import Dict, Any, Iterable, Tuple
+from typing import Dict, Any, Iterable, Tuple, Optional, Callable
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from pandas import DataFrame
 from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import average_precision_score
 from sklearn.model_selection import TimeSeriesSplit
 from scipy.special import expit, logit
 
@@ -120,6 +121,45 @@ class ProbsCalibration:
         return expit(logit(p_clipped) * temperature).astype(np.float32)
 
     @staticmethod
+    def _partial_oof_metric(
+        oof_raw: np.ndarray,
+        oof_y: np.ndarray,
+        *,
+        is_multitask: bool,
+    ) -> float:
+        """AUC-PR sobre las muestras OOF acumuladas (sin labels NaN/-1).
+
+        Para multitask, devuelve la media de AUC-PR por cabeza (long, short).
+        Si no hay suficientes muestras o sólo hay una clase representada,
+        devuelve NaN — el caller debe omitir el report en ese caso.
+        """
+        try:
+            if is_multitask:
+                # oof_raw shape (N, 2); oof_y shape (N, 2), -1 = no asignado
+                aps = []
+                for h in (0, 1):
+                    mask = (oof_y[:, h] >= 0) & np.isfinite(oof_raw[:, h])
+                    if int(mask.sum()) < 200:
+                        return float('nan')
+                    y_h = oof_y[mask, h].astype(np.int32)
+                    p_h = oof_raw[mask, h].astype(np.float32)
+                    if len(np.unique(y_h)) < 2:
+                        return float('nan')
+                    aps.append(average_precision_score(y_h, p_h))
+                return float(np.mean(aps))
+            else:
+                mask = (oof_y >= 0) & np.isfinite(oof_raw)
+                if int(mask.sum()) < 200:
+                    return float('nan')
+                y_b = oof_y[mask].astype(np.int32)
+                p_b = oof_raw[mask].astype(np.float32)
+                if len(np.unique(y_b)) < 2:
+                    return float('nan')
+                return float(average_precision_score(y_b, p_b))
+        except Exception:
+            return float('nan')
+
+    @staticmethod
     def _compute_sample_row_index(seq_len_long: int, n_rows: int) -> np.ndarray:
         context_offset = seq_len_long - 1
         n_samples = n_rows - seq_len_long + 1
@@ -135,6 +175,7 @@ class ProbsCalibration:
             n_splits: int = 5,
             epochs_per_fold: int = 25,
             verbose: int = 1,
+            fold_callback: Optional[Callable[[int, float, int], None]] = None,
     ) -> Tuple[DataFrame, IsotonicRegression, Dict[int, Any]]:
         """
         Genera predicciones OOF y calibración isotónica sin leakage.
@@ -142,6 +183,15 @@ class ProbsCalibration:
         Devuelve df con columnas:
           - oof_proba_raw : predicción sigmoide sin calibrar (OOF)
           - oof_proba_cal : probabilidad calibrada (isotónica) entrenada SOLO con OOF
+
+        Parámetros:
+          fold_callback: opcional. Se llama tras cada fold con
+            (fold_idx_0based, partial_metric, n_splits). partial_metric es
+            AUC-PR sobre las muestras OOF acumuladas hasta ese fold (mean
+            de las dos cabezas en multitask). En modo quantile no se invoca.
+            Si la callback lanza una excepción (p.ej. optuna TrialPruned),
+            se propaga y aborta el resto de folds. Sirve para integrar
+            pruners de Optuna (Hyperband, Median, etc.).
         """
         if "oof_proba_raw" in df_prepared.columns or "oof_proba_cal" in df_prepared.columns:
             df = df_prepared.reset_index(drop=True)
@@ -425,6 +475,18 @@ class ProbsCalibration:
                 oof_y[val_row_positions] = np.asarray(y_val).astype(np.int8)
             else:
                 oof_y[val_row_positions]   = y_val
+
+            # ── Reporting per-fold para pruners de Optuna ──
+            # Sólo aplica a modos binary / triple_class / multitask. En
+            # quantile no hay AUC-PR natural; se omite. Si la callback
+            # raisea (p.ej. TrialPruned), se propaga y aborta el bucle.
+            if fold_callback is not None and not is_quantile:
+                partial = self._partial_oof_metric(
+                    oof_raw, oof_y,
+                    is_multitask=is_multitask,
+                )
+                if np.isfinite(partial):
+                    fold_callback(fold, float(partial), n_splits)
 
             # Liberar memoria entre folds: el modelo + tensores del fold
             # anterior + buffers del scaler suman varios GB y disparaban

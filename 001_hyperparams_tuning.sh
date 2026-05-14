@@ -28,9 +28,12 @@ export TRAIN_TO=${TRAIN_TO:-2025-10-30}
 export HOLDOUT_FROM=${HOLDOUT_FROM:-2025-11-01}
 export HOLDOUT_TO=${HOLDOUT_TO:-2026-04-10}
 
-# Trials de Optuna — overridable. Default 1 = smoke test.
-# Para búsqueda real: 30-100.
-export OPTUNA_TRIALS=${OPTUNA_TRIALS:-1}
+# Trials de Optuna — overridable. Default 40 = búsqueda productiva con TPE
+# + HyperbandPruner. Hyperband corta trials malos tras fold 1-2, así que
+# el coste medio por trial es menor que el teórico (n_splits folds × epochs).
+# Para smoke test del pipeline: OPTUNA_TRIALS=1 bash 001_hyperparams_tuning.sh
+# Para búsqueda exhaustiva sobre 202600 (espacio ampliado): 80-120.
+export OPTUNA_TRIALS=${OPTUNA_TRIALS:-40}
 
 # Storage MySQL (debe coincidir con extract_best_per_side default)
 export OPTUNA_STORAGE=${OPTUNA_STORAGE:-mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db}
@@ -60,7 +63,8 @@ if [ "${OPTUNA_TRIALS}" -lt 10 ]; then
   echo ""
   echo "  ⚠️  TRIALS BAJO (${OPTUNA_TRIALS}). Esto NO es búsqueda real."
   echo "     - Para smoke test del pipeline: OK"
-  echo "     - Para Fase 1 productiva: usa OPTUNA_TRIALS=30 (~3h) o 100 (~10h)"
+  echo "     - Para Fase 1 productiva: usa OPTUNA_TRIALS=40 (~4h con Hyperband)"
+  echo "       o OPTUNA_TRIALS=100 (~10h) para espacio ampliado 202600."
 fi
 
 # ─── 1. Pre-checks ──────────────────────────────────────────────────
@@ -224,7 +228,8 @@ echo ""
 if [ "${OPTUNA_TRIALS}" -lt 30 ]; then
   echo "  ⚠️  RECORDATORIO: ${OPTUNA_TRIALS} trials no es una búsqueda real."
   echo "     Los 'best' hyperparams son arbitrarios. Para Fase 1 real:"
-  echo "        OPTUNA_TRIALS=50 bash 001_optuna_search.sh"
+  echo "        OPTUNA_TRIALS=40 bash 001_hyperparams_tuning.sh   # default"
+  echo "        OPTUNA_TRIALS=100 bash 001_hyperparams_tuning.sh  # espacio ampliado"
   echo ""
 fi
 

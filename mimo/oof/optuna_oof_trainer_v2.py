@@ -364,13 +364,27 @@ class OptunaOOFTrainer:
         # multitask: temperature_long como canónico; ambos lados usan trunk común.
         _cal_temp = self.temperature_short if side == 'short' else self.temperature_long
         probs_calibrator = ProbsCalibration(self.general_config, model_config, temperature=_cal_temp)
+
+        # Callback per-fold para el pruner. Reporta AUC-PR parcial OOF tras
+        # cada fold; si HyperbandPruner decide podar, raisea TrialPruned y
+        # generate_oof_predictions propaga la excepción abortando los folds
+        # restantes (sin liberar memoria del fold actual — el del bucle siguiente
+        # lo hace; aquí abortamos el trial completo).
+        def _on_fold(fold_idx: int, partial_metric: float, total_splits: int) -> None:
+            trial.report(partial_metric, step=fold_idx)
+            if trial.should_prune():
+                print(f'[PRUNE] trial #{trial.number} podado tras fold {fold_idx + 1}/{total_splits} '
+                      f'(partial AUC-PR={partial_metric:.4f})')
+                raise optuna.exceptions.TrialPruned()
+
         df_oof, calibrator, best_epochs = probs_calibrator.generate_oof_predictions(
             df_prepared=df_prepared,
             pipeline=pipeline,
             side=side,
             n_splits=n_splits,
             epochs_per_fold=epochs_per_fold,
-            verbose=1
+            verbose=1,
+            fold_callback=_on_fold,
         )
 
         # 4b) Persistir cache OOF por trial (para reusar en prepare_production_model)
@@ -653,9 +667,8 @@ class OptunaOOFTrainer:
         # folds). Trials malos se cortan temprano y los buenos llegan al budget
         # completo de n_splits folds. min_resource=1 → ya se decide tras fold 1.
         # max_resource=n_splits → un trial "completo" usa todos los folds OOF.
-        # NOTA: requiere que el objective llame trial.report(val, step=fold_i)
-        # y trial.should_prune() entre folds. Hoy generate_oof_predictions NO
-        # lo hace → Hyperband queda inerte hasta que se integre per-fold report.
+        # El reporting per-fold lo provee _on_fold() dentro de _objective:
+        # llama trial.report(AUC-PR_parcial, step=fold_i) y trial.should_prune().
         pruner = optuna.pruners.HyperbandPruner(
             min_resource=1,
             max_resource=n_splits,
