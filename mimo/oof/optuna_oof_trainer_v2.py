@@ -649,7 +649,18 @@ class OptunaOOFTrainer:
 
         print(f'Se ejecutarán un total de {n_trials} trials')
 
-        pruner = optuna.pruners.MedianPruner(n_warmup_steps=max(2, n_trials // 5))
+        # HyperbandPruner: organiza el budget en brackets crecientes (1, 3, 9...
+        # folds). Trials malos se cortan temprano y los buenos llegan al budget
+        # completo de n_splits folds. min_resource=1 → ya se decide tras fold 1.
+        # max_resource=n_splits → un trial "completo" usa todos los folds OOF.
+        # NOTA: requiere que el objective llame trial.report(val, step=fold_i)
+        # y trial.should_prune() entre folds. Hoy generate_oof_predictions NO
+        # lo hace → Hyperband queda inerte hasta que se integre per-fold report.
+        pruner = optuna.pruners.HyperbandPruner(
+            min_resource=1,
+            max_resource=n_splits,
+            reduction_factor=3,
+        )
 
         study_name = f"{self.study_prefix}_{self.general_config.release}_{side}"
         study = optuna.create_study(
