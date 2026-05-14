@@ -35,10 +35,10 @@ except ImportError:
 
 
 def diagnose_side(release, tag, seed, side, out_dir):
-    hp_path = Path(f"artifacts/{release}/oof/{tag}_{side}_specialist_seed{seed}/"
+    hp_path = Path(f"../artifacts/{release}/oof/{tag}_{side}_specialist_seed{seed}/"
                    f"data/holdout_predictions_{release}_{side}.parquet")
     if not hp_path.exists():
-        hp_path = Path(f"artifacts/{release}/oof/{tag}_{side}_specialist_seed{seed}_cutoff_mar31/"
+        hp_path = Path(f"../artifacts/{release}/oof/{tag}_{side}_specialist_seed{seed}_cutoff_mar31/"
                        f"data/holdout_predictions_{release}_{side}.parquet")
     if not hp_path.exists():
         print(f"❌ No encuentro holdout_predictions para {side}")

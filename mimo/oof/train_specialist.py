@@ -70,6 +70,8 @@ def _build_cmd(args, side_key: str) -> list[str]:
         "--notes",
         f"specialist_{side_key} from {Path(args.best_per_side_json).name} (seed={args.seed})",
     ]
+    if getattr(args, "inherit_config_from", None):
+        cmd.extend(["--inherit-config-from", args.inherit_config_from])
     return cmd
 
 
@@ -106,6 +108,9 @@ def main():
                          "no pisar el specialist default. Default: 42.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Imprime los comandos pero no los ejecuta.")
+    ap.add_argument("--inherit-config-from", default=None,
+                    help="Release alias para heredar configuración (BARRIERS, "
+                         "GRID, sets de features). Se forwarda a main_oof")
     args = ap.parse_args()
 
     # Validación

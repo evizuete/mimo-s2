@@ -137,7 +137,11 @@ def _per_side_df(
 
 
 def _load_tail_parquet(deploy_dir: Path, release: str, side: str) -> Optional[pd.DataFrame]:
-    """Carga deploy_calibration_tail_<release>_<side>.parquet del deploy si existe."""
+    """Carga deploy_calibration_tail_<release>_<side>.parquet del deploy si existe.
+
+    Preserva la columna 'signal' del tail original (label triple barrier del
+    entrenamiento). Solo la sintetiza desde 'outcome' si NO existe.
+    """
     p = deploy_dir / "data" / f"deploy_calibration_tail_{release}_{side}.parquet"
     if not p.exists():
         print(f"  ⚠️  No existe {p.name} (deploy creado sin resume_deploy_v6), tail TRAIN no incluida.")
@@ -149,17 +153,20 @@ def _load_tail_parquet(deploy_dir: Path, release: str, side: str) -> Optional[pd
         df["state"] = "unknown"
     if "oof_proba_raw" not in df.columns:
         df["oof_proba_raw"] = np.nan
-    if "outcome" in df.columns:
-        df["signal"] = (df["outcome"] == "TP").astype(int)
-    else:
+    # Preservar 'signal' si ya existe (label original del tail).
+    # Solo sintetizar desde 'outcome' si signal NO existe.
+    if "signal" not in df.columns:
+        if "outcome" in df.columns:
+            df["signal"] = (df["outcome"] == "TP").astype(int)
+        else:
+            df["signal"] = np.nan
+    if "outcome" not in df.columns:
         df["outcome"] = np.nan
-        df["signal"] = np.nan
     if "R_multiple" not in df.columns:
         df["R_multiple"] = np.nan
     keep = ["time", "side", "state", "oof_proba_raw", "oof_proba_cal",
             "outcome", "signal", "R_multiple"]
     return df[[c for c in keep if c in df.columns]].reset_index(drop=True)
-
 
 def main() -> None:
     ap = argparse.ArgumentParser(

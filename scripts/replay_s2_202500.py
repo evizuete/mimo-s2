@@ -517,6 +517,47 @@ def summarize(
             print(f"  best week             : {float(weekly_pct.max())*100:+.2f}%")
             print(f"  worst week            : {float(weekly_pct.min())*100:+.2f}%")
 
+    # Daily breakdown — útil para ver qué días contribuyeron más al PnL
+    if not trades.empty:
+        time_col = next(
+            (c for c in ("exit_time", "close_time", "entry_time", "ts_open", "time")
+             if c in trades.columns),
+            None,
+        )
+        if time_col:
+            td = trades.copy()
+            td[time_col] = pd.to_datetime(td[time_col])
+            td["date"] = td[time_col].dt.date
+            agg_specs: Dict[str, Any] = {
+                "n_trades": (time_col, "size"),
+                "pnl": ("pnl", "sum") if "pnl" in td.columns else (time_col, "size"),
+                "wins": ("pnl", lambda s: int((s > 0).sum())) if "pnl" in td.columns else (time_col, "size"),
+                "best_trade": ("pnl", "max") if "pnl" in td.columns else (time_col, "size"),
+                "worst_trade": ("pnl", "min") if "pnl" in td.columns else (time_col, "size"),
+                "avg_pnl": ("pnl", "mean") if "pnl" in td.columns else (time_col, "size"),
+            }
+            if "side" in td.columns:
+                agg_specs["n_long"] = ("side", lambda s: int((s == "long").sum()))
+                agg_specs["n_short"] = ("side", lambda s: int((s == "short").sum()))
+            if "r_multiple" in td.columns:
+                agg_specs["pnl_R"] = ("r_multiple", "sum")
+                agg_specs["avg_R"] = ("r_multiple", "mean")
+            daily = td.groupby("date").agg(**agg_specs).reset_index()
+            if "pnl" in daily.columns and "wins" in daily.columns:
+                daily["win_rate"] = (daily["wins"] / daily["n_trades"]).round(3)
+                daily["cumulative_pnl"] = daily["pnl"].cumsum()
+            daily_path = out_dir / "daily_breakdown.csv"
+            daily.to_csv(daily_path, index=False)
+            print(f"📁 daily breakdown → {daily_path}")
+            # Imprimir vista rápida en consola
+            print("\n  📅 BREAKDOWN POR DÍA (top 10 días por |PnL|):")
+            cols_show = [c for c in ("date", "n_trades", "n_long", "n_short",
+                                      "win_rate", "pnl", "best_trade", "worst_trade")
+                         if c in daily.columns]
+            top = daily.assign(_abs=daily["pnl"].abs() if "pnl" in daily.columns
+                                else 0).nlargest(10, "_abs").drop(columns=["_abs"])
+            print(top[cols_show].to_string(index=False))
+
     # Persistir
     if not trades.empty:
         trades_path = out_dir / "trades.parquet"

@@ -2683,7 +2683,7 @@ def main() -> None:
     if args.exp_tag_suffix:
         experiment_tag += args.exp_tag_suffix
 
-    base_dir = Path("../../artifacts") / args.release / "oof"
+    base_dir = Path("artifacts") / args.release / "oof"
     train_dir = base_dir / experiment_tag
     train_dir.mkdir(parents=True, exist_ok=True)
     (train_dir / "data").mkdir(parents=True, exist_ok=True)

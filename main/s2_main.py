@@ -7,7 +7,7 @@ import pandas as pd
 import zmq
 import logging
 
-from config.decision_policies_config import gate_by_action_and_state, score_cap_by_state, risk_mult_by_state
+from config.decision_policies_config_202500_2026_04_seed47 import gate_by_action_and_state, score_cap_by_state, risk_mult_by_state
 from s2_config import S2Config
 from s2_service_v2 import S2Service
 
@@ -190,16 +190,25 @@ def main(release: str, mode: str = 'production'):
         use_vol_invariant_features=True,   # release 202500
         use_reduced_features=True,          # release 202500
         feature_masks={
-            "long": {
-                "ema_bull": True,  "rsi_oversold": True,  "macd_positive": True,
-                "ema_bear": False, "rsi_overbought": False, "macd_negative": False,
-            },
-            "short": {
-                "ema_bear": True,  "rsi_overbought": True, "macd_negative": True,
-                "ema_bull": False, "rsi_oversold": False,  "macd_positive": False,
-            },
+            "long": {"ema_bull": True, "rsi_oversold": True, "macd_positive": True,
+                     "ema_bear": True, "rsi_overbought": True, "macd_negative": True},
+            "short": {"ema_bull": True, "rsi_oversold": True, "macd_positive": True,
+                      "ema_bear": True, "rsi_overbought": True, "macd_negative": True},
         },
     )
+
+    '''
+            feature_masks={
+                "long": {
+                    "ema_bull": True,  "rsi_oversold": True,  "macd_positive": True,
+                    "ema_bear": False, "rsi_overbought": False, "macd_negative": False,
+                },
+                "short": {
+                    "ema_bear": True,  "rsi_overbought": True, "macd_negative": True,
+                    "ema_bull": False, "rsi_oversold": False,  "macd_positive": False,
+                },
+            },
+            '''
 
     regime_config = RegimeConfig(
         adx_trend_threshold=25.0
@@ -224,7 +233,9 @@ def main(release: str, mode: str = 'production'):
     )
 
     base_dir = Path(__file__).resolve().parent
-    artifacts_path = str((base_dir / ".." / "artifacts" / release / "oof" / "deploy_full").resolve())
+    #artifacts_path = str((base_dir / ".." / "artifacts" / release / "oof" / "deploy_full").resolve())
+    artifacts_path = str((base_dir / ".." / "artifacts" / release / "oof" / "deploy_2026_04_combined_specialists_seed47").resolve())
+
     policy_path = str((base_dir / ".." / "artifacts" / release / "rl" / "final" / f"rl_policy_gate_{release}.npz").resolve())
     rl_config = {
         "lr": 0.002,  # FINETUNE_LR del freeze
@@ -232,7 +243,7 @@ def main(release: str, mode: str = 'production'):
         "baseline_beta": 0.88,  # igual que staged
         "chop_soft_thr": 0.3670136046832346,  # trial 121
         "exhaustion_soft_thr": 0.4805561001350015,  # trial 121
-        "rl_take_threshold": 0.036, #0.1444771151557441,  # trial 121
+        "rl_take_threshold": 0.036, #0.1444771151557441, # trial 121
         "chop_penalty_coef": 0.004458284077367999,  # trial 121
         "exhaustion_penalty_coef": 0.003,  # fijo staged
         "max_grad_norm": 5.0,
@@ -261,8 +272,8 @@ def main(release: str, mode: str = 'production'):
         max_daily_profit_pct=None,
         compound=True,
         enable_live_scaler_updates=True,
-        anomaly_block_threshold=1.2,  # FIX v10.1: subido de 0.8 → 1.2 (0.8 bloqueaba 3h en sesión europea XAUUSD)
-        signal_cooldown_bars=3
+        anomaly_block_threshold=1.5,
+        signal_cooldown_bars=1
     )
 
     db = build_db()

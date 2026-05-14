@@ -595,7 +595,7 @@ def main():
             print(f"🧬 [INHERIT-CONFIG] release '{dst}' heredando de '{src}': "
                   f"{', '.join(inherited) if inherited else '(nada)'}")
 
-    base_dir = Path("../../artifacts") / args.release / "oof"
+    base_dir = Path("artifacts") / args.release / "oof"
     deploy_dir = base_dir / args.deploy_subdir
     deploy_dir.mkdir(parents=True, exist_ok=True)
     (deploy_dir / "data").mkdir(parents=True, exist_ok=True)
