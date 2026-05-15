@@ -34,7 +34,10 @@ NO soporta SHORT — por diseño. SHORT se deshabilitó tras 2 holdouts colapsad
 from __future__ import annotations
 
 import json
+import logging
 import os
+from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -46,6 +49,35 @@ from mimo.data_managers.data_pipeline_v2 import DataPipeline
 from mimo.helpers.helper import Helper
 from mimo.features.feature_builder import FeatureConfig
 from mimo.models.model_builder import Config, ModelConfig
+
+
+# Features clave a loguear por inferencia. Selección basada en feature
+# importance + SHAP del best trial 202603 (top-25 por gain/SHAP) +
+# básicas OHLCV. Si una feature no está en el df, se loguea como None.
+_MARKET_FEATURES_TO_LOG: List[str] = [
+    # OHLCV básicas (siempre presentes)
+    "open", "high", "low", "close", "atr",
+    # SHAP top (volatilidad / range / volume)
+    "range_hl_rel", "atr_norm_bps_z", "realized_vol_20_bps_z",
+    "vol_trend_1h", "vol_spike", "vol_z_1h", "bb_width_bps_z",
+    # SHAP top (momentum / direccional)
+    "ema_9_dist_atr", "ema_21_dist_atr", "ema_50_dist_atr",
+    "ret_3_atr", "ret_10_atr", "ret_60_atr",
+    "macd_hist_atr_log", "macd_hist", "macd_hist_5m_atr",
+    "rsi", "rsi_norm", "rsi_5m_norm",
+    # SHAP top (regime indicators)
+    "adx_smooth_norm", "adx_1h_norm", "adx_5m_norm",
+    "dm_diff_1h_norm", "trend_dir",
+    "position_range_240", "dist_high_60",
+    "chop_score", "is_exhaustion",
+    # Time features (contexto, no decisión)
+    "minute_of_day_sin", "minute_of_day_cos",
+    "hour_sin", "hour_cos",
+    "dow_sin", "dow_cos",
+    "is_asia", "is_london", "is_ny", "is_overlap",
+    # VWAP / structure
+    "vwap_dist_atr", "vwap_band_pos", "bb_position",
+]
 
 
 class GBMTradingSimulator:
@@ -62,6 +94,9 @@ class GBMTradingSimulator:
         spread_price: float = 0.07,
         sizing_equity_mode: str = "balance",
         symbol: str = "XAUUSD.r",
+        # Inference logging (jsonl por bar / decisión)
+        log_dir: Optional[str] = None,
+        enable_inference_log: bool = True,
         # Reservado para compatibilidad futura — no se usa en GBM aún
         decision_policy=None,
         **_unused_kwargs,
@@ -97,6 +132,16 @@ class GBMTradingSimulator:
         self._last_diag: Optional[Dict[str, Any]] = None
 
         self.load_artifacts()
+
+        # Inference logger (después de load_artifacts para conocer release/trial)
+        self.enable_inference_log = bool(enable_inference_log)
+        if self.enable_inference_log:
+            _log_dir = Path(log_dir) if log_dir else (self.production_dir / "logs")
+            _log_dir.mkdir(parents=True, exist_ok=True)
+            self._inference_logger = self._setup_inference_logger(_log_dir)
+            print(f"[GBM-SIM] 📋 Inference log: {_log_dir}/gbm_inference_YYYYMMDD.jsonl")
+        else:
+            self._inference_logger = None
 
     # ─── Public API ─────────────────────────────────────────────────
 
@@ -155,17 +200,21 @@ class GBMTradingSimulator:
         max_qty: Optional[float] = None,
         **_unused,
     ) -> Optional[Dict[str, Any]]:
-        """Decide LONG order o None. Si None, popula self._last_diag."""
+        """Decide LONG order o None. Si None, popula self._last_diag.
+        Loguea cada decisión (signal o no) en gbm_inference_YYYYMMDD.jsonl."""
         self._last_diag = None
-
-        # 0. Position limit (chequeo barato primero)
         cur = int(current_positions or 0)
         mx  = int(max_positions or 2)
+
+        # 0. Position limit (chequeo barato primero) — antes de prepare_data
         if cur >= mx:
-            self._reject({
-                "no_signal_reason": "POSITION_LIMIT",
-                "current_positions": cur, "max_positions": mx,
-            })
+            diag = {"no_signal_reason": "POSITION_LIMIT",
+                    "current_positions": cur, "max_positions": mx}
+            self._reject(diag)
+            self._log_inference(bar_row=None, p_raw=None, p_cal=None,
+                                decision="NO_SIGNAL", reason="POSITION_LIMIT",
+                                order=None, equity=equity, cur=cur, mx=mx,
+                                extra=diag)
             return None
 
         # 1. prepare_data
@@ -175,19 +224,34 @@ class GBMTradingSimulator:
                 set_market_condition=False, ensure_regime=True,
             )
         except Exception as e:
-            self._reject({"no_signal_reason": "PREPARE_DATA_FAILED",
-                          "error": str(e)[:200]})
+            diag = {"no_signal_reason": "PREPARE_DATA_FAILED",
+                    "error": str(e)[:200]}
+            self._reject(diag)
+            self._log_inference(bar_row=None, p_raw=None, p_cal=None,
+                                decision="NO_SIGNAL", reason="PREPARE_DATA_FAILED",
+                                order=None, equity=equity, cur=cur, mx=mx,
+                                extra=diag)
             return None
 
         # 2. Última fila con features válidas
         miss = [c for c in self.feat_cols if c not in df_prep.columns]
         if miss:
-            self._reject({"no_signal_reason": "FEATURES_MISSING",
-                          "missing": miss[:5], "n_missing": len(miss)})
+            diag = {"no_signal_reason": "FEATURES_MISSING",
+                    "missing": miss[:5], "n_missing": len(miss)}
+            self._reject(diag)
+            self._log_inference(bar_row=None, p_raw=None, p_cal=None,
+                                decision="NO_SIGNAL", reason="FEATURES_MISSING",
+                                order=None, equity=equity, cur=cur, mx=mx,
+                                extra=diag)
             return None
         valid = df_prep[self.feat_cols].notna().all(axis=1)
         if not valid.any():
-            self._reject({"no_signal_reason": "NO_VALID_ROWS"})
+            diag = {"no_signal_reason": "NO_VALID_ROWS"}
+            self._reject(diag)
+            self._log_inference(bar_row=None, p_raw=None, p_cal=None,
+                                decision="NO_SIGNAL", reason="NO_VALID_ROWS",
+                                order=None, equity=equity, cur=cur, mx=mx,
+                                extra=diag)
             return None
         last_row = df_prep.loc[valid].iloc[-1]
 
@@ -217,19 +281,19 @@ class GBMTradingSimulator:
 
         # 5. Threshold check (raw vs threshold seleccionado en deploy)
         if p_raw < self.threshold:
-            self._reject({
-                "no_signal_reason": "BELOW_THRESHOLD",
-                **base_diag,
-            })
+            self._reject({"no_signal_reason": "BELOW_THRESHOLD", **base_diag})
+            self._log_inference(bar_row=last_row, p_raw=p_raw, p_cal=p_cal,
+                                decision="NO_SIGNAL", reason="BELOW_THRESHOLD",
+                                order=None, equity=equity, cur=cur, mx=mx)
             return None
 
         # 6. ATR check (necesario para sizing)
         atr = float(last_row.get("atr", 0) or 0)
         if atr <= 0:
-            self._reject({
-                "no_signal_reason": "ATR_INVALID",
-                **base_diag,
-            })
+            self._reject({"no_signal_reason": "ATR_INVALID", **base_diag})
+            self._log_inference(bar_row=last_row, p_raw=p_raw, p_cal=p_cal,
+                                decision="NO_SIGNAL", reason="ATR_INVALID",
+                                order=None, equity=equity, cur=cur, mx=mx)
             return None
 
         # 7. Risk sizing
@@ -252,18 +316,19 @@ class GBMTradingSimulator:
         if max_qty is not None:
             qty = min(qty, float(max_qty))
         if qty <= 0:
-            self._reject({
-                "no_signal_reason": "QTY_ZERO",
-                **base_diag,
-                "equity": float(equity), "atr": atr, "sl_dist": sl_dist,
-            })
+            self._reject({"no_signal_reason": "QTY_ZERO", **base_diag,
+                          "equity": float(equity), "atr": atr, "sl_dist": sl_dist})
+            self._log_inference(bar_row=last_row, p_raw=p_raw, p_cal=p_cal,
+                                decision="NO_SIGNAL", reason="QTY_ZERO",
+                                order=None, equity=equity, cur=cur, mx=mx,
+                                extra={"sl_dist": sl_dist, "risk_cash": risk_cash})
             return None
 
         # 8. Build order
         close_price = float(last_row.get("close", 0) or 0)
         entry_time  = pd.to_datetime(last_row.get("time")) if "time" in last_row.index else pd.Timestamp.utcnow()
 
-        return {
+        order = {
             "side":          "long",
             "symbol":        self.symbol,
             "entry":         close_price,
@@ -286,6 +351,16 @@ class GBMTradingSimulator:
             "sl_mult":       sl_mult,
         }
 
+        # Log signal emitted
+        self._log_inference(
+            bar_row=last_row, p_raw=p_raw, p_cal=p_cal,
+            decision="LONG", reason=None,
+            order=order, equity=equity, cur=cur, mx=mx,
+            extra={"sl_dist": sl_dist, "tp_dist": tp_dist,
+                   "risk_cash": risk_cash, "risk_pct": risk_pct},
+        )
+        return order
+
     # ─── Internal helpers ───────────────────────────────────────────
 
     def _reject(self, diag: Dict[str, Any]) -> None:
@@ -299,3 +374,148 @@ class GBMTradingSimulator:
         diag.setdefault("atr", None)
         diag.setdefault("model_backend", "gbm")
         self._last_diag = diag
+
+    # ─── Inference logging (JSONL) ──────────────────────────────────
+
+    def _setup_inference_logger(self, log_dir: Path) -> logging.Logger:
+        """Logger dedicado a inferencias GBM, rotación diaria, no propaga al root."""
+        logger_name = f"gbm_inference.{self.metadata.get('release', 'unknown')}.{id(self)}"
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.INFO)
+        if logger.handlers:
+            return logger  # idempotente
+        log_path = log_dir / f"gbm_inference_{pd.Timestamp.now().strftime('%Y%m%d')}.jsonl"
+        fh = TimedRotatingFileHandler(
+            filename=str(log_path), when="midnight", interval=1,
+            backupCount=60, encoding="utf-8", utc=False,
+        )
+        # Mantener nombre fijo del archivo activo + sufijo de fecha en rotación
+        def _namer(default_name: str) -> str: return default_name
+        _log_dir_ref = log_dir
+        def _rotator(source: str, dest: str) -> None:
+            import os, shutil
+            if os.path.exists(source):
+                shutil.move(source, dest)
+            new_date = pd.Timestamp.now().strftime("%Y%m%d")
+            fh.baseFilename = str(_log_dir_ref / f"gbm_inference_{new_date}.jsonl")
+        fh.namer = _namer
+        fh.rotator = _rotator
+        fh.suffix = "%Y%m%d"
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(fh)
+        logger.propagate = False
+        # Header opcional indicando que arranca
+        logger.info(json.dumps({
+            "event": "GBM_LOGGER_STARTED",
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "log_file": str(log_path),
+            "release": self.metadata.get("release"),
+            "trial": self.metadata.get("trial"),
+            "as_of": self.metadata.get("as_of"),
+            "threshold": self.threshold,
+            "n_features": len(self.feat_cols),
+            "use_calibrator": self.calibrator is not None,
+        }))
+        return logger
+
+    @staticmethod
+    def _safe_float(v) -> Optional[float]:
+        """Convierte a float o None si NaN/None/no-numeric."""
+        if v is None: return None
+        try:
+            f = float(v)
+            return f if np.isfinite(f) else None
+        except Exception:
+            return None
+
+    def _extract_market_features(self, bar_row: Optional[pd.Series]) -> Dict[str, Any]:
+        """Subset de features del bar_row con valores nulos seguros."""
+        if bar_row is None: return {}
+        out: Dict[str, Any] = {}
+        for k in _MARKET_FEATURES_TO_LOG:
+            if k in bar_row.index:
+                out[k] = self._safe_float(bar_row[k])
+            else:
+                out[k] = None
+        # Añadir time y state aparte (no son features pero son contexto)
+        out["state"] = str(bar_row.get("state", "")) if "state" in bar_row.index else ""
+        out["macro_regime"] = str(bar_row.get("macro_regime",
+                                              bar_row.get("regime", ""))) \
+            if "macro_regime" in bar_row.index or "regime" in bar_row.index else ""
+        return out
+
+    def _log_inference(
+        self,
+        *,
+        bar_row: Optional[pd.Series],
+        p_raw: Optional[float],
+        p_cal: Optional[float],
+        decision: str,                       # "LONG" o "NO_SIGNAL"
+        reason: Optional[str],               # razón si NO_SIGNAL
+        order: Optional[Dict[str, Any]],     # orden completa si LONG
+        equity: float,
+        cur: int,
+        mx: int,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Escribe una línea JSONL con todos los datos relevantes de la decisión."""
+        if not self.enable_inference_log or self._inference_logger is None:
+            return
+
+        # bar_time: del bar_row si está disponible, sino now()
+        bar_time = None
+        if bar_row is not None and "time" in bar_row.index:
+            try:
+                bar_time = pd.to_datetime(bar_row["time"]).isoformat()
+            except Exception:
+                bar_time = str(bar_row.get("time"))
+
+        entry: Dict[str, Any] = {
+            "ts":           datetime.utcnow().isoformat() + "Z",
+            "bar_time":     bar_time,
+            "decision":     decision,
+            "reason":       reason,
+            "release":      self.metadata.get("release"),
+            "trial":        self.metadata.get("trial"),
+            "as_of":        self.metadata.get("as_of"),
+            "model": {
+                "proba_long_raw":  self._safe_float(p_raw),
+                "proba_long_cal":  self._safe_float(p_cal),
+                "threshold":       self._safe_float(self.threshold),
+                "crosses_thr":     (p_raw >= self.threshold) if p_raw is not None else None,
+                "use_calibrator":  self.calibrator is not None,
+                "n_features":      len(self.feat_cols),
+            },
+            "market":   self._extract_market_features(bar_row),
+            "context": {
+                "equity":            self._safe_float(equity),
+                "current_positions": int(cur),
+                "max_positions":     int(mx),
+            },
+        }
+
+        if order is not None:
+            entry["order"] = {
+                "side":         order.get("side"),
+                "symbol":       order.get("symbol"),
+                "entry":        self._safe_float(order.get("entry")),
+                "sl":           self._safe_float(order.get("sl")),
+                "tp":           self._safe_float(order.get("tp")),
+                "qty":          self._safe_float(order.get("qty")),
+                "atr_at_entry": self._safe_float(order.get("atr_at_entry")),
+                "tp_mult":      self._safe_float(order.get("tp_mult")),
+                "sl_mult":      self._safe_float(order.get("sl_mult")),
+            }
+        else:
+            entry["order"] = None
+
+        if extra:
+            entry["extra"] = {k: self._safe_float(v) if isinstance(v, (int, float, np.floating))
+                                else v for k, v in extra.items()}
+
+        try:
+            self._inference_logger.info(json.dumps(entry, default=str))
+        except Exception as e:
+            # Nunca fallar la decisión por un error de logging
+            print(f"[GBM-SIM] ⚠️  Error escribiendo inference log: {e}")
