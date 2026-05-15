@@ -807,7 +807,12 @@ GRID_BY_RELEASE = {
         "lstm_units":        [32, 64, 96, 128],
         "context_units":     [16, 32, 48, 64],
         "head_units":        [32, 64, 96],
-        "time_units":        [8, 16, 32],
+        # time_units: el GBM sanity check sobre las MISMAS features mostró
+        # que minute_of_day_sin/cos y hour_sin/cos son las top features por
+        # gain acumulado (sin solapamiento, ~3 de los 4 features dominantes).
+        # El Dense(8) histórico era un cuello de botella catastrófico para
+        # las features más predictivas. Rango ampliado a [16, 32, 48, 64].
+        "time_units":        [16, 32, 48, 64],
         # L2: rango más conservador. Con el modelo colapsado a la prior,
         # más L2 no ayuda (al revés, fuerza más hacia 0).
         "l2_reg":              {"low": 1e-7, "high": 1e-4, "log": True},
