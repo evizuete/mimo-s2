@@ -569,18 +569,28 @@ def main() -> None:
                   f"prec_TP={prec:.3f}  mdd={mdd:.1f}R")
 
     # ─── 14. Optimistic (thr re-escaneado en holdout) ──────────────
-    print("\n🔍 Evaluación OPTIMISTIC (thr re-optimizado en holdout — solo info):")
+    # Con --no-calibrator, el rango raw va 0-1 y los óptimos suelen estar
+    # >0.5 (la cal compresaba ese rango). Ampliamos el scan acorde.
+    opt_thr_lo = 0.05
+    opt_thr_hi = 0.95 if args.no_calibrator else 0.60
+    opt_n_thr  = 180  if args.no_calibrator else 80
+    opt_min_sig = max(args.ev_min_signals // 2, 10) if args.no_calibrator else args.ev_min_signals
+    print(f"\n🔍 Evaluación OPTIMISTIC (thr re-optimizado en holdout — solo info):")
+    print(f"   scan: thr_lo={opt_thr_lo} thr_hi={opt_thr_hi} n_thr={opt_n_thr} "
+          f"min_sig={opt_min_sig}  {'(raw mode)' if args.no_calibrator else '(cal mode)'}")
     long_opt = _eval_best_thr(
         df_oof_hold, proba_col="oof_proba_long_cal", side_is_long=True,
         horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
         cost_per_signal=args.cost_per_signal,
-        max_drawdown_R=args.max_drawdown_R, min_signals=args.ev_min_signals,
+        max_drawdown_R=args.max_drawdown_R, min_signals=opt_min_sig,
+        thr_lo=opt_thr_lo, thr_hi=opt_thr_hi, n_thr=opt_n_thr,
     )
     short_opt = _eval_best_thr(
         df_oof_hold, proba_col="oof_proba_short_cal", side_is_long=False,
         horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
         cost_per_signal=args.cost_per_signal,
-        max_drawdown_R=args.max_drawdown_R, min_signals=args.ev_min_signals,
+        max_drawdown_R=args.max_drawdown_R, min_signals=opt_min_sig,
+        thr_lo=opt_thr_lo, thr_hi=opt_thr_hi, n_thr=opt_n_thr,
     )
     print(f"  LONG  | best thr_hold={long_opt.get('thr', float('nan')):.4f}  "
           f"ev_net={long_opt.get('ev_net', float('nan')):+.4f}R  "
