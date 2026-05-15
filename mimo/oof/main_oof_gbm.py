@@ -145,6 +145,76 @@ GRID_GBM_BY_RELEASE: Dict[str, Dict[str, Any]] = {
         "n_estimators":       [200, 500, 1000, 1500],
         "early_stopping_rounds": [30, 50, 80],
     },
+
+    # 202603_GBM: track regularización fuerte tras diagnóstico del holdout 202602.
+    # Hereda barriers de 202601 (igual que 202602_GBM, tp=2.0/sl=0.8).
+    # Lanzar con --inherit-config-from 202601.
+    #
+    # ROOT-CAUSE ANALYSIS del 202602_GBM (10 trials → holdout colapso):
+    #
+    #   OOF best LONG  (#6): num_leaves=15 ← MIN del grid
+    #                        max_depth=6   ← MIN del grid
+    #                        n_estimators=200 ← MIN del grid
+    #                        Pegado a 3 mínimos = grid demasiado amplio hacia
+    #                        capacidad alta. El óptimo real probablemente
+    #                        está MÁS ALLÁ del extremo regularizado.
+    #
+    #   OOF best SHORT (#2): num_leaves=31, max_depth=12 ← MAX
+    #                        min_data_in_leaf=800 ← MAX
+    #                        lambda_l2=0.26 (alto)
+    #                        Asimetría LONG vs SHORT confirmada: el grid
+    #                        permite la geometría que cada lado prefiere.
+    #
+    #   Holdout: LONG  +0.28R OOF → 0 signals (thr_OOF muy alto)
+    #            SHORT +0.32R OOF → -0.13R holdout (prec -34%)
+    #            → overfit y/o regime shift. Más regularización.
+    #
+    # CAMBIOS vs 202602_GBM (todos van en la dirección "más regularización"):
+    #
+    #   1) num_leaves: añadimos 7 (más pequeño). Si LONG quiere 15 ya como
+    #      mínimo, probablemente quiere 7. Quitamos 63 (sobra capacidad).
+    #
+    #   2) max_depth: añadimos 4. Mantenemos 12 porque SHORT lo aprovecha.
+    #
+    #   3) min_data_in_leaf: techo 800 → 2500. Más ejemplos por hoja = más
+    #      generalización. Quitamos 50 y 100 (poca regularización).
+    #
+    #   4) feature_fraction: rango 0.4-0.9 (antes 0.6-1.0). Más subsampling
+    #      de columnas = menos overfit a features espurias.
+    #
+    #   5) bagging_fraction: rango 0.5-0.9 (antes 0.6-1.0). Más subsampling
+    #      de filas. bagging_freq se mantiene en {0, 5, 10}.
+    #
+    #   6) lambda_l1, lambda_l2: techos 1.0 → 5.0. La asimetría 202602
+    #      mostró que SHORT usa lambda_l2 alto; le damos margen.
+    #
+    #   7) learning_rate: rango 0.005-0.05 (antes 0.01-0.10). LR más bajo
+    #      requiere más rounds pero produce ensembles más suaves.
+    #
+    #   8) n_estimators: rango 300-2000 (antes 200-1500). Compensa LR bajo.
+    #
+    #   9) early_stopping_rounds: rango {50, 100, 150} (antes {30, 50, 80}).
+    #      Más paciencia para que LR bajo converja.
+    #
+    # COSTE ESTIMADO: 80 trials × ~10min = ~13h CPU. Mismo orden que 202602.
+    "202603_GBM": {
+        # Capacidad — empuja hacia árboles MÁS PEQUEÑOS
+        "num_leaves":         [7, 15, 31],
+        "max_depth":          [4, 6, 8, 12],
+        # Regularización por hoja — techo MUCHO más alto
+        "min_data_in_leaf":   [200, 400, 800, 1500, 2500],
+        # Subsampling — rangos más bajos para más diversidad
+        "feature_fraction":   {"low": 0.4, "high": 0.9, "step": 0.1},
+        "bagging_fraction":   {"low": 0.5, "high": 0.9, "step": 0.1},
+        "bagging_freq":       [0, 5, 10],
+        # L1/L2 — techos más altos (SHORT 202602 usó l2=0.26)
+        "lambda_l1":          {"low": 1e-4, "high": 5.0, "log": True},
+        "lambda_l2":          {"low": 1e-4, "high": 5.0, "log": True},
+        # Boosting — LR más bajo, más rounds, más paciencia
+        "learning_rate":      {"low": 0.005, "high": 0.05, "log": True},
+        "n_estimators":       [300, 600, 1200, 2000],
+        "early_stopping_rounds": [50, 100, 150],
+    },
 }
 
 
