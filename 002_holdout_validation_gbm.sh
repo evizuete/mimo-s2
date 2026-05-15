@@ -104,17 +104,26 @@ log_section "3. Reporte"
 
 python3 <<EOF
 import json
+import math
+
 r = json.load(open("${OUT_JSON}"))
+
+def fnum(v, default=float("nan")):
+    """null/None → NaN para formateo seguro."""
+    return default if v is None else float(v)
+
+def fint(v, default=0):
+    return default if v is None else int(v)
 
 print("📋 RESUMEN HOLDOUT REPORT")
 print(f"   Release:        {r['release']}")
-print(f"   Holdout period: {r['holdout_period'][0]} → {r['holdout_period'][1]} (~{r['holdout_honest']['months']:.1f} meses)")
+print(f"   Holdout period: {r['holdout_period'][0]} → {r['holdout_period'][1]} (~{fnum(r['holdout_honest']['months']):.1f} meses)")
 print()
 
 print("─── OOF (training-time, calibrated) ──────────────────────────────")
 for side in ("long", "short"):
     o = r["oof"][side]
-    print(f"  {side.upper():5s}: ev_net={o['ev_net']:+.4f}R sig={int(o['n_signals'])} prec_TP={o['prec_TP']:.3f}")
+    print(f"  {side.upper():5s}: ev_net={fnum(o['ev_net']):+.4f}R sig={fint(o['n_signals'])} prec_TP={fnum(o['prec_TP']):.3f}")
 
 print()
 print("─── HOLDOUT HONEST (thr OOF aplicado) ────────────────────────────")
@@ -122,21 +131,29 @@ hh = r["holdout_honest"]
 for side in ("long", "short"):
     h = hh[side]
     o = r["oof"][side]
-    ev_h = h.get("ev_net", float("nan"))
-    erosion = (ev_h - o["ev_net"]) / abs(o["ev_net"]) * 100 if o["ev_net"] else float("nan")
-    print(f"  {side.upper():5s}: ev_net={ev_h:+.4f}R  sig={int(h.get('n_signals',0))}  prec_TP={h.get('prec_TP', float('nan')):.3f}  mdd={h.get('mdd_R', float('nan')):.1f}R  erosión={erosion:+.0f}%")
+    ev_h = fnum(h.get("ev_net"))
+    ev_o = fnum(o.get("ev_net"))
+    if math.isnan(ev_h) or math.isnan(ev_o) or ev_o == 0:
+        eros_str = "n/a"
+    else:
+        eros_str = f"{(ev_h - ev_o) / abs(ev_o) * 100:+.0f}%"
+    n_sig = fint(h.get("n_signals"))
+    if n_sig == 0:
+        print(f"  {side.upper():5s}: SIN SEÑALES (thr {fnum(hh.get('thr_'+side)):.4f} no se cruza en holdout)")
+    else:
+        print(f"  {side.upper():5s}: ev_net={ev_h:+.4f}R  sig={n_sig}  prec_TP={fnum(h.get('prec_TP')):.3f}  mdd={fnum(h.get('mdd_R')):.1f}R  erosión={eros_str}")
 
 print()
-total_honest = hh["total_R"]
-months = hh["months"]
-print(f"  💰 TOTAL R holdout (honest): {total_honest:+.2f}R  ({total_honest/months:+.2f}R/mes)")
+total_honest = fnum(hh.get("total_R"), 0.0)
+months = fnum(hh.get("months"), 1.0)
+print(f"  💰 TOTAL R holdout (honest): {total_honest:+.2f}R  ({total_honest/max(months, 0.01):+.2f}R/mes)")
 
 print()
 print("─── HOLDOUT OPTIMISTIC (thr re-escaneado, solo info) ──────────────")
 ho = r["holdout_optimistic"]
 for side in ("long", "short"):
     h = ho[side]
-    print(f"  {side.upper():5s}: thr={h.get('thr', float('nan')):.4f}  ev_net={h.get('ev_net', float('nan')):+.4f}R  sig={int(h.get('n_signals',0))}  prec_TP={h.get('prec_TP', float('nan')):.3f}")
+    print(f"  {side.upper():5s}: thr={fnum(h.get('thr')):.4f}  ev_net={fnum(h.get('ev_net')):+.4f}R  sig={fint(h.get('n_signals'))}  prec_TP={fnum(h.get('prec_TP')):.3f}")
 EOF
 
 log_section "FASE 2 GBM COMPLETADA"

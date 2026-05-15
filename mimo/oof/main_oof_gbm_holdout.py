@@ -392,6 +392,18 @@ def main() -> None:
     p_long_cal  = cal_long.predict(p_long_raw.astype(np.float64)).astype(np.float32)
     p_short_cal = cal_short.predict(p_short_raw.astype(np.float64)).astype(np.float32)
 
+    # Diagnóstico de distribución (clave para entender calibration shift):
+    # comparar dónde caen las probs calibradas vs el thr del OOF.
+    print("\n📊 Distribución de probs calibradas en holdout:")
+    for side, p_cal, thr_oof in (("LONG ", p_long_cal, thr_long),
+                                 ("SHORT", p_short_cal, thr_short)):
+        qs = np.quantile(p_cal, [0.50, 0.75, 0.90, 0.95, 0.99, 1.0])
+        n_above = int((p_cal >= thr_oof).sum())
+        print(f"  {side} | thr_OOF={thr_oof:.4f} | "
+              f"p50={qs[0]:.4f} p75={qs[1]:.4f} p90={qs[2]:.4f} "
+              f"p95={qs[3]:.4f} p99={qs[4]:.4f} max={qs[5]:.4f}  "
+              f"| n_above_thr={n_above}")
+
     # ─── 12. Build df_oof-style para evaluación ─────────────────────
     df_oof_hold = pd.DataFrame({
         "time":  df_hold["time"].values,
@@ -465,10 +477,13 @@ def main() -> None:
           f"prec_TP={short_opt.get('prec_TP', float('nan')):.3f}")
 
     # ─── 15. Veredicto + R total ───────────────────────────────────
-    total_R_honest = (
-        float(long_honest.get("ev_net", 0.0)) * int(long_honest.get("n_signals", 0))
-        + float(short_honest.get("ev_net", 0.0)) * int(short_honest.get("n_signals", 0))
-    )
+    def _r_contribution(res):
+        n_sig = int(res.get("n_signals", 0) or 0)
+        ev = float(res.get("ev_net", 0.0) or 0.0)
+        if n_sig == 0 or not np.isfinite(ev):
+            return 0.0
+        return ev * n_sig
+    total_R_honest = _r_contribution(long_honest) + _r_contribution(short_honest)
     months = (args.holdout_to - args.holdout_from).days / 30.44
     print("\n" + "═" * 70)
     print(f"  POTENCIAL HOLDOUT (thr OOF aplicado): {total_R_honest:+.2f}R en {months:.1f} meses")
@@ -510,14 +525,14 @@ def main() -> None:
 
 
 def _json_safe(d):
+    """NaN/inf → None (JSON null) para que el reporte cargado de vuelta
+    siga siendo numérico (None es identificable; "nan" string rompe arithm)."""
     if not isinstance(d, dict): return d
     out = {}
     for k, v in d.items():
         if isinstance(v, (np.floating, float)):
             fv = float(v)
-            out[k] = ("nan" if np.isnan(fv) else
-                      ("inf" if np.isinf(fv) and fv > 0 else
-                       ("-inf" if np.isinf(fv) else fv)))
+            out[k] = None if (np.isnan(fv) or np.isinf(fv)) else fv
         elif isinstance(v, (np.integer, int)): out[k] = int(v)
         elif isinstance(v, np.ndarray): out[k] = v.tolist()
         else: out[k] = v
