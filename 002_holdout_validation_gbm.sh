@@ -30,10 +30,16 @@ export HOLDOUT_FROM=${HOLDOUT_FROM:-2025-11-01}
 export HOLDOUT_TO=${HOLDOUT_TO:-2026-04-10}
 export OPTUNA_STORAGE=${OPTUNA_STORAGE:-mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db}
 
+# NO_CALIBRATOR=1 bypassa el isotónico. Modo ABSOLUTE queda N/A; los
+# modos TRAIN_QUANT / HOLD_QUANT / OPTIMISTIC operan sobre raw probs.
+# Útil para diagnosticar si la saturación del calibrador es el bug
+# que produce 0 signals al thr quantile-matched (visto en 202602/3).
+export NO_CALIBRATOR=${NO_CALIBRATOR:-0}
+
 ARTIFACT_DIR=artifacts/${RELEASE}/oof/${TAG}
 REPORTS_DIR=${ARTIFACT_DIR}/reports
 BEST_JSON=${REPORTS_DIR}/best_per_side.json
-OUT_JSON=${REPORTS_DIR}/holdout_report.json
+# OUT_JSON se define más abajo con sufijo "_raw" si NO_CALIBRATOR=1
 
 log_section() {
   echo ""
@@ -81,6 +87,15 @@ print(f'✅ Study {names[names.index(\"${EXPECTED_STUDY}\")]}: existe')
 # ─── 2. Lanzar holdout validation ──────────────────────────────────
 log_section "2. Refit + Holdout prediction"
 
+NO_CAL_FLAG=""
+[ "${NO_CALIBRATOR}" = "1" ] && NO_CAL_FLAG="--no-calibrator"
+[ -n "${NO_CAL_FLAG}" ] && echo "🚫 modo --no-calibrator activo (raw probs)"
+
+# Si NO_CALIBRATOR=1, output sufijo "_raw" para no pisar el reporte calibrated
+SUFFIX=""
+[ "${NO_CALIBRATOR}" = "1" ] && SUFFIX="_raw"
+OUT_JSON=${REPORTS_DIR}/holdout_report${SUFFIX}.json
+
 python3 -m mimo.oof.main_oof_gbm_holdout \
   --release ${RELEASE} \
   --inherit-config-from ${INHERIT_FROM_RELEASE} \
@@ -90,6 +105,7 @@ python3 -m mimo.oof.main_oof_gbm_holdout \
   --label-horizon-long 3 --label-horizon-short 3 \
   --train-from ${TRAIN_FROM} --train-to ${TRAIN_TO} \
   --holdout-from ${HOLDOUT_FROM} --holdout-to ${HOLDOUT_TO} \
+  ${NO_CAL_FLAG} \
   --cost-per-signal 0.05 \
   --ev-min-signals 30 \
   --max-drawdown-R 30 \

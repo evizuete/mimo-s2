@@ -217,6 +217,12 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="Mín signals en holdout para que EV sea reportable "
                          "(más bajo que en train porque holdout es ~6 meses).")
     ap.add_argument("--max-drawdown-R", type=float, default=30.0)
+    ap.add_argument("--no-calibrator", action="store_true", default=False,
+                    help="Bypass del calibrador isotónico. Usa raw probs. "
+                         "Evita el problema de plateau saturation del isotónico "
+                         "(visto en 202602/3 holdouts). Modo ABSOLUTE queda N/A "
+                         "(thr_OOF era cal-space); TRAIN_QUANT y HOLD_QUANT siguen "
+                         "siendo válidos sobre raw scores.")
 
     ap.add_argument("--optuna-storage", default=os.environ.get(
         "OPTUNA_STORAGE",
@@ -273,14 +279,26 @@ def main() -> None:
 
     cal_long_path = trial_long_obj.user_attrs.get("cal_long_path")
     cal_short_path = trial_short_obj.user_attrs.get("cal_short_path")
-    if not cal_long_path or not os.path.exists(cal_long_path):
-        raise SystemExit(f"❌ calibrator LONG no encontrado: {cal_long_path}")
-    if not cal_short_path or not os.path.exists(cal_short_path):
-        raise SystemExit(f"❌ calibrator SHORT no encontrado: {cal_short_path}")
-    cal_long = joblib.load(cal_long_path)
-    cal_short = joblib.load(cal_short_path)
-    print(f"   cal_long  : {cal_long_path}")
-    print(f"   cal_short : {cal_short_path}")
+
+    class _IdentityCalibrator:
+        """Stub que pasa raw probs sin transformación, para --no-calibrator."""
+        def predict(self, x): return np.asarray(x, dtype=np.float64)
+
+    if args.no_calibrator:
+        cal_long  = _IdentityCalibrator()
+        cal_short = _IdentityCalibrator()
+        print("⚠️  --no-calibrator: bypass del isotónico. Modo ABSOLUTE = N/A "
+              "(thr_OOF era cal-space). TRAIN_QUANT y HOLD_QUANT siguen "
+              "siendo válidos sobre raw scores.")
+    else:
+        if not cal_long_path or not os.path.exists(cal_long_path):
+            raise SystemExit(f"❌ calibrator LONG no encontrado: {cal_long_path}")
+        if not cal_short_path or not os.path.exists(cal_short_path):
+            raise SystemExit(f"❌ calibrator SHORT no encontrado: {cal_short_path}")
+        cal_long = joblib.load(cal_long_path)
+        cal_short = joblib.load(cal_short_path)
+        print(f"   cal_long  : {cal_long_path}")
+        print(f"   cal_short : {cal_short_path}")
 
     # Separar params del trial
     lgbm_long, meta_long = _split_trial_params(trial_long_obj.params, seed=int(args.seed))
