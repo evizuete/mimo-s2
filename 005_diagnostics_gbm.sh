@@ -42,7 +42,7 @@ abort() { echo "❌ $1"; exit 1; }
 log_section "DIAGNÓSTICOS GBM — ${RELEASE} / ${TAG}"
 echo "  Calibración:        $([ "${DIAG_CAL}"     = "1" ] && echo "✓" || echo "skip")"
 echo "  Feature importance: $([ "${DIAG_FI}"      = "1" ] && echo "✓" || echo "skip")"
-echo "  Per-state:          $([ "${DIAG_PERSTATE}"= "1" ] && echo "✓" || echo "skip")"
+echo "  Per-state:          $([ "${DIAG_PERSTATE}" = "1" ] && echo "✓" || echo "skip")"
 
 [ -f "${BEST_JSON}" ] || abort "${BEST_JSON} no existe"
 
