@@ -68,6 +68,11 @@ from mimo.oof.main_oof_regime_weights_v7 import (
     set_global_seeds,
 )
 
+# Importar main_oof_gbm dispara el side-effect de inyectar
+# _GBM_BARRIERS_BY_RELEASE en BARRIERS_BY_RELEASE. Sin esto, releases
+# 202604/5/6 caen al fallback de --inherit-config-from (barriers viejas).
+from mimo.oof.main_oof_gbm import _GBM_EXCLUDE_PATTERNS  # noqa: F401
+
 
 # Hiperparámetros LGBM que vienen del trial (suggest_*); el resto son fijos.
 _TUNED_LGBM_KEYS = {
@@ -358,6 +363,10 @@ def main() -> None:
 
     # ─── 8. Feature matrix + split ──────────────────────────────────
     feat_cols = [c for c in _collect_tabular_columns(pipeline) if c in df_prepared.columns]
+    _exclude = _GBM_EXCLUDE_PATTERNS.get(release)
+    if _exclude:
+        feat_cols = [c for c in feat_cols if not any(p in c for p in _exclude)]
+        print(f"🚫 [EXCLUDE] release={release} → {len(feat_cols)} features")
     needed = feat_cols + ["time", "high", "low", "close", "atr", "signal_long", "signal_short"]
     keep = df_prepared[needed].notna().all(axis=1)
     df_clean = df_prepared.loc[keep].reset_index(drop=True)

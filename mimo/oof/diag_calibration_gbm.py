@@ -58,6 +58,9 @@ from mimo.oof.main_oof_regime_weights_v7 import (
     install_regime_weight_patch, resolve_regime_weights, set_global_seeds,
 )
 
+# Side-effect: inyectar _GBM_BARRIERS_BY_RELEASE.
+from mimo.oof.main_oof_gbm import _GBM_EXCLUDE_PATTERNS  # noqa: F401
+
 
 def _parse_date(s: str) -> datetime:
     return datetime.strptime(s, "%Y-%m-%d")
@@ -236,6 +239,10 @@ def main() -> None:
     df_prepared = pipeline.prepare_data(df_rates, labels=True, side="both",
                                         set_market_condition=False, ensure_regime=True)
     feat_cols = [c for c in _collect_tabular_columns(pipeline) if c in df_prepared.columns]
+    _exclude = _GBM_EXCLUDE_PATTERNS.get(release)
+    if _exclude:
+        feat_cols = [c for c in feat_cols if not any(p in c for p in _exclude)]
+        print(f"🚫 [EXCLUDE] release={release} → {len(feat_cols)} features")
     needed = feat_cols + ["time", "high", "low", "close", "atr", "signal_long", "signal_short"]
     df_clean = df_prepared.loc[df_prepared[needed].notna().all(axis=1)].reset_index(drop=True)
 
