@@ -215,7 +215,88 @@ GRID_GBM_BY_RELEASE: Dict[str, Dict[str, Any]] = {
         "n_estimators":       [300, 600, 1200, 2000],
         "early_stopping_rounds": [50, 100, 150],
     },
+
+    # 202604_GBM: barriers CONSERVADORAS (TP=2.5/SL=1.5, ratio 1.67) tras
+    # 2 holdouts colapsados con barriers agresivas (TP=2.0/SL=0.8, ratio 2.5).
+    #
+    # ROOT-CAUSE del colapso holdout 202602 y 202603:
+    #   · SHORT SL rate dobló en holdout (33% → 64-67%) → mecha intrabar
+    #     dispara SL antes de que el movimiento real ocurra
+    #   · LONG SL rate también subió (27% → 51%)
+    #   · El TP/SL=2.5 requiere precision >=28.6% para BE. Holdout dió 18-22%.
+    #
+    # FIX: SL más ancho (0.8 → 1.5 ATR) absorbe mecha intrabar pero requiere
+    # más precision (37.5% BE en ratio 1.67). La intuición: si el modelo
+    # tiene señal genuina, una mecha de ruido NO debería desactivarla.
+    # Y si NO tiene señal, ningún ratio salva. Validamos esa hipótesis aquí.
+    #
+    # GRID afinado por TPE en los 58 trials del "202603 con grid default":
+    #   · num_leaves: TPE picked 15 en TODOS los top → narrow [11, 15, 21]
+    #   · n_estimators: TPE picked 200 en TODOS → narrow [150, 200, 300]
+    #   · max_depth: split entre 6 (SHORT) y 12 (LONG) → mantener ambos
+    #   · learning_rate: sweet spot 0.05-0.08 → rango [0.02, 0.10]
+    #   · min_data_in_leaf: extremos 50 y 400 → ampliar abajo [25-400]
+    #   · bagging_fraction=0.8 en todos → narrow [0.7, 0.9]
+    #   · feature_fraction: 0.7-0.8 → [0.6, 0.9]
+    #   · lambda_l2: 1e-7 a 1e-6 (muy BAJO) → confirmar rango bajo
+    #   · lambda_l1: 0.001-0.4 → rango amplio (TPE no concentró)
+    #   · early_stopping=30 en todos → [20, 30, 50]
+    #
+    # COSTE ESTIMADO: 80 trials × ~10min = ~13h CPU.
+    "202604_GBM": {
+        # Capacidad — narrow alrededor de num_leaves=15 que TPE eligió
+        "num_leaves":         [11, 15, 21],
+        "max_depth":          [4, 6, 8, 12],
+        # Regularización — incluye opción agresiva 25 (menos que 50)
+        "min_data_in_leaf":   [25, 50, 100, 200, 400],
+        # Subsampling — narrow alrededor del sweet spot 0.8
+        "feature_fraction":   {"low": 0.6, "high": 0.9, "step": 0.1},
+        "bagging_fraction":   {"low": 0.7, "high": 0.9, "step": 0.1},
+        "bagging_freq":       [5, 10],
+        # L1: rango amplio (TPE no concentró)
+        "lambda_l1":          {"low": 1e-4, "high": 1.0, "log": True},
+        # L2: rango BAJO (TPE confirmó que prefiere lambda_l2 < 1e-5)
+        "lambda_l2":          {"low": 1e-8, "high": 1e-4, "log": True},
+        # Boosting — sweet spot que TPE encontró
+        "learning_rate":      {"low": 0.02, "high": 0.10, "log": True},
+        "n_estimators":       [150, 200, 300],
+        "early_stopping_rounds": [20, 30, 50],
+    },
 }
+
+
+# ─── Barriers GBM-specific (no en main_oof_regime_weights_v7) ─────────
+# Se inyectan en BARRIERS_BY_RELEASE al cargar el módulo. Permite tener
+# releases GBM con barriers propias sin tocar el dict del CNN.
+
+_GBM_BARRIERS_BY_RELEASE: Dict[str, Dict[str, Any]] = {
+    # 202604_GBM: ratio 1.67 (vs 2.5 de 202601). SL más ancho 1.5 ATR
+    # (vs 0.8) absorbe mecha intrabar. Régimen barriers ligeramente más
+    # restringidas que _DEFAULT_BARRIERS (que tenía TP=3.5 en trending);
+    # 2.5-3.0 es realista para 5min h=3.
+    "202604_GBM": {
+        "tp_base": 2.5,
+        "sl_base": 1.5,
+        "regime_barriers_long": {
+            "trending": {"tp": 2.75, "sl": 1.50},
+            "ranging":  {"tp": 2.25, "sl": 1.50},
+            "low_vol":  {"tp": 2.00, "sl": 1.25},
+            "high_vol": {"tp": 3.00, "sl": 1.75},
+        },
+        "regime_barriers_short": {
+            "trending": {"tp": 2.75, "sl": 1.50},
+            "ranging":  {"tp": 2.25, "sl": 1.50},
+            "low_vol":  {"tp": 2.00, "sl": 1.25},
+            "high_vol": {"tp": 3.00, "sl": 1.75},
+        },
+    },
+}
+
+# Inyección no-destructiva en el dict global. Si ya existe la entrada
+# (p.ej. añadida directamente al v7 en el futuro), se respeta esa.
+for _k, _v in _GBM_BARRIERS_BY_RELEASE.items():
+    if _k not in BARRIERS_BY_RELEASE:
+        BARRIERS_BY_RELEASE[_k] = _v
 
 
 def _get_gbm_grid_for_release(release: str) -> Dict[str, Any]:

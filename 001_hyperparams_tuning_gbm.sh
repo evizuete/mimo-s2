@@ -22,13 +22,15 @@
 set -euo pipefail
 
 # ─── Configuración ─────────────────────────────────────────────────
-# Default: 202603_GBM (grid regularizado tras diagnóstico holdout 202602)
-# heredando barriers de 202601 (tp=2.0/sl=0.8).
+# Default: 202604_GBM (barriers conservadoras tp=2.5/sl=1.5 + grid afinado
+# tras los 58 trials del 202603). No hereda barriers (las trae propias) pero
+# sí features (vol_invariant, reduced) de 202601.
 #
 # Otros releases disponibles:
+#   RELEASE=202603_GBM INHERIT_FROM_RELEASE=202601 ...  (grid amplio default)
 #   RELEASE=202602_GBM INHERIT_FROM_RELEASE=202601 ...  (grid baseline)
-#   RELEASE=202600_GBM INHERIT_FROM_RELEASE=202500 ...  (barriers conservadoras)
-export RELEASE=${RELEASE:-202603_GBM}
+#   RELEASE=202600_GBM INHERIT_FROM_RELEASE=202500 ...  (barriers conservadoras + grid amplio)
+export RELEASE=${RELEASE:-202604_GBM}
 export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202601}
 export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
 export SEED=${SEED:-47}
