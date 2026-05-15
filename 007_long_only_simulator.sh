@@ -17,7 +17,19 @@
 set -euo pipefail
 
 export RELEASE=${RELEASE:-202603_GBM}
-export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
+
+# Defaults release-specific (mismo case que 001_hyperparams_tuning_gbm.sh)
+case "${RELEASE}" in
+  *_H6)
+    _DEFAULT_LH=6
+    ;;
+  *)
+    _DEFAULT_LH=3
+    ;;
+esac
+export LH_LONG=${LH_LONG:-${_DEFAULT_LH}}
+export LH_SHORT=${LH_SHORT:-${_DEFAULT_LH}}
+export TAG=${TAG:-rw_both_Lvol_boost_td_down_h${LH_LONG}_Svol_boost_h${LH_SHORT}}
 
 REPORTS_DIR=artifacts/${RELEASE}/oof/${TAG}/reports
 

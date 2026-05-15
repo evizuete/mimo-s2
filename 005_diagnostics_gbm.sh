@@ -19,7 +19,13 @@ set -euo pipefail
 
 export RELEASE=${RELEASE:-202602_GBM}
 export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202601}
-export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
+case "${RELEASE}" in
+  *_H6) _DEFAULT_LH=6 ;;
+  *)    _DEFAULT_LH=3 ;;
+esac
+export LH_LONG=${LH_LONG:-${_DEFAULT_LH}}
+export LH_SHORT=${LH_SHORT:-${_DEFAULT_LH}}
+export TAG=${TAG:-rw_both_Lvol_boost_td_down_h${LH_LONG}_Svol_boost_h${LH_SHORT}}
 export SEED=${SEED:-47}
 export TRAIN_FROM=${TRAIN_FROM:-2024-01-01}
 export TRAIN_TO=${TRAIN_TO:-2025-10-30}

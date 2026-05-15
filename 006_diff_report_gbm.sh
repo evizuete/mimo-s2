@@ -13,6 +13,7 @@
 set -euo pipefail
 
 export RELEASES=${RELEASES:-"202602_GBM 202603_GBM"}
+# El TAG por defecto asume h=3. Para 202606_GBM_H6 pasa: TAG=rw_both_Lvol_boost_td_down_h6_Svol_boost_h6
 export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
 export OUT_MD=${OUT_MD:-artifacts/_cross_release_report.md}
 

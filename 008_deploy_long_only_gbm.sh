@@ -28,7 +28,7 @@ set -euo pipefail
 
 export RELEASE=${RELEASE:-202603_GBM}
 export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202601}
-export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
+# LH_LONG/SHORT y COST se definen abajo con un case más completo
 export SEED=${SEED:-47}
 
 # Defaults release-specific
@@ -45,6 +45,7 @@ esac
 export LH_LONG=${LH_LONG:-${_DEFAULT_LH}}
 export LH_SHORT=${LH_SHORT:-${_DEFAULT_LH}}
 export COST_PER_SIGNAL=${COST_PER_SIGNAL:-${_DEFAULT_COST}}
+export TAG=${TAG:-rw_both_Lvol_boost_td_down_h${LH_LONG}_Svol_boost_h${LH_SHORT}}
 
 # Fechas
 export AS_OF=${AS_OF:-2026-04-10}

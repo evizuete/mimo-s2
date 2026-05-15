@@ -25,8 +25,23 @@ set -euo pipefail
 
 export RELEASE=${RELEASE:-202602_GBM}
 export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202601}
-export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
 export SEED=${SEED:-47}
+
+# Defaults release-specific (mismo case que 001_hyperparams_tuning_gbm.sh)
+case "${RELEASE}" in
+  *_H6)
+    _DEFAULT_LH=6
+    _DEFAULT_COST=0.10
+    ;;
+  *)
+    _DEFAULT_LH=3
+    _DEFAULT_COST=0.05
+    ;;
+esac
+export LH_LONG=${LH_LONG:-${_DEFAULT_LH}}
+export LH_SHORT=${LH_SHORT:-${_DEFAULT_LH}}
+export COST_PER_SIGNAL=${COST_PER_SIGNAL:-${_DEFAULT_COST}}
+export TAG=${TAG:-rw_both_Lvol_boost_td_down_h${LH_LONG}_Svol_boost_h${LH_SHORT}}
 
 # Walk-forward windowing
 export TRAIN_MONTHS=${TRAIN_MONTHS:-12}
@@ -80,13 +95,13 @@ python3 -m mimo.oof.main_oof_gbm_walkforward \
   --best-json "${BEST_JSON}" \
   --base-tf 5min \
   --variant-long vol_boost_td_down --variant-short vol_boost \
-  --label-horizon-long 3 --label-horizon-short 3 \
+  --label-horizon-long ${LH_LONG} --label-horizon-short ${LH_SHORT} \
   --walk-from ${WALK_FROM} --walk-to ${WALK_TO} \
   --train-months ${TRAIN_MONTHS} \
   --test-months  ${TEST_MONTHS} \
   --step-months  ${STEP_MONTHS} \
   --min-signals-window 15 \
-  --cost-per-signal 0.05 \
+  --cost-per-signal ${COST_PER_SIGNAL} \
   --max-drawdown-R 30 \
   ${RAW_FLAG} \
   --optuna-storage "${OPTUNA_STORAGE}" \

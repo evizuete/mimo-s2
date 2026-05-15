@@ -22,8 +22,23 @@ set -euo pipefail
 # ─── Configuración (mismos defaults que fase 1) ────────────────────
 export RELEASE=${RELEASE:-202602_GBM}
 export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202601}
-export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
 export SEED=${SEED:-47}
+
+# Defaults release-specific (mismo case que 001_hyperparams_tuning_gbm.sh)
+case "${RELEASE}" in
+  *_H6)
+    _DEFAULT_LH=6
+    _DEFAULT_COST=0.10
+    ;;
+  *)
+    _DEFAULT_LH=3
+    _DEFAULT_COST=0.05
+    ;;
+esac
+export LH_LONG=${LH_LONG:-${_DEFAULT_LH}}
+export LH_SHORT=${LH_SHORT:-${_DEFAULT_LH}}
+export COST_PER_SIGNAL=${COST_PER_SIGNAL:-${_DEFAULT_COST}}
+export TAG=${TAG:-rw_both_Lvol_boost_td_down_h${LH_LONG}_Svol_boost_h${LH_SHORT}}
 export TRAIN_FROM=${TRAIN_FROM:-2024-01-01}
 export TRAIN_TO=${TRAIN_TO:-2025-10-30}
 export HOLDOUT_FROM=${HOLDOUT_FROM:-2025-11-01}
@@ -102,11 +117,11 @@ python3 -m mimo.oof.main_oof_gbm_holdout \
   --best-json "${BEST_JSON}" \
   --base-tf 5min \
   --variant-long vol_boost_td_down --variant-short vol_boost \
-  --label-horizon-long 3 --label-horizon-short 3 \
+  --label-horizon-long ${LH_LONG} --label-horizon-short ${LH_SHORT} \
   --train-from ${TRAIN_FROM} --train-to ${TRAIN_TO} \
   --holdout-from ${HOLDOUT_FROM} --holdout-to ${HOLDOUT_TO} \
   ${NO_CAL_FLAG} \
-  --cost-per-signal 0.05 \
+  --cost-per-signal ${COST_PER_SIGNAL} \
   --ev-min-signals 30 \
   --max-drawdown-R 30 \
   --optuna-storage "${OPTUNA_STORAGE}" \
