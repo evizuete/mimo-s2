@@ -186,6 +186,13 @@ def build_argparser() -> argparse.ArgumentParser:
                     default="moderate")
     ap.add_argument("--variant-short", choices=sorted(SHORT_VARIANTS.keys()),
                     default="moderate")
+    # Overrides JSON opcionales sobre las variantes (mismos flags que el CNN
+    # main; pueden ser None y resolve_regime_weights los ignora).
+    ap.add_argument("--regime-weights-long-json", default=None,
+                    help="JSON con pesos por régimen para LONG. Sobreescribe "
+                         "selectivamente las keys de variant-long.")
+    ap.add_argument("--regime-weights-short-json", default=None,
+                    help="JSON con pesos por régimen para SHORT.")
     ap.add_argument("--label-horizon-long", type=int, default=3)
     ap.add_argument("--label-horizon-short", type=int, default=3)
 
