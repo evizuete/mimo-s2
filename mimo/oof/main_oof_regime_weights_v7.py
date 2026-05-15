@@ -745,54 +745,85 @@ GRID_BY_RELEASE = {
         "loss_weight_short":   {"low": 0.5, "high": 2.5, "step": 0.25},
         "ranking_loss_weight": {"low": 0.0, "high": 0.3, "step": 0.05},
     },
-    # 202601: segunda iteración del tuning. Mismo objetivo (EV-net multitask),
-    # mismo feature set y barriers que 202600. Refina el grid basándose en
-    # los 16 trials de 202600 (top trials concentrados en ciertas zonas):
-    #   1) BOUNDARIES movidos hacia arriba donde TPE saturaba:
-    #        lstm_units 128→192 max, head_units 96→128 max,
-    #        conv1d_filters drop 32 (top no lo eligió nunca).
-    #   2) PARAMS FIJADOS porque no aportaban variación útil en 202600:
-    #        seq_len_short=64 (top 4/5 lo usó), use_hierarchical_fusion=True
-    #        (v3 ganó 4/5), use_attention=False (heredado de _DEFAULT_GRID).
-    #   3) RANGOS ESTRECHADOS donde TPE se concentró:
-    #        learning_rate [5e-5, 3e-4] (top en 1-3e-4),
-    #        focal_gamma [1.5, 4.0] (bottom <1.5 no aporta),
-    #        focal_alpha_short [0.15, 0.30] (top usa 0.15-0.20),
-    #        loss_weight_long [0.5, 2.0] (top usa 0.5-1.0),
-    #        ranking_loss_weight [0.0, 0.25] (top 0.05-0.20),
-    #        batch_size [4096, 8192] (top no eligió 16384),
-    #        dropout_lstm [0.20, 0.45] (top usa 0.25-0.45).
-    #   4) NUEVO al grid: time_units [8, 16, 32, 48]. Antes era singleton [8]
-    #      del _DEFAULT_GRID (dead param). Controla la Dense del "time head"
-    #      (entry trigger). En arquitectura v3 forma parte del entry_repr
-    #      junto a x_short, así que afecta directamente la capacidad de
-    #      decisión de entrada.
+    # 202601: REDISEÑO COMPLETO tras el análisis de holdout de 202600.
+    # Diagnóstico que motivó este grid:
+    #   - Todos los trials produjeron AUC-ROC ≈ 0.5000 en holdout.
+    #   - p_raw.std() ≈ 5e-4 → modelo emitiendo CONSTANTE (la prior, ~0.12).
+    #   - Calibrador isotónica colapsada a step degenerado (p_cal=1.0 o 0.333).
+    #   - El "ev_net positivo" del trial top fue curve-fit al threshold sweep
+    #     sobre ruido (con --ev-min-signals 100 y barrido amplio de thr, basta
+    #     azar para que 11/100 muestras caigan en TP en alguna ventana).
+    # Hipótesis: el modelo no escapa de la prior por gradiente insuficiente.
+    # Causas combinadas y atacables:
+    #   1) Learning rate demasiado bajo (top: 3-4e-5). Con 8 batches/epoch y
+    #      sample_weight regime que reduce gradient en estados raros, los
+    #      updates son del orden de 1e-7 → red no se mueve.
+    #   2) Batch size demasiado grande (8192-16384) → solo 8-16 updates/epoch.
+    #      Con 130k filas de train y batch_size 16384 son 8 batches por epoch.
+    #   3) Focal loss MUY agresiva: gamma=3 con pos_rate=8% suprime negativos
+    #      fáciles y deja solo positivos raros como gradient → red converge a
+    #      "ignorar señal".
+    #   4) Dropouts altos (0.40) + LR bajo + batches grandes = recipe para
+    #      colapso a constante.
+    #   5) Early stopping en patience=12 con LR scheduler que halva LR cada
+    #      3 epochs sin mejora → la red muere antes de poder entrenar.
+    # Nuevo grid: ROMPE las 5 trampas a la vez. Espera mejora real de AUC-ROC
+    # > 0.52, NO mejora cosmética de ev_net. Si tras 40 trials AUC-ROC sigue
+    # en 0.50, el problema es features/labels (cambiar barriers o horizon),
+    # NO el modelo. Mismas barriers y feature set que 202600.
     # Mismo workflow: --use-tpe --optuna-trials >= 40. Borrar study previo
     # (oof_study_202601_multitask) si existe antes de relanzar.
     "202601": {
         **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
-        # Capacidad / arquitectura — boundaries movidos según resultados de 202600
-        "conv1d_filters":    [48, 64, 96, 128],
-        "lstm_units":        [64, 96, 128, 160, 192],
-        "context_units":     [32, 48, 64, 96],
-        "head_units":        [64, 96, 128],
-        "time_units":        [8, 16, 32, 48],
-        "batch_size":        [4096, 8192],
-        # Params FIJADOS: no aportaban variación útil en 202600
+        # 1) BATCH_SIZE: bajar drásticamente para tener más updates/epoch.
+        #    Con 130k filas: bs=1024 → 127 batches, bs=2048 → 63, bs=4096 → 31.
+        #    Antes: hasta 16384 (8 batches) → claramente insuficiente.
+        "batch_size":        [1024, 2048, 4096],
+        # 2) LEARNING_RATE: rango MUCHO más alto. El LR scheduler ya halva si
+        #    el val_loss no mejora; mejor empezar agresivo y dejar que reduzca,
+        #    que empezar moribundo. Top de 202600 estuvo todo en 1-3e-4 → es
+        #    posible que el techo del rango antiguo fuera la causa.
+        "learning_rate":       {"low": 3e-4, "high": 3e-3, "log": True},
+        # 3) FOCAL LOSS: suavizar. gamma=0 = BCE estándar (sin focal). gamma=1.5
+        #    es razonable para desbalance ~10x. gamma=3 era demasiado agresivo.
+        #    alpha más alto (0.30-0.50) compensa pesos negativos en focal.
+        "focal_gamma":         {"low": 0.0, "high": 2.0, "step": 0.5},
+        "focal_alpha_long":    {"low": 0.25, "high": 0.50, "step": 0.05},
+        "focal_alpha_short":   {"low": 0.25, "high": 0.50, "step": 0.05},
+        # 4) DROPOUTS: techos más bajos para permitir aprender la señal antes
+        #    de empezar a regularizar. Si la red logra AUC>0.55 con dropouts
+        #    bajos, en futuras iteraciones se pueden subir para generalizar.
+        "dropout_seq":         {"low": 0.00, "high": 0.15, "step": 0.05},
+        "dropout_lstm":        {"low": 0.00, "high": 0.30, "step": 0.05},
+        "dropout_dense":       {"low": 0.05, "high": 0.30, "step": 0.05},
+        # 5) EPOCHS / PATIENCE: más largo. Con bs bajo, una epoch es más cara
+        #    pero también más informativa. Patience=20 da margen a salir del
+        #    plateau inicial sin que el LR scheduler ahogue al modelo.
+        "epochs":              [200],
+        "patience":            [20],
+        # CAPACIDAD: explorar redes MÁS PEQUEÑAS también. Si la red está
+        # demasiado parametrizada para el (poco) gradient que recibe, colapsa.
+        "conv1d_filters":    [32, 48, 64, 96],
+        "lstm_units":        [32, 64, 96, 128],
+        "context_units":     [16, 32, 48, 64],
+        "head_units":        [32, 64, 96],
+        "time_units":        [8, 16, 32],
+        # L2: rango más conservador. Con el modelo colapsado a la prior,
+        # más L2 no ayuda (al revés, fuerza más hacia 0).
+        "l2_reg":              {"low": 1e-7, "high": 1e-4, "log": True},
+        # FIJOS por simplicidad: seq_len_short se demostró no aportar en 202600.
+        # use_hierarchical_fusion REABIERTO: con todo lo demás rediseñado, no
+        # damos por hecho que v3 > v2 — el ganador 4/5 de 202600 era ganador
+        # entre modelos muertos.
         "seq_len_short":     [64],
-        "use_hierarchical_fusion": [True],
-        # Continuous (TPE-only) — rangos estrechados a la zona productiva
-        "learning_rate":       {"low": 5e-5, "high": 3e-4, "log": True},
-        "l2_reg":              {"low": 1e-6, "high": 1e-3, "log": True},
-        "dropout_seq":         {"low": 0.05, "high": 0.25, "step": 0.05},
-        "dropout_lstm":        {"low": 0.20, "high": 0.45, "step": 0.05},
-        "dropout_dense":       {"low": 0.15, "high": 0.40, "step": 0.05},
-        "focal_alpha_long":    {"low": 0.15, "high": 0.40, "step": 0.05},
-        "focal_alpha_short":   {"low": 0.15, "high": 0.30, "step": 0.05},
-        "focal_gamma":         {"low": 1.5, "high": 4.0, "step": 0.5},
+        "use_hierarchical_fusion": [False, True],
+        # Loss weights por cabeza: rangos como 202600. Si un lado sigue fuerte
+        # y el otro débil, TPE lo encontrará.
         "loss_weight_long":    {"low": 0.5, "high": 2.0, "step": 0.25},
         "loss_weight_short":   {"low": 0.5, "high": 2.5, "step": 0.25},
-        "ranking_loss_weight": {"low": 0.0, "high": 0.25, "step": 0.05},
+        # Ranking loss: rango más bajo. Si el modelo no separa nada, ranking
+        # loss no ayuda (no puedes rankear lo que no discriminas).
+        "ranking_loss_weight": {"low": 0.0, "high": 0.15, "step": 0.05},
     },
 }
 
