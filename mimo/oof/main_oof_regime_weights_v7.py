@@ -409,8 +409,12 @@ _DEFAULT_GRID = {
     "focal_gamma": [2.00],
     "use_attention": [False],
     "use_gate": [True],
-    "epochs": [90],
-    "patience": [12],
+    # epochs y patience NO van aquí. Antes eran singletons [90]/[12] que se
+    # spreadeaban en cada release vía **_DEFAULT_GRID, y el trainer los
+    # leía siempre del grid → pisaban silenciosamente los valores del CLI
+    # (--oof-epochs / --oof-patience). Ahora sólo se tunean si una release
+    # los declara explícitamente en su grid (singleton o rango). En caso
+    # contrario el valor del CLI (o el default del ModelConfig) se respeta.
     # Defaults no-op para retrocompat: el trainer solo lee estos params
     # si la release tiene una entrada explícita en su grid_space (ver
     # _suggest_model_config). Aquí están para documentar y como fallback

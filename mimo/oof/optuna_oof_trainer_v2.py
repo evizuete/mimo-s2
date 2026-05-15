@@ -297,9 +297,15 @@ class OptunaOOFTrainer:
         model_config.use_attention = self._suggest(trial, 'use_attention')
         model_config.use_gate = self._suggest(trial, 'use_gate')
 
-        # OOF epochs por fold (ligero para Optuna)
-        model_config.epochs = self._suggest(trial, 'epochs')
-        model_config.patience = self._suggest(trial, 'patience')
+        # OOF epochs y patience: sólo se tunean si la release los declara
+        # explícitamente en su grid. Si no aparecen, se mantiene el valor
+        # del base_model_config (que viene del CLI --oof-epochs / --oof-patience
+        # o del default del ModelConfig). Esto evita que un singleton fantasma
+        # del _DEFAULT_GRID pise silenciosamente el valor del CLI.
+        if self.grid_space and 'epochs' in self.grid_space:
+            model_config.epochs = self._suggest(trial, 'epochs')
+        if self.grid_space and 'patience' in self.grid_space:
+            model_config.patience = self._suggest(trial, 'patience')
 
         # Params nuevos (202600+). Sólo se tunean si la release los declara
         # explícitamente en su grid_space. Si no, se queda el default del
