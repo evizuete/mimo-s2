@@ -109,51 +109,56 @@ import math
 r = json.load(open("${OUT_JSON}"))
 
 def fnum(v, default=float("nan")):
-    """null/None → NaN para formateo seguro."""
     return default if v is None else float(v)
 
 def fint(v, default=0):
     return default if v is None else int(v)
 
+def _row(side_label, d, ref_oof=None, thr_field="thr"):
+    h = d if not isinstance(d, dict) else d
+    ev_h = fnum(h.get("ev_net"))
+    n_sig = fint(h.get("n_signals"))
+    thr = fnum(h.get(thr_field))
+    if n_sig == 0 or math.isnan(ev_h):
+        return f"  {side_label:5s}: SIN SEÑALES  (thr={thr:.4f} no produce >= min_signals)"
+    prec = fnum(h.get("prec_TP"))
+    mdd  = fnum(h.get("mdd_R"))
+    eros = ""
+    if ref_oof is not None:
+        ev_o = fnum(ref_oof.get("ev_net"))
+        if not math.isnan(ev_o) and ev_o != 0:
+            eros = f"  erosión={(ev_h - ev_o) / abs(ev_o) * 100:+.0f}%"
+    return f"  {side_label:5s}: thr={thr:.4f}  ev_net={ev_h:+.4f}R  sig={n_sig}  prec={prec:.3f}  mdd={mdd:.1f}R{eros}"
+
 print("📋 RESUMEN HOLDOUT REPORT")
 print(f"   Release:        {r['release']}")
-print(f"   Holdout period: {r['holdout_period'][0]} → {r['holdout_period'][1]} (~{fnum(r['holdout_honest']['months']):.1f} meses)")
+months = fnum(r["holdout_honest"]["months"], 1)
+print(f"   Holdout period: {r['holdout_period'][0]} → {r['holdout_period'][1]} (~{months:.1f} meses)")
 print()
 
-print("─── OOF (training-time, calibrated) ──────────────────────────────")
+print("─── OOF (training-time) ──────────────────────────────────────────")
 for side in ("long", "short"):
     o = r["oof"][side]
-    print(f"  {side.upper():5s}: ev_net={fnum(o['ev_net']):+.4f}R sig={fint(o['n_signals'])} prec_TP={fnum(o['prec_TP']):.3f}")
+    print(f"  {side.upper():5s}: thr={fnum(o['thr']):.4f}  ev_net={fnum(o['ev_net']):+.4f}R  "
+          f"sig={fint(o['n_signals'])}  prec={fnum(o['prec_TP']):.3f}  "
+          f"sig_rate={fnum(o.get('sig_rate'), 0):.5f}")
 
-print()
-print("─── HOLDOUT HONEST (thr OOF aplicado) ────────────────────────────")
-hh = r["holdout_honest"]
-for side in ("long", "short"):
-    h = hh[side]
-    o = r["oof"][side]
-    ev_h = fnum(h.get("ev_net"))
-    ev_o = fnum(o.get("ev_net"))
-    if math.isnan(ev_h) or math.isnan(ev_o) or ev_o == 0:
-        eros_str = "n/a"
-    else:
-        eros_str = f"{(ev_h - ev_o) / abs(ev_o) * 100:+.0f}%"
-    n_sig = fint(h.get("n_signals"))
-    if n_sig == 0:
-        print(f"  {side.upper():5s}: SIN SEÑALES (thr {fnum(hh.get('thr_'+side)):.4f} no se cruza en holdout)")
-    else:
-        print(f"  {side.upper():5s}: ev_net={ev_h:+.4f}R  sig={n_sig}  prec_TP={fnum(h.get('prec_TP')):.3f}  mdd={fnum(h.get('mdd_R')):.1f}R  erosión={eros_str}")
-
-print()
-total_honest = fnum(hh.get("total_R"), 0.0)
-months = fnum(hh.get("months"), 1.0)
-print(f"  💰 TOTAL R holdout (honest): {total_honest:+.2f}R  ({total_honest/max(months, 0.01):+.2f}R/mes)")
-
-print()
-print("─── HOLDOUT OPTIMISTIC (thr re-escaneado, solo info) ──────────────")
-ho = r["holdout_optimistic"]
-for side in ("long", "short"):
-    h = ho[side]
-    print(f"  {side.upper():5s}: thr={fnum(h.get('thr')):.4f}  ev_net={fnum(h.get('ev_net')):+.4f}R  sig={fint(h.get('n_signals'))}  prec_TP={fnum(h.get('prec_TP')):.3f}")
+modes = [
+    ("HOLDOUT ABSOLUTE   (thr OOF directo, MAL si dist shift)",  "holdout_honest"),
+    ("HOLDOUT TRAIN_QUANT (thr matchea sig_rate → PRODUCCIÓN)",  "holdout_train_quantile"),
+    ("HOLDOUT HOLD_QUANT  (thr matchea sig_rate en holdout)",     "holdout_hold_quantile"),
+    ("HOLDOUT OPTIMISTIC (thr re-escan en holdout, upper bound)", "holdout_optimistic"),
+]
+for title, key in modes:
+    if key not in r: continue
+    print(f"\n─── {title} ───")
+    section = r[key]
+    for side in ("long", "short"):
+        ref = r["oof"][side] if key != "holdout_optimistic" else None
+        thr_field = "thr"
+        print(_row(side.upper(), section[side], ref_oof=ref, thr_field=thr_field))
+    total = fnum(section.get("total_R"), 0)
+    print(f"  💰 Total R: {total:+.2f}R  ({total/max(months,0.01):+.2f}R/mes)")
 EOF
 
 log_section "FASE 2 GBM COMPLETADA"

@@ -404,6 +404,45 @@ def main() -> None:
               f"p95={qs[3]:.4f} p99={qs[4]:.4f} max={qs[5]:.4f}  "
               f"| n_above_thr={n_above}")
 
+    # ─── 11b. Predict on TRAIN para quantile-matched thresholds ─────────
+    # Por qué: el refit booster tiene distribución de probs DISTINTA al OOF
+    # booster (ve 100% train vs 80%). Aplicar thr_OOF absoluto al refit
+    # produce 0 signals en holdout (visto en 202602 y 202603). Fix:
+    # encontrar el threshold en las preds-on-train del REFIT que da el mismo
+    # sig_rate que el OOF — ese es el thr de producción honesto.
+    print("\n🔢 Predict on TRAIN para quantile-matched thresholds...")
+    p_long_train_raw  = booster_long.predict(X_tr).astype(np.float32)
+    p_short_train_raw = booster_short.predict(X_tr).astype(np.float32)
+    p_long_train_cal  = cal_long.predict(p_long_train_raw.astype(np.float64)).astype(np.float32)
+    p_short_train_cal = cal_short.predict(p_short_train_raw.astype(np.float64)).astype(np.float32)
+
+    # sig_rate target del OOF (rate al que el modelo "debe" emitir señales)
+    sig_rate_long_oof  = float(top_long_meta["ev_long"].get("sig_rate")  or 0.0)
+    sig_rate_short_oof = float(top_short_meta["ev_short"].get("sig_rate") or 0.0)
+
+    def _quantile_thr(probs: np.ndarray, target_rate: float) -> float:
+        if target_rate <= 0.0 or target_rate >= 1.0: return float("nan")
+        return float(np.quantile(probs, 1.0 - target_rate))
+
+    # Modo TRAIN_QUANTILE: thr en las preds-on-train del refit que matchea sig_rate_oof
+    thr_long_tq  = _quantile_thr(p_long_train_cal,  sig_rate_long_oof)
+    thr_short_tq = _quantile_thr(p_short_train_cal, sig_rate_short_oof)
+
+    # Modo HOLD_QUANTILE: thr en las preds-on-holdout que matchea sig_rate_oof
+    # (fuerza misma sig_rate en holdout — sesgado pero informativo)
+    thr_long_hq  = _quantile_thr(p_long_cal,  sig_rate_long_oof)
+    thr_short_hq = _quantile_thr(p_short_cal, sig_rate_short_oof)
+
+    print(f"  Target sig_rate OOF:  long={sig_rate_long_oof:.5f}  short={sig_rate_short_oof:.5f}")
+    print(f"  thr ABSOLUTE  (OOF):  long={thr_long:.4f}     short={thr_short:.4f}")
+    print(f"  thr TRAIN_QUANT:      long={thr_long_tq:.4f}  short={thr_short_tq:.4f}")
+    print(f"  thr HOLD_QUANT:       long={thr_long_hq:.4f}  short={thr_short_hq:.4f}")
+    n_sig_long_train  = int((p_long_train_cal  >= thr_long_tq).sum()) if np.isfinite(thr_long_tq) else 0
+    n_sig_short_train = int((p_short_train_cal >= thr_short_tq).sum()) if np.isfinite(thr_short_tq) else 0
+    print(f"  Sigs en TRAIN @ TQ:   long={n_sig_long_train}   short={n_sig_short_train}")
+    print(f"  Sigs en HOLD  @ TQ:   long={int((p_long_cal>=thr_long_tq).sum()) if np.isfinite(thr_long_tq) else 0}  "
+          f"short={int((p_short_cal>=thr_short_tq).sum()) if np.isfinite(thr_short_tq) else 0}")
+
     # ─── 12. Build df_oof-style para evaluación ─────────────────────
     df_oof_hold = pd.DataFrame({
         "time":  df_hold["time"].values,
@@ -453,6 +492,64 @@ def main() -> None:
     print(_fmt("LONG ", top_long_meta["ev_long"], long_honest, thr_long))
     print(_fmt("SHORT", top_short_meta["ev_short"], short_honest, thr_short))
 
+    # ─── 13b. TRAIN_QUANTILE (thr matchea sig_rate OOF via refit train preds) ─
+    # Este es el thr que SE USARÍA EN PRODUCCIÓN: refit booster + apply cal +
+    # threshold seteado para producir sig_rate consistente con OOF.
+    print("\n🎯 Evaluación TRAIN_QUANTILE (thr matchea sig_rate_oof en refit-on-train):")
+    long_tq = _eval_at_thr(
+        df_oof_hold, proba_col="oof_proba_long_cal", side_is_long=True,
+        horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
+        thr_target=thr_long_tq if np.isfinite(thr_long_tq) else 0.5,
+        cost_per_signal=args.cost_per_signal,
+        max_drawdown_R=args.max_drawdown_R, min_signals=args.ev_min_signals,
+    )
+    short_tq = _eval_at_thr(
+        df_oof_hold, proba_col="oof_proba_short_cal", side_is_long=False,
+        horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
+        thr_target=thr_short_tq if np.isfinite(thr_short_tq) else 0.5,
+        cost_per_signal=args.cost_per_signal,
+        max_drawdown_R=args.max_drawdown_R, min_signals=args.ev_min_signals,
+    )
+    for side, r, thr in (("LONG ", long_tq, thr_long_tq), ("SHORT", short_tq, thr_short_tq)):
+        ev = r.get("ev_net")
+        n_sig = int(r.get("n_signals", 0) or 0)
+        if ev is None or not np.isfinite(ev) or n_sig == 0:
+            print(f"  {side} | thr_TQ={thr:.4f} → SIN SEÑALES (min_signals={args.ev_min_signals})")
+        else:
+            prec = r.get("prec_TP", float("nan"))
+            mdd  = r.get("mdd_R", float("nan"))
+            print(f"  {side} | thr_TQ={thr:.4f} → ev_net={ev:+.4f}R  sig={n_sig}  "
+                  f"prec_TP={prec:.3f}  mdd={mdd:.1f}R")
+
+    # ─── 13c. HOLD_QUANTILE (thr matchea sig_rate OOF en preds-on-holdout) ─
+    # Más sesgado (mira al holdout para fijar thr) pero útil para entender
+    # qué pasaría si forzamos misma selectividad en holdout que en OOF.
+    print("\n🔍 Evaluación HOLD_QUANTILE (thr matchea sig_rate_oof en holdout — sesgado):")
+    long_hq = _eval_at_thr(
+        df_oof_hold, proba_col="oof_proba_long_cal", side_is_long=True,
+        horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
+        thr_target=thr_long_hq if np.isfinite(thr_long_hq) else 0.5,
+        cost_per_signal=args.cost_per_signal,
+        max_drawdown_R=args.max_drawdown_R, min_signals=args.ev_min_signals,
+    )
+    short_hq = _eval_at_thr(
+        df_oof_hold, proba_col="oof_proba_short_cal", side_is_long=False,
+        horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
+        thr_target=thr_short_hq if np.isfinite(thr_short_hq) else 0.5,
+        cost_per_signal=args.cost_per_signal,
+        max_drawdown_R=args.max_drawdown_R, min_signals=args.ev_min_signals,
+    )
+    for side, r, thr in (("LONG ", long_hq, thr_long_hq), ("SHORT", short_hq, thr_short_hq)):
+        ev = r.get("ev_net")
+        n_sig = int(r.get("n_signals", 0) or 0)
+        if ev is None or not np.isfinite(ev) or n_sig == 0:
+            print(f"  {side} | thr_HQ={thr:.4f} → SIN SEÑALES")
+        else:
+            prec = r.get("prec_TP", float("nan"))
+            mdd  = r.get("mdd_R", float("nan"))
+            print(f"  {side} | thr_HQ={thr:.4f} → ev_net={ev:+.4f}R  sig={n_sig}  "
+                  f"prec_TP={prec:.3f}  mdd={mdd:.1f}R")
+
     # ─── 14. Optimistic (thr re-escaneado en holdout) ──────────────
     print("\n🔍 Evaluación OPTIMISTIC (thr re-optimizado en holdout — solo info):")
     long_opt = _eval_best_thr(
@@ -483,11 +580,18 @@ def main() -> None:
         if n_sig == 0 or not np.isfinite(ev):
             return 0.0
         return ev * n_sig
-    total_R_honest = _r_contribution(long_honest) + _r_contribution(short_honest)
+    total_R_honest = _r_contribution(long_honest)   + _r_contribution(short_honest)
+    total_R_tq     = _r_contribution(long_tq)       + _r_contribution(short_tq)
+    total_R_hq     = _r_contribution(long_hq)       + _r_contribution(short_hq)
+    total_R_opt    = _r_contribution(long_opt)      + _r_contribution(short_opt)
     months = (args.holdout_to - args.holdout_from).days / 30.44
+
     print("\n" + "═" * 70)
-    print(f"  POTENCIAL HOLDOUT (thr OOF aplicado): {total_R_honest:+.2f}R en {months:.1f} meses")
-    print(f"  → ~{total_R_honest/months:+.2f}R/mes  (un R = 1× volatilidad ATR)")
+    print(f"  R TOTAL HOLDOUT (4 modos, {months:.1f} meses):")
+    print(f"    ABSOLUTE    (thr_OOF directo):       {total_R_honest:+7.2f}R  ({total_R_honest/months:+.2f}R/mes)")
+    print(f"    TRAIN_QUANT (thr matchea sig_rate):  {total_R_tq:+7.2f}R  ({total_R_tq/months:+.2f}R/mes)  ← producción")
+    print(f"    HOLD_QUANT  (thr en holdout):        {total_R_hq:+7.2f}R  ({total_R_hq/months:+.2f}R/mes)")
+    print(f"    OPTIMISTIC  (thr re-escan holdout):  {total_R_opt:+7.2f}R  ({total_R_opt/months:+.2f}R/mes)  ← upper bound")
     print("═" * 70)
 
     # ─── 16. Persistir reporte JSON ────────────────────────────────
@@ -512,9 +616,32 @@ def main() -> None:
             "total_R": total_R_honest,
             "months":  months,
         },
+        "holdout_train_quantile": {
+            "_doc": "thr seleccionado en refit-on-train preds para matchear sig_rate de OOF. "
+                    "Es el modo HONESTO de producción.",
+            "sig_rate_long_oof":  sig_rate_long_oof,
+            "sig_rate_short_oof": sig_rate_short_oof,
+            "thr_long":  thr_long_tq,
+            "thr_short": thr_short_tq,
+            "long":  _json_safe(long_tq),
+            "short": _json_safe(short_tq),
+            "total_R": total_R_tq,
+            "n_sig_train_long":  n_sig_long_train,
+            "n_sig_train_short": n_sig_short_train,
+        },
+        "holdout_hold_quantile": {
+            "_doc": "thr seleccionado en holdout para matchear sig_rate de OOF. "
+                    "Modo SESGADO (mira al holdout) pero informativo.",
+            "thr_long":  thr_long_hq,
+            "thr_short": thr_short_hq,
+            "long":  _json_safe(long_hq),
+            "short": _json_safe(short_hq),
+            "total_R": total_R_hq,
+        },
         "holdout_optimistic": {
             "long":  _json_safe(long_opt),
             "short": _json_safe(short_opt),
+            "total_R": total_R_opt,
         },
         "horizon": horizon, "tp_mult": tp_mult, "sl_mult": sl_mult,
     }
