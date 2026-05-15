@@ -36,8 +36,11 @@ export TRAIN_TO=${TRAIN_TO:-2025-10-30}
 export HOLDOUT_FROM=${HOLDOUT_FROM:-2025-11-01}
 export HOLDOUT_TO=${HOLDOUT_TO:-2026-04-10}
 
-# Trials de Optuna. GBM es rápido: 40 trials ~1-2h.
-export OPTUNA_TRIALS=${OPTUNA_TRIALS:-40}
+# OPTUNA_TRIALS = NÚMERO TOTAL OBJETIVO de trials COMPLETE en el study.
+# El script calcula automáticamente cuántos NUEVOS lanzar (= TARGET - YA_COMPLETOS).
+# Si el study ya está al target, el paso se salta.
+# GBM es rápido (~5-15 min/trial CPU). 80 trials ~6-12h.
+export OPTUNA_TRIALS=${OPTUNA_TRIALS:-80}
 
 # Storage MySQL (mismo que CNN, distinto study name)
 export OPTUNA_STORAGE=${OPTUNA_STORAGE:-mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db}
@@ -102,29 +105,52 @@ except ImportError:
 
 echo "✅ Pre-checks OK"
 
-# ─── 2. Lanzar Optuna GBM ──────────────────────────────────────────
-log_section "2. main_oof_gbm (${OPTUNA_TRIALS} trials)"
-
-python3 -m mimo.oof.main_oof_gbm \
-  --release ${RELEASE} \
-  --inherit-config-from ${INHERIT_FROM_RELEASE} \
-  --base-tf 5min --target-type multitask --side both \
-  --variant-long vol_boost_td_down --variant-short vol_boost \
-  --label-horizon-long 3 --label-horizon-short 3 \
-  --train-from ${TRAIN_FROM} --train-to ${TRAIN_TO} \
-  --holdout-from ${HOLDOUT_FROM} --holdout-to ${HOLDOUT_TO} \
-  --use-tpe \
-  --optuna-trials ${OPTUNA_TRIALS} \
-  --objective ev_net --cost-per-signal 0.05 \
-  --ev-min-signals 100 --max-drawdown-R 30 \
-  --ev-thr-lo 0.10 --ev-thr-hi 0.40 \
-  --optuna-storage "${OPTUNA_STORAGE}" \
-  --seed ${SEED}
-
-# ─── 3. Verificar study en MySQL ───────────────────────────────────
-log_section "3. Verificar study creado en Optuna"
+# ─── 2. Calcular trials NUEVOS a lanzar (target - ya_completos) ───
+log_section "2. Calcular delta de trials"
 
 EXPECTED_STUDY="oof_study_gbm_${RELEASE}_multitask"
+N_CURRENT=$(python3 -c "
+import optuna
+try:
+    s = optuna.load_study(study_name='${EXPECTED_STUDY}', storage='${OPTUNA_STORAGE}')
+    print(sum(1 for t in s.trials if t.state.name == 'COMPLETE'))
+except KeyError:
+    print(0)
+except Exception as e:
+    import sys
+    print(f'ERR:{e}', file=sys.stderr); print(0)
+")
+
+N_DELTA=$((OPTUNA_TRIALS - N_CURRENT))
+echo "  Trials completados en study : ${N_CURRENT}"
+echo "  Target total                : ${OPTUNA_TRIALS}"
+echo "  Nuevos a lanzar (delta)     : ${N_DELTA}"
+
+if [ "${N_DELTA}" -le 0 ]; then
+  echo "✅ Ya hay ${N_CURRENT} ≥ ${OPTUNA_TRIALS} trials COMPLETE. Saltando tuning."
+  echo "   (Para forzar más, sube OPTUNA_TRIALS por encima de ${N_CURRENT})"
+else
+  log_section "3. main_oof_gbm (lanzando ${N_DELTA} nuevos trials)"
+  python3 -m mimo.oof.main_oof_gbm \
+    --release ${RELEASE} \
+    --inherit-config-from ${INHERIT_FROM_RELEASE} \
+    --base-tf 5min --target-type multitask --side both \
+    --variant-long vol_boost_td_down --variant-short vol_boost \
+    --label-horizon-long 3 --label-horizon-short 3 \
+    --train-from ${TRAIN_FROM} --train-to ${TRAIN_TO} \
+    --holdout-from ${HOLDOUT_FROM} --holdout-to ${HOLDOUT_TO} \
+    --use-tpe \
+    --optuna-trials ${N_DELTA} \
+    --objective ev_net --cost-per-signal 0.05 \
+    --ev-min-signals 100 --max-drawdown-R 30 \
+    --ev-thr-lo 0.10 --ev-thr-hi 0.40 \
+    --optuna-storage "${OPTUNA_STORAGE}" \
+    --seed ${SEED}
+fi
+
+# ─── 4. Verificar study en MySQL ───────────────────────────────────
+log_section "4. Verificar study creado en Optuna"
+
 STUDY_EXISTS=$(python3 -c "
 import optuna
 names = optuna.get_all_study_names(storage='${OPTUNA_STORAGE}')
@@ -151,10 +177,10 @@ study = optuna.load_study(study_name='${EXPECTED_STUDY}', storage='${OPTUNA_STOR
 n = sum(1 for t in study.trials if t.state.name == 'COMPLETE')
 print(n)
 ")
-echo "  ${N_COMPLETED} trials COMPLETE de ${OPTUNA_TRIALS} solicitados"
+echo "  ${N_COMPLETED} trials COMPLETE / ${OPTUNA_TRIALS} target"
 
-# ─── 4. extract_best_per_side ──────────────────────────────────────
-log_section "4. extract_best_per_side"
+# ─── 5. extract_best_per_side ──────────────────────────────────────
+log_section "5. extract_best_per_side"
 
 mkdir -p ${REPORTS_DIR}
 
@@ -163,8 +189,8 @@ python3 -m mimo.oof.extract_best_per_side \
   --study-prefix oof_study_gbm \
   --out-json ${BEST_JSON}
 
-# ─── 5. Verificar best_per_side.json ───────────────────────────────
-log_section "5. Verificar best_per_side.json"
+# ─── 6. Verificar best_per_side.json ───────────────────────────────
+log_section "6. Verificar best_per_side.json"
 
 [ -f "${BEST_JSON}" ] || abort "No se generó ${BEST_JSON}"
 
