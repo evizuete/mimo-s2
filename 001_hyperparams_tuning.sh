@@ -19,7 +19,7 @@
 set -euo pipefail
 
 # ─── Configuración ─────────────────────────────────────────────────
-export RELEASE=${RELEASE:-202600}
+export RELEASE=${RELEASE:-202601}
 export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202500}
 export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
 export SEED=${SEED:-47}
