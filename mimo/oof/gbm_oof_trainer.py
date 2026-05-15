@@ -101,6 +101,7 @@ class GBMOOFTrainer:
         ev_thr_lo: float = 0.10,
         ev_thr_hi: float = 0.40,
         ev_n_thr: int = 60,
+        exclude_feature_patterns: Optional[List[str]] = None,
     ):
         self.general_config = general_config
         self.feature_config = feature_config
@@ -112,6 +113,7 @@ class GBMOOFTrainer:
         self.grid_space = grid_space
         self.cost_per_signal = float(cost_per_signal)
         self.ev_min_signals = int(ev_min_signals)
+        self.exclude_feature_patterns = list(exclude_feature_patterns or [])
         self.max_drawdown_R = float(max_drawdown_R)
         self.ev_thr_lo = float(ev_thr_lo)
         self.ev_thr_hi = float(ev_thr_hi)
@@ -329,6 +331,15 @@ class GBMOOFTrainer:
         # 3) Feature matrix tabular
         feat_cols = self._collect_tabular_columns(pipeline)
         feat_cols = [c for c in feat_cols if c in df_prepared.columns]
+        # Exclude por patrón (ej. release 202605 quita features time-of-day)
+        if self.exclude_feature_patterns:
+            n_before = len(feat_cols)
+            feat_cols = [c for c in feat_cols
+                         if not any(p in c for p in self.exclude_feature_patterns)]
+            n_excluded = n_before - len(feat_cols)
+            if n_excluded > 0:
+                print(f"[Trial {trial.number}] EXCLUDED {n_excluded} features por patterns "
+                      f"{self.exclude_feature_patterns}")
         if not feat_cols:
             raise RuntimeError("No hay feature columns disponibles para GBM")
 

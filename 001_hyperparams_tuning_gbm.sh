@@ -32,7 +32,27 @@ set -euo pipefail
 #   RELEASE=202600_GBM INHERIT_FROM_RELEASE=202500 ...  (barriers conservadoras + grid amplio)
 export RELEASE=${RELEASE:-202604_GBM}
 export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202601}
-export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
+
+# Defaults release-specific (sobreescribibles por env var):
+#   202606_GBM_H6: label_horizon=6 (30 min vs 15 min default) + cost stricter
+case "${RELEASE}" in
+  *_H6)
+    _DEFAULT_LH=6
+    _DEFAULT_COST=0.10
+    ;;
+  *)
+    _DEFAULT_LH=3
+    _DEFAULT_COST=0.05
+    ;;
+esac
+export LH_LONG=${LH_LONG:-${_DEFAULT_LH}}
+export LH_SHORT=${LH_SHORT:-${_DEFAULT_LH}}
+export COST_PER_SIGNAL=${COST_PER_SIGNAL:-${_DEFAULT_COST}}
+
+# El TAG cambia con LH para evitar pisar artifacts de otras releases
+_TAG_LH_LONG=${LH_LONG}
+_TAG_LH_SHORT=${LH_SHORT}
+export TAG=${TAG:-rw_both_Lvol_boost_td_down_h${_TAG_LH_LONG}_Svol_boost_h${_TAG_LH_SHORT}}
 export SEED=${SEED:-47}
 export TRAIN_FROM=${TRAIN_FROM:-2024-01-01}
 export TRAIN_TO=${TRAIN_TO:-2025-10-30}
@@ -139,12 +159,12 @@ else
     --inherit-config-from ${INHERIT_FROM_RELEASE} \
     --base-tf 5min --target-type multitask --side both \
     --variant-long vol_boost_td_down --variant-short vol_boost \
-    --label-horizon-long 3 --label-horizon-short 3 \
+    --label-horizon-long ${LH_LONG} --label-horizon-short ${LH_SHORT} \
     --train-from ${TRAIN_FROM} --train-to ${TRAIN_TO} \
     --holdout-from ${HOLDOUT_FROM} --holdout-to ${HOLDOUT_TO} \
     --use-tpe \
     --optuna-trials ${N_DELTA} \
-    --objective ev_net --cost-per-signal 0.05 \
+    --objective ev_net --cost-per-signal ${COST_PER_SIGNAL} \
     --ev-min-signals 100 --max-drawdown-R 30 \
     --ev-thr-lo 0.10 --ev-thr-hi 0.40 \
     --optuna-storage "${OPTUNA_STORAGE}" \

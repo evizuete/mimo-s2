@@ -262,6 +262,79 @@ GRID_GBM_BY_RELEASE: Dict[str, Dict[str, Any]] = {
         "n_estimators":       [150, 200, 300],
         "early_stopping_rounds": [20, 30, 50],
     },
+
+    # 202605_GBM_NO_TIME: igual grid que 202604, pero EXCLUYE features
+    # time-of-day (minute_*, hour_*, dow_*, is_asia/london/ny/overlap,
+    # is_friday/month_end/us_*). El feature_importance mostró que ~38%
+    # del SHAP eran features temporales, y esas son la fuente del regime
+    # drift (en holdout 2025-11+ los patrones intraday cambian).
+    # Mismas barriers que 202604 (TP=2.5/SL=1.5).
+    "202605_GBM_NO_TIME": {
+        "num_leaves":         [11, 15, 21, 31],
+        "max_depth":          [4, 6, 8, 12],
+        "min_data_in_leaf":   [25, 50, 100, 200, 400],
+        "feature_fraction":   {"low": 0.6, "high": 0.9, "step": 0.1},
+        "bagging_fraction":   {"low": 0.7, "high": 0.9, "step": 0.1},
+        "bagging_freq":       [5, 10],
+        "lambda_l1":          {"low": 1e-4, "high": 1.0, "log": True},
+        "lambda_l2":          {"low": 1e-8, "high": 1e-4, "log": True},
+        "learning_rate":      {"low": 0.02, "high": 0.10, "log": True},
+        "n_estimators":       [150, 200, 300],
+        "early_stopping_rounds": [20, 30, 50],
+    },
+
+    # 202606_GBM_H6: redesign radical
+    #   · Sin features time-of-day (mismo exclude que 202605)
+    #   · label_horizon = 6 (30 min vs 15 min) — patrones más estructurales
+    #   · cost_per_signal = 0.10 (más estricto que default 0.05)
+    #   · Barriers conservadoras (heredadas de 202604, TP=2.5/SL=1.5)
+    # Hipótesis: h=3 capta noise intrabar, h=6 capta swings reales que el
+    # modelo puede aprender. Sin time-features + h más largo, modelo
+    # debería ser robusto a regime shift intraday.
+    # Grid ligeramente ampliado por incertidumbre (espacio nuevo).
+    "202606_GBM_H6": {
+        "num_leaves":         [7, 15, 31, 63],
+        "max_depth":          [4, 6, 8, 12],
+        "min_data_in_leaf":   [25, 50, 100, 200, 400, 800],
+        "feature_fraction":   {"low": 0.5, "high": 0.9, "step": 0.1},
+        "bagging_fraction":   {"low": 0.6, "high": 0.9, "step": 0.1},
+        "bagging_freq":       [0, 5, 10],
+        "lambda_l1":          {"low": 1e-5, "high": 1.0, "log": True},
+        "lambda_l2":          {"low": 1e-8, "high": 1.0, "log": True},
+        "learning_rate":      {"low": 0.01, "high": 0.10, "log": True},
+        "n_estimators":       [150, 300, 500, 1000],
+        "early_stopping_rounds": [30, 50, 100],
+    },
+}
+
+
+# ─── Feature exclusion por release ────────────────────────────────────
+# Patrones para excluir features (substring match en el nombre de columna).
+# Aplicado por GBMOOFTrainer si exclude_feature_patterns se pasa.
+_GBM_EXCLUDE_PATTERNS: Dict[str, List[str]] = {
+    "202605_GBM_NO_TIME": [
+        "minute_of_day", "hour_sin", "hour_cos",
+        "dow_sin", "dow_cos",
+        "is_asia", "is_london", "is_ny", "is_overlap",
+        "is_friday", "is_month_end",
+        "is_us_first_hour", "is_us_last_hour",
+    ],
+    "202606_GBM_H6": [
+        "minute_of_day", "hour_sin", "hour_cos",
+        "dow_sin", "dow_cos",
+        "is_asia", "is_london", "is_ny", "is_overlap",
+        "is_friday", "is_month_end",
+        "is_us_first_hour", "is_us_last_hour",
+    ],
+}
+
+
+# ─── Defaults experimentales por release ──────────────────────────────
+# label_horizon y cost_per_signal pueden variar por release.
+# Si la CLI no pasa valores, se usan estos.
+_GBM_RELEASE_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "202606_GBM_H6": {"label_horizon_long": 6, "label_horizon_short": 6,
+                       "cost_per_signal": 0.10},
 }
 
 
@@ -269,28 +342,34 @@ GRID_GBM_BY_RELEASE: Dict[str, Dict[str, Any]] = {
 # Se inyectan en BARRIERS_BY_RELEASE al cargar el módulo. Permite tener
 # releases GBM con barriers propias sin tocar el dict del CNN.
 
-_GBM_BARRIERS_BY_RELEASE: Dict[str, Dict[str, Any]] = {
-    # 202604_GBM: ratio 1.67 (vs 2.5 de 202601). SL más ancho 1.5 ATR
-    # (vs 0.8) absorbe mecha intrabar. Régimen barriers ligeramente más
-    # restringidas que _DEFAULT_BARRIERS (que tenía TP=3.5 en trending);
-    # 2.5-3.0 es realista para 5min h=3.
-    "202604_GBM": {
-        "tp_base": 2.5,
-        "sl_base": 1.5,
-        "regime_barriers_long": {
-            "trending": {"tp": 2.75, "sl": 1.50},
-            "ranging":  {"tp": 2.25, "sl": 1.50},
-            "low_vol":  {"tp": 2.00, "sl": 1.25},
-            "high_vol": {"tp": 3.00, "sl": 1.75},
-        },
-        "regime_barriers_short": {
-            "trending": {"tp": 2.75, "sl": 1.50},
-            "ranging":  {"tp": 2.25, "sl": 1.50},
-            "low_vol":  {"tp": 2.00, "sl": 1.25},
-            "high_vol": {"tp": 3.00, "sl": 1.75},
-        },
+_GBM_BARRIERS_BY_RELEASE: Dict[str, Dict[str, Any]] = {}
+
+_GBM_CONSERVATIVE_BARRIERS = {
+    "tp_base": 2.5,
+    "sl_base": 1.5,
+    "regime_barriers_long": {
+        "trending": {"tp": 2.75, "sl": 1.50},
+        "ranging":  {"tp": 2.25, "sl": 1.50},
+        "low_vol":  {"tp": 2.00, "sl": 1.25},
+        "high_vol": {"tp": 3.00, "sl": 1.75},
+    },
+    "regime_barriers_short": {
+        "trending": {"tp": 2.75, "sl": 1.50},
+        "ranging":  {"tp": 2.25, "sl": 1.50},
+        "low_vol":  {"tp": 2.00, "sl": 1.25},
+        "high_vol": {"tp": 3.00, "sl": 1.75},
     },
 }
+
+# 202604_GBM: ratio 1.67 (vs 2.5 de 202601). SL más ancho 1.5 ATR
+# (vs 0.8) absorbe mecha intrabar. Régimen barriers ligeramente más
+# restringidas que _DEFAULT_BARRIERS (que tenía TP=3.5 en trending);
+# 2.5-3.0 es realista para 5min h=3.
+_GBM_BARRIERS_BY_RELEASE["202604_GBM"] = _GBM_CONSERVATIVE_BARRIERS
+
+# 202605_GBM_NO_TIME y 202606_GBM_H6: mismas barriers conservadoras
+_GBM_BARRIERS_BY_RELEASE["202605_GBM_NO_TIME"] = _GBM_CONSERVATIVE_BARRIERS
+_GBM_BARRIERS_BY_RELEASE["202606_GBM_H6"]      = _GBM_CONSERVATIVE_BARRIERS
 
 # Inyección no-destructiva en el dict global. Si ya existe la entrada
 # (p.ej. añadida directamente al v7 en el futuro), se respeta esa.
@@ -486,6 +565,9 @@ def main() -> None:
 
     # 6) Lanzar trainer GBM
     grid = _get_gbm_grid_for_release(release)
+    exclude_patterns = _GBM_EXCLUDE_PATTERNS.get(release)
+    if exclude_patterns:
+        print(f"🚫 [GBM EXCLUDE] release={release} | excluyendo patterns: {exclude_patterns}")
     trainer = GBMOOFTrainer(
         general_config=general_config,
         feature_config=feature_config,
@@ -501,6 +583,7 @@ def main() -> None:
         ev_thr_lo=float(args.ev_thr_lo),
         ev_thr_hi=float(args.ev_thr_hi),
         ev_n_thr=int(args.ev_n_thr),
+        exclude_feature_patterns=exclude_patterns,
     )
 
     study = trainer.optimize(
