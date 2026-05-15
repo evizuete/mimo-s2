@@ -202,13 +202,30 @@ def _train_and_predict_window(
         model = TradingModel(
             general_config=general_config, model_config=model_config, side=None,  # multitask
         )
-        if getattr(model_config, "use_hierarchical_fusion", True):
-            model.build_model_v3()
+        arch = str(getattr(model_config, "_walkforward_arch", "original_v3"))
+        if arch == "original_v3":
+            if getattr(model_config, "use_hierarchical_fusion", True):
+                model.build_model_v3()
+            else:
+                model.build_model_v2()
         else:
-            model.build_model_v2()
+            # Arquitectura alternativa drop-in (mlp / hybrid / transformer / tcn).
+            # Sobrescribimos model.model con el modelo built por la factory.
+            from mimo.models.model_alternatives import build_model_by_arch
+            shape_short = X_seq_short.shape[1:]   # (seq_short, n_feat_short)
+            shape_long  = X_seq_long.shape[1:]
+            n_ctx       = int(X_context.shape[1])
+            n_time_feat = int(X_time.shape[1])
+            init_b = float(getattr(model_config, "init_bias", 0.0))
+            model.model = build_model_by_arch(
+                arch_name=arch,
+                shape_short=shape_short, shape_long=shape_long,
+                n_context=n_ctx, n_time=n_time_feat,
+                model_config=model_config, init_bias=init_b,
+            )
         model.compile_model()
     except Exception as e:
-        return {"skipped": True, "reason": f"build_model_failed: {str(e)[:150]}"}
+        return {"skipped": True, "reason": f"build_model_failed[{arch}]: {str(e)[:200]}"}
 
     try:
         history = model.train(
@@ -368,6 +385,11 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="Epochs por ventana (más bajo que producción para acelerar).")
     ap.add_argument("--patience", type=int, default=8,
                     help="Early stopping patience.")
+    ap.add_argument("--arch", default="original_v3",
+                    choices=("original_v3", "mlp", "hybrid", "transformer", "tcn"),
+                    help="Arquitectura del modelo. original_v3 = CNN-LSTM jerárquico "
+                         "del proyecto. mlp/hybrid/transformer/tcn = alternativas de "
+                         "model_alternatives.py.")
 
     ap.add_argument("--cost-per-signal", type=float, default=0.05)
     ap.add_argument("--max-drawdown-R", type=float, default=30.0)
@@ -396,6 +418,11 @@ def main() -> None:
         best_params, target_type="multitask",
         epochs=int(args.epochs), patience=int(args.patience),
     )
+    # Pasamos el arch via attribute en model_config (consumido en
+    # _train_and_predict_window). No es un campo "oficial" de ModelConfig
+    # pero Python no se queja por atributos extra.
+    setattr(model_config, "_walkforward_arch", str(args.arch))
+    print(f"🏗️  Arquitectura: {args.arch}")
 
     # 2) Regime weights + barriers + features (mismo patrón que GBM)
     regime_weights_by_side = resolve_regime_weights(args)
@@ -562,6 +589,7 @@ def main() -> None:
             "test_months":  args.test_months,
             "step_months":  args.step_months,
         },
+        "arch": str(args.arch),
         "epochs": int(args.epochs),
         "patience": int(args.patience),
         "horizon": horizon, "tp_mult": tp_mult, "sl_mult": sl_mult,

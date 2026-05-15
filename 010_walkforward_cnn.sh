@@ -26,6 +26,22 @@ export CNN_STUDY=${CNN_STUDY:-oof_study_${RELEASE}_multitask}
 export TAG=${TAG:-deploy_2026_04_combined_specialists_seed47}
 export SEED=${SEED:-47}
 
+# Arquitectura: original_v3 | mlp | hybrid | transformer | tcn
+# Defaults razonables de epochs por arch:
+#   original_v3 → 40 (modelo grande, más epochs)
+#   mlp         → 30 (modelo pequeño, converge rápido)
+#   hybrid      → 35
+#   transformer → 30 (más sensible a overfit)
+#   tcn         → 35
+export ARCH=${ARCH:-original_v3}
+case "${ARCH}" in
+  mlp)         _DEFAULT_EPOCHS=30; _DEFAULT_PATIENCE=6 ;;
+  hybrid)      _DEFAULT_EPOCHS=35; _DEFAULT_PATIENCE=7 ;;
+  transformer) _DEFAULT_EPOCHS=30; _DEFAULT_PATIENCE=6 ;;
+  tcn)         _DEFAULT_EPOCHS=35; _DEFAULT_PATIENCE=7 ;;
+  *)           _DEFAULT_EPOCHS=40; _DEFAULT_PATIENCE=8 ;;
+esac
+
 # Walk-forward windowing (mismas defaults que GBM)
 export WALK_FROM=${WALK_FROM:-2025-01-01}
 export WALK_TO=${WALK_TO:-2026-04-10}
@@ -34,8 +50,8 @@ export TEST_MONTHS=${TEST_MONTHS:-1}
 export STEP_MONTHS=${STEP_MONTHS:-1}
 
 # Training acelerado por ventana (no 90 epochs como producción)
-export EPOCHS=${EPOCHS:-40}
-export PATIENCE=${PATIENCE:-8}
+export EPOCHS=${EPOCHS:-${_DEFAULT_EPOCHS}}
+export PATIENCE=${PATIENCE:-${_DEFAULT_PATIENCE}}
 
 # Defaults del problema
 export LH_LONG=${LH_LONG:-3}
@@ -47,8 +63,11 @@ export OPTUNA_STORAGE=${OPTUNA_STORAGE:-mysql+pymysql://evizuete:Ev1z43t3.00@10.
 
 ARTIFACT_DIR=artifacts/${RELEASE}/oof/${TAG}
 REPORTS_DIR=${ARTIFACT_DIR}/reports
-OUT_JSON=${OUT_JSON:-${REPORTS_DIR}/walkforward_report_cnn.json}
-OUT_CSV=${OUT_CSV:-${REPORTS_DIR}/walkforward_windows_cnn.csv}
+# Suffix por arch para no pisar reports si lanzas múltiples archs
+_ARCH_SUFFIX=""
+[ "${ARCH}" != "original_v3" ] && _ARCH_SUFFIX="_${ARCH}"
+OUT_JSON=${OUT_JSON:-${REPORTS_DIR}/walkforward_report_cnn${_ARCH_SUFFIX}.json}
+OUT_CSV=${OUT_CSV:-${REPORTS_DIR}/walkforward_windows_cnn${_ARCH_SUFFIX}.csv}
 
 log_section() { echo ""; echo "═══════════════════════════════════════════════════════════════"; echo "  $1"; echo "═══════════════════════════════════════════════════════════════"; }
 abort() { echo "❌ $1"; exit 1; }
@@ -59,6 +78,7 @@ echo "  CNN study:      ${CNN_STUDY}"
 echo "  Walk:           ${WALK_FROM} → ${WALK_TO}"
 echo "  Train/test/step:${TRAIN_MONTHS}m / ${TEST_MONTHS}m / ${STEP_MONTHS}m"
 echo "  Epochs/patience:${EPOCHS} / ${PATIENCE}"
+echo "  Arquitectura:   ${ARCH}"
 echo "  Output:         ${OUT_JSON}"
 
 log_section "1. Pre-checks"
@@ -86,6 +106,7 @@ python3 -m mimo.oof.main_oof_cnn_walkforward \
   --walk-from ${WALK_FROM} --walk-to ${WALK_TO} \
   --train-months ${TRAIN_MONTHS} --test-months ${TEST_MONTHS} --step-months ${STEP_MONTHS} \
   --epochs ${EPOCHS} --patience ${PATIENCE} \
+  --arch ${ARCH} \
   --cost-per-signal ${COST_PER_SIGNAL} --max-drawdown-R ${MAX_DD_R} \
   --min-signals-window 15 \
   --optuna-storage "${OPTUNA_STORAGE}" \
@@ -121,11 +142,17 @@ for side_key, side_label in (("summary_long", "LONG"), ("summary_short", "SHORT"
     print(f"    💰 R total:  {fnum(sm['R_total']):+.2f}R")
 EOF
 
-log_section "WALK-FORWARD CNN COMPLETADO"
+log_section "WALK-FORWARD CNN [${ARCH}] COMPLETADO"
 echo "  JSON:  ${OUT_JSON}"
 echo "  CSV:   ${OUT_CSV}"
 echo ""
-echo "📋 Para comparativa formal CNN vs GBM:"
-echo "   bash 007_long_only_simulator.sh \\"
+echo "📋 Para comparativa formal:"
+echo "   python3 -m mimo.oof.diag_long_only_simulator \\"
 echo "     --walkforward-json ${OUT_JSON} \\"
-echo "     --out-json ${REPORTS_DIR}/long_only_sim_cnn.json"
+echo "     --out-json ${REPORTS_DIR}/long_only_sim_cnn${_ARCH_SUFFIX}.json"
+echo ""
+echo "🚀 Para correr otras arquitecturas (mismo script):"
+echo "   ARCH=mlp         bash 010_walkforward_cnn.sh   # ~1-2h"
+echo "   ARCH=hybrid      bash 010_walkforward_cnn.sh   # ~5-8h"
+echo "   ARCH=tcn         bash 010_walkforward_cnn.sh   # ~7-10h"
+echo "   ARCH=transformer bash 010_walkforward_cnn.sh   # ~3-5h"
