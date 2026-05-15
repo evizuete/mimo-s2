@@ -22,8 +22,13 @@
 set -euo pipefail
 
 # ─── Configuración ─────────────────────────────────────────────────
-export RELEASE=${RELEASE:-202600_GBM}
-export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202500}
+# Default: 202602_GBM heredando barriers de 202601 (tp=2.0/sl=0.8) —
+# comparable apples-to-apples con la mejor release CNN actual.
+#
+# Para A/B sobre las barriers conservadoras de 202500 (tp=2.5/sl=1.5):
+#   RELEASE=202600_GBM INHERIT_FROM_RELEASE=202500 bash 001_hyperparams_tuning_gbm.sh
+export RELEASE=${RELEASE:-202602_GBM}
+export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202601}
 export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
 export SEED=${SEED:-47}
 export TRAIN_FROM=${TRAIN_FROM:-2024-01-01}

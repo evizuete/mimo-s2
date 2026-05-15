@@ -94,10 +94,56 @@ _DEFAULT_GBM_GRID: Dict[str, Any] = {
 
 GRID_GBM_BY_RELEASE: Dict[str, Dict[str, Any]] = {
     # 202600_GBM: primer espacio GBM para BTC/USD intraday 5min triple-barrier.
-    # Boundaries amplios; tras la primera corrida, refinamos como hicimos con
-    # CNN (lo que TPE explote → lo estrechamos).
+    # Hereda barriers de 202500 (tp=2.5/sl=1.5, ratio 1.67 — conservador).
+    # Espacio amplio inicial; tras la primera corrida, refinamos como hicimos
+    # con CNN (lo que TPE explote → lo estrechamos).
     "202600_GBM": {
         **_DEFAULT_GBM_GRID,
+    },
+
+    # 202602_GBM: track GBM sobre las MISMAS barriers que 202601 (CNN), para
+    # comparación apples-to-apples. Hereda tp=2.0/sl=0.8 (ratio 2.50 — agresivo
+    # pero alcanzable; mismo régimen-by-régimen) + VOL_INVARIANT + REDUCED.
+    # Lanzar con --inherit-config-from 202601.
+    #
+    # GRID LIGERAMENTE REFINADO vs 202600_GBM:
+    #   1) learning_rate techo bajado de 0.20 → 0.10. Con 130k filas y barriers
+    #      agresivas, lr>0.1 suele overfittear en boosting clásico.
+    #   2) max_depth: quitamos -1 (ilimitado). Con num_leaves grande + sin
+    #      límite de depth, los árboles se vuelven proxies de sobreajuste por
+    #      ruta. Mantenemos {6, 8, 12} como techo.
+    #   3) min_data_in_leaf: añadimos opción 800 para forzar generalización en
+    #      hojas. Con 130k filas y label_horizon=3, hay ~5-10k señales TP por
+    #      lado; pedir >=800 ejemplos por hoja garantiza ramas no triviales.
+    #   4) num_leaves: quitamos 127 (demasiada capacidad para 130k filas con
+    #      ~7% positive rate). Mantenemos {15, 31, 63} = rango más sano.
+    #   5) n_estimators: ampliamos a [200, 500, 1000, 1500]. Con lr más bajo,
+    #      necesitamos más rounds para converger; early stopping decide el
+    #      óptimo real en cada fold.
+    #   6) feature_fraction: rango idéntico (subsampling de columnas siempre
+    #      ayuda con ~80 features).
+    #
+    # NOTAS POST-CORRIDA (a completar tras primera tanda de trials):
+    #   · Si la mayoría de top trials concentran en num_leaves=15-31 → bajamos
+    #     a {7, 15, 31, 47} en 202603_GBM.
+    #   · Si min_data_in_leaf grandes (400-800) dominan → bajamos l1/l2.
+    #   · Si learning_rate explora bajo (0.01-0.03) → ampliamos n_estimators a
+    #     [1000, 2000, 3000] para dejar converger.
+    "202602_GBM": {
+        # Capacidad del árbol — más conservadora que 202600_GBM
+        "num_leaves":         [15, 31, 63],
+        "max_depth":          [6, 8, 12],
+        # Regularización — añadimos opción más fuerte
+        "min_data_in_leaf":   [50, 100, 200, 400, 800],
+        "feature_fraction":   {"low": 0.6, "high": 1.0, "step": 0.1},
+        "bagging_fraction":   {"low": 0.6, "high": 1.0, "step": 0.1},
+        "bagging_freq":       [0, 5, 10],
+        "lambda_l1":          {"low": 1e-8, "high": 1.0, "log": True},
+        "lambda_l2":          {"low": 1e-8, "high": 1.0, "log": True},
+        # Boosting — techo de LR más bajo, más rounds disponibles
+        "learning_rate":      {"low": 0.01, "high": 0.10, "log": True},
+        "n_estimators":       [200, 500, 1000, 1500],
+        "early_stopping_rounds": [30, 50, 80],
     },
 }
 
