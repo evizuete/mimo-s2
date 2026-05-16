@@ -39,15 +39,25 @@
 #   NO_ROLLING_SCALER=1        Deshabilita el RollingRobustScaler del pipeline
 #                              (data_pipeline_v2.py:90). Sin el flag, el pipeline
 #                              fittea el scaler muestreando con stride TODO el
-#                              train (línea 885-886 + rolling_scaler.py:212-216),
-#                              lo que produce look-ahead INTRA-TRAIN: la fila 0
-#                              se escala con stats de filas posteriores del mismo
-#                              train. NO afecta al test (que usa el scaler fitado),
-#                              pero contamina el aprendizaje. Con el flag, usa
-#                              sklearn RobustScaler estándar (fit sobre todo el
-#                              train sin sampling) — más lento (~+30s/ventana)
-#                              pero honest. Default 0 (legacy).
-#                              Recomendado en combinación con NO_LOOKAHEAD_SCANNER=1.
+#                              train, lo que produce look-ahead INTRA-TRAIN.
+#                              Con el flag, usa sklearn RobustScaler estándar
+#                              (fit sobre todo el train sin sampling) — honest
+#                              pero MISMATCH con prod (que sí usa rolling+update).
+#                              Default 0.
+#
+#   CAUSAL_SCALER=1            (RECOMENDADO sobre NO_ROLLING_SCALER) Activa el
+#                              fit causal del RollingRobustScaler: warmup con
+#                              primeras warmup_size filas + update secuencial
+#                              del resto del train en chunks de 128 filas. El
+#                              scaler final refleja stats de los últimos 2880
+#                              filas del train (mismo estado que tendría en
+#                              prod justo al cierre del train). Sin look-ahead
+#                              en el fit. CONSISTENTE con prod que sigue
+#                              actualizándose live cada barra. NOTA: las
+#                              transformaciones del train todavía usan stats
+#                              finales (no causal estricto por fila — sería
+#                              demasiado lento). Tiene precedencia sobre
+#                              NO_ROLLING_SCALER si ambos son 1. Default 0.
 
 set -euo pipefail
 
@@ -59,6 +69,7 @@ export NO_LOOKAHEAD_SCANNER=${NO_LOOKAHEAD_SCANNER:-0}
 export VAL_THR_MONTHS=${VAL_THR_MONTHS:-1}
 export CALIBRATION=${CALIBRATION:-}
 export NO_ROLLING_SCALER=${NO_ROLLING_SCALER:-0}
+export CAUSAL_SCALER=${CAUSAL_SCALER:-0}
 
 # Arquitectura: original_v3 | mlp | hybrid | transformer | tcn
 # Defaults razonables de epochs por arch:

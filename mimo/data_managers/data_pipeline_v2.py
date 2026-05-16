@@ -87,17 +87,35 @@ class DataPipeline:
         self.scalers = {}
         self.is_fitted = False
 
-        # use_rolling_scaler: si True, _fit_scaler_from_raw muestrea TODO el
-        # train con stride (data_pipeline_v2.py:885-886 + rolling_scaler.py:212-216,
-        # ambos hacen el mismo muestreo) → look-ahead INTRA-TRAIN (la fila 0 del
-        # train se escala con stats de filas 30000+). NO afecta al test (que usa
-        # el scaler fitado en train), pero contamina el aprendizaje y los val_auc
-        # de tuning. Para experimentos honest (NO_LOOKAHEAD_SCANNER=1), poner
-        # NO_ROLLING_SCALER=1 → usa sklearn RobustScaler estándar fitado sobre
-        # todo el train sin sampling. Default permanece True por compatibilidad.
+        # ── Configuración del scaler (varios modos seleccionables por env vars) ─
+        #
+        # MODO 1 (default, LEGACY): use_rolling_scaler=True + causal_scaler_fit=False
+        #   El fit muestrea TODO el train con stride (data_pipeline_v2.py:894-896
+        #   + rolling_scaler.py:212-216) → look-ahead INTRA-TRAIN. NO afecta al
+        #   test directamente, pero contamina el aprendizaje del modelo.
+        #
+        # MODO 2 (NO_ROLLING_SCALER=1): use_rolling_scaler=False
+        #   Usa sklearn RobustScaler estándar fit sobre todo el train sin sampling.
+        #   Sin look-ahead, pero MISMATCH con prod (que sí usa rolling+update).
+        #
+        # MODO 3 (CAUSAL_SCALER=1): use_rolling_scaler=True + causal_scaler_fit=True
+        #   Fit causal del rolling scaler: warmup con primeras warmup_size filas
+        #   + update secuencial del resto del train en chunks. El scaler queda
+        #   al final con stats que reflejan los últimos window_size filas (igual
+        #   estado que tendría en prod justo al cierre del train). Sin look-ahead
+        #   en el fit, y CONSISTENTE con prod que sigue actualizándose live.
+        #   Recomendado para experimentos honest desplegables. (Opción B)
+        #
+        # CAUSAL_SCALER tiene precedencia sobre NO_ROLLING_SCALER si ambos son 1.
         import os as _os
+        _causal     = _os.environ.get("CAUSAL_SCALER", "0") == "1"
         _no_rolling = _os.environ.get("NO_ROLLING_SCALER", "0") == "1"
-        self.use_rolling_scaler = not _no_rolling
+        if _causal:
+            self.use_rolling_scaler = True
+            self.causal_scaler_fit  = True
+        else:
+            self.use_rolling_scaler = not _no_rolling
+            self.causal_scaler_fit  = False
         self.scaler_window_size = 2880
         self.scaler_warmup_size = 390
         self.scaler_smooth_alpha = 0.1
@@ -888,19 +906,40 @@ class DataPipeline:
                 feature_names=list(feature_cols) if feature_cols is not None else None,
                 name=str(name),
             )
-            # El scaler solo necesita window_size=2880 filas representativas
-            # Las cogemos con stride para cubrir toda la distribución temporal
             n_rows = raw_data.shape[0]
-            if n_rows > self.scaler_window_size:
-                stride = max(1, n_rows // self.scaler_window_size)
-                sample = np.ascontiguousarray(raw_data[::stride][:self.scaler_window_size].astype(np.float32))
-            else:
-                sample = raw_data.astype(np.float32)
 
-            scaler.fit(sample)
-            del sample
-            progress = scaler.get_warmup_progress() * 100.0
-            print(f'\tScaler {name}: warmup {progress:.1f}%')
+            if self.causal_scaler_fit:
+                # Modo CAUSAL: warmup con primeras warmup_size filas + update
+                # secuencial del resto en chunks. Replica el régimen que tendría
+                # el scaler en producción justo al final del train (después de
+                # haber procesado todas las barras causalmente). No hay stride
+                # sobre todo el train → no hay look-ahead intra-train en el fit.
+                warmup_n = min(self.scaler_warmup_size, n_rows)
+                scaler.fit(raw_data[:warmup_n].astype(np.float32))
+                # Resto del train: update secuencial en chunks pequeños
+                # (chunk_size=128 mantiene buena dinámica rolling sin matar
+                # performance — recompute_every del scaler controla coste real).
+                if n_rows > warmup_n:
+                    chunk_size = 128
+                    for start in range(warmup_n, n_rows, chunk_size):
+                        end = min(start + chunk_size, n_rows)
+                        scaler.update(raw_data[start:end].astype(np.float32))
+                progress = scaler.get_warmup_progress() * 100.0
+                print(f'\tScaler {name}: causal fit warmup {progress:.1f}%')
+            else:
+                # Modo LEGACY: stride sobre todo el train → look-ahead intra-train
+                # (la fila 0 se escala con stats de filas posteriores del mismo
+                # train al transformarse después). Mantener solo por compatibilidad.
+                if n_rows > self.scaler_window_size:
+                    stride = max(1, n_rows // self.scaler_window_size)
+                    sample = np.ascontiguousarray(raw_data[::stride][:self.scaler_window_size].astype(np.float32))
+                else:
+                    sample = raw_data.astype(np.float32)
+
+                scaler.fit(sample)
+                del sample
+                progress = scaler.get_warmup_progress() * 100.0
+                print(f'\tScaler {name}: warmup {progress:.1f}%')
         else:
             from sklearn.preprocessing import RobustScaler
             scaler = RobustScaler(quantile_range=(25.0, 75.0))
