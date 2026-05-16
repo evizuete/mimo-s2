@@ -86,12 +86,12 @@ python3 -c "
 import optuna
 names = optuna.get_all_study_names(storage='${OPTUNA_STORAGE}')
 if '${CNN_STUDY}' not in names:
-    raise SystemExit(f'Study {${CNN_STUDY}!r} no existe en Optuna. '
-                     f'Studies disponibles que matchean: '
-                     f'{[n for n in names if \"${RELEASE}\" in n][:5]}')
+    matching = [n for n in names if '${RELEASE}' in n]
+    raise SystemExit(\"Study '${CNN_STUDY}' no existe en Optuna. \"
+                     f\"Studies con '${RELEASE}' en nombre: {matching[:10]}\")
 s = optuna.load_study(study_name='${CNN_STUDY}', storage='${OPTUNA_STORAGE}')
 n_done = sum(1 for t in s.trials if t.state.name == 'COMPLETE')
-print(f'✅ Study {${CNN_STUDY}!r} | {n_done} trials COMPLETE')
+print(f\"✅ Study '${CNN_STUDY}' | {n_done} trials COMPLETE\")
 " || abort "Pre-check fallido"
 
 mkdir -p "${REPORTS_DIR}"
