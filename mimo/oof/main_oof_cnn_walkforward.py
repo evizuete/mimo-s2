@@ -476,6 +476,21 @@ def _eval_predictions(
     else:
         thr_lo, thr_hi, n_thr = 0.05, 0.60, 80
 
+    # Robustez del scanner (opt-in, controlados por env vars):
+    #   THR_MIN_PREC: precision mínima exigida en val_internal para considerar
+    #                 un threshold candidato. Filtra "mínimos por suerte
+    #                 estadística" con pocas señales y prec inflado.
+    #   THR_SMOOTH_K: tamaño de kernel (vecinos por lado) para suavizar el
+    #                 score sobre el eje de thresholds antes de elegir el mejor.
+    try:
+        thr_min_prec = float(os.environ.get("THR_MIN_PREC", "0") or 0)
+    except ValueError:
+        thr_min_prec = 0.0
+    try:
+        thr_smooth_k = int(os.environ.get("THR_SMOOTH_K", "0") or 0)
+    except ValueError:
+        thr_smooth_k = 0
+
     def _one_side(proba_col: str, side_is_long: bool) -> Dict[str, Any]:
         if df_val_eval is None:
             # Modo estándar: scanner sobre test
@@ -485,6 +500,7 @@ def _eval_predictions(
                 cost_per_signal=cost_per_signal,
                 n_thr=n_thr, thr_lo=thr_lo, thr_hi=thr_hi,
                 min_signals=min_signals, max_drawdown_R=max_drawdown_R,
+                min_prec=thr_min_prec, smooth_k=thr_smooth_k,
             )
         # Modo sin look-ahead: scanner sobre val_internal
         # min_signals proporcional: val es ~1/12 de un mes test típico,
@@ -496,6 +512,7 @@ def _eval_predictions(
             cost_per_signal=cost_per_signal,
             n_thr=n_thr, thr_lo=thr_lo, thr_hi=thr_hi,
             min_signals=val_min_signals, max_drawdown_R=max_drawdown_R,
+            min_prec=thr_min_prec, smooth_k=thr_smooth_k,
         )
         chosen_thr = scan_res.get("thr")
         if chosen_thr is None or (isinstance(chosen_thr, float) and (np.isnan(chosen_thr) or not np.isfinite(chosen_thr))):
@@ -659,6 +676,11 @@ def main() -> None:
         print(f"   ⚠️  MODO ESTÁNDAR: threshold scanner sobre test (look-ahead). "
               f"Para producción usar NO_LOOKAHEAD_SCANNER=1.")
     print(f"   🎯 Calibración: {calibration}")
+    thr_min_prec_env = os.environ.get("THR_MIN_PREC", "0")
+    thr_smooth_k_env = os.environ.get("THR_SMOOTH_K", "0")
+    if float(thr_min_prec_env or 0) > 0 or int(thr_smooth_k_env or 0) > 0:
+        print(f"   🛡️  Scanner robustness: THR_MIN_PREC={thr_min_prec_env} "
+              f"THR_SMOOTH_K={thr_smooth_k_env}")
 
     # 4) OHLCV completo
     print(f"\n📊 Cargando OHLCV {earliest.date()} → {latest.date()}")

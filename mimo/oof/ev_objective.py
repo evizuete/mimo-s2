@@ -192,6 +192,8 @@ def compute_ev_at_best_threshold(
     min_signals: int = 100,
     max_drawdown_R: float = 30.0,
     drawdown_softness: float = 0.5,
+    min_prec: float = 0.0,
+    smooth_k: int = 0,
 ) -> Dict[str, float]:
     """
     Replays barreras sobre TODAS las filas con OOF, luego barre thresholds.
@@ -205,6 +207,14 @@ def compute_ev_at_best_threshold(
 
     Devuelve dict del mejor thr (max score) con todos los detalles.
     Requiere df_oof con columnas: time, high, low, close, atr, <proba_col>.
+
+    Robustez (opt-in):
+      min_prec : descarta thresholds con prec_TP < min_prec antes de rankear.
+                 Evita mínimos espurios donde pocas señales con suerte estadística
+                 inflan EV. Default 0.0 (off).
+      smooth_k : si >0, suaviza el score con una media móvil de tamaño
+                 (2*smooth_k+1) sobre el eje de thresholds. Reduce la varianza
+                 del óptimo al promediar vecinos. Default 0 (off).
     """
     needed = {"time", "high", "low", "close", "atr", proba_col}
     miss = needed - set(df_oof.columns)
@@ -235,10 +245,11 @@ def compute_ev_at_best_threshold(
     if valid.sum() < min_signals * 2:
         return _empty_result(reason="too_few_valid")
 
-    # Sweep thresholds
+    # Sweep thresholds — primero acumulamos por thr para permitir smoothing.
     thrs = np.linspace(thr_lo, thr_hi, n_thr)
-    best = None
-    for thr in thrs:
+    infos: list[Dict[str, float] | None] = [None] * len(thrs)
+    raw_scores = np.full(len(thrs), -np.inf, dtype=np.float64)
+    for i, thr in enumerate(thrs):
         pred = (p >= thr) & valid
         sig = int(pred.sum())
         if sig < min_signals:
@@ -269,7 +280,10 @@ def compute_ev_at_best_threshold(
         n_sl = int((sub_outcome == 1).sum())
         n_exp = int((sub_outcome == 2).sum())
         prec_tp = n_tp / sig
-        info = {
+        # Filtro de robustez: ignora thresholds con precision insuficiente.
+        if min_prec > 0.0 and prec_tp < min_prec:
+            continue
+        infos[i] = {
             "thr": float(thr),
             "score": float(score),
             "ev_net": float(ev_net),
@@ -285,9 +299,35 @@ def compute_ev_at_best_threshold(
             "frac_EXP": float(n_exp / sig),
             "total_R_net": float((sub_r - cost_per_signal).sum()),
         }
-        if best is None or score > best["score"]:
-            best = info
+        raw_scores[i] = score
 
+    # Suavizado del eje de scores: media móvil simétrica de 2*smooth_k+1 elementos
+    # contando sólo vecinos VÁLIDOS (raw_scores != -inf). El thr ganador es el que
+    # maximiza el score suavizado, pero las métricas reportadas son las RAW de ese
+    # thr (no las del kernel), para no distorsionar trazabilidad.
+    if smooth_k > 0 and np.isfinite(raw_scores).any():
+        smoothed = np.full_like(raw_scores, -np.inf)
+        for i in range(len(raw_scores)):
+            lo = max(0, i - smooth_k)
+            hi = min(len(raw_scores), i + smooth_k + 1)
+            window = raw_scores[lo:hi]
+            valid_w = window[np.isfinite(window)]
+            if len(valid_w) >= max(2, smooth_k):
+                smoothed[i] = float(valid_w.mean())
+        score_for_ranking = smoothed
+    else:
+        score_for_ranking = raw_scores
+
+    # Restringimos argmax a índices con infos válido (un thr puede haber sido
+    # filtrado por min_prec aunque sus vecinos sí pasen el filtro tras smoothing).
+    valid_mask = np.array([info is not None for info in infos], dtype=bool)
+    if not valid_mask.any() or not np.isfinite(score_for_ranking).any():
+        return _empty_result(reason="no_thr_with_min_signals")
+    masked_scores = np.where(valid_mask, score_for_ranking, -np.inf)
+    if not np.isfinite(masked_scores).any():
+        return _empty_result(reason="no_thr_with_min_signals")
+    best_i = int(np.argmax(masked_scores))
+    best = infos[best_i]
     if best is None:
         return _empty_result(reason="no_thr_with_min_signals")
     return best
