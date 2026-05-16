@@ -40,20 +40,19 @@ from optuna.samplers import TPESampler
 from dateutil.relativedelta import relativedelta
 
 # Reutilizamos toda la infra de carga de datos del walkforward existente
-from mimo.config.config import Config
 from mimo.features.feature_builder import FeatureConfig
-from mimo.states_manager.state_detector import StateConfig
-from mimo.models.model_builder import ModelConfig, TradingModel
+from mimo.models.model_builder import Config, ModelConfig, TradingModel
 from mimo.models.model_alternatives import build_model_by_arch
-from mimo.data.data_pipeline import DataPipeline
-from mimo.data.data_manager import DataManager
-from mimo.data.database import Database
+from mimo.states_manager.state_detector import StateConfig
+from mimo.data_managers.databases import Database
+from mimo.data_managers.data_manager import DataManager
+from mimo.data_managers.data_pipeline_v2 import DataPipeline
 from mimo.oof.main_oof_cnn_walkforward import (
     _get_barriers_for_release, _get_feature_masks_for_release,
     _tf_defaults, _VOL_INVARIANT_RELEASES, _REDUCED_FEATURES_RELEASES,
     _ULTRA_REDUCED_FEATURES_RELEASES,
 )
-from mimo.oof.tools_oof import (
+from mimo.oof.main_oof_regime_weights_v7 import (
     install_regime_weight_patch, resolve_regime_weights, set_global_seeds,
 )
 
