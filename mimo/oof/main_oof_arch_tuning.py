@@ -133,8 +133,10 @@ def _train_and_eval(
     epochs: int, patience: int, seed: int,
 ) -> float:
     """Entrena modelo con hp del trial sobre df_train, evalúa sobre df_val.
-    Devuelve avg val_auc_pr (long+short)/2. Si algo falla, devuelve -1.0."""
+    Devuelve avg val_auc_pr (long+short)/2. Si algo falla, devuelve -1.0
+    Y EMITE el traceback completo a stdout para diagnóstico."""
     import tensorflow as tf
+    import traceback as _tb
     tf.keras.utils.set_random_seed(int(seed))
 
     mc = _build_model_config(hp, epochs=epochs, patience=patience)
@@ -150,12 +152,19 @@ def _train_and_eval(
             df_train, sides=("long", "short"), fit_scalers=True, train=True,
         )
     except Exception as e:
-        print(f"      create_sequences_train failed: {e}")
+        print(f"      ❌ create_sequences_train failed: {e}")
+        print(_tb.format_exc())
         return -1.0
     pack_tr = seq_train.get("long") or {}
     X_tr = {k: pack_tr.get(k) for k in ("seq_short", "seq_long", "context", "time")}
     y_tr = pack_tr.get("labels")
     if y_tr is None or y_tr.ndim != 2:
+        print(f"      ❌ y_tr inválido: "
+              f"{'None' if y_tr is None else f'shape={y_tr.shape} ndim={y_tr.ndim}'}")
+        print(f"         pack_tr keys: {list(pack_tr.keys())}")
+        for k, v in X_tr.items():
+            print(f"         X_tr[{k!r}] shape: "
+                  f"{None if v is None else v.shape}")
         return -1.0
 
     # Sequences val
@@ -164,12 +173,15 @@ def _train_and_eval(
             df_val, sides=("long", "short"), fit_scalers=False, train=False,
         )
     except Exception as e:
-        print(f"      create_sequences_val failed: {e}")
+        print(f"      ❌ create_sequences_val failed: {e}")
+        print(_tb.format_exc())
         return -1.0
     pack_va = seq_val.get("long") or {}
     X_va = {k: pack_va.get(k) for k in ("seq_short", "seq_long", "context", "time")}
     y_va = pack_va.get("labels")
     if y_va is None or y_va.ndim != 2:
+        print(f"      ❌ y_va inválido: "
+              f"{'None' if y_va is None else f'shape={y_va.shape}'}")
         return -1.0
 
     # init_bias = logit del prior (clase positiva por side)
@@ -179,6 +191,8 @@ def _train_and_eval(
         "long":  float(np.log(pr_long  / (1 - pr_long))),
         "short": float(np.log(pr_short / (1 - pr_short))),
     }
+    print(f"      n_train={len(y_tr)} n_val={len(y_va)} "
+          f"pr_long={pr_long:.4f} pr_short={pr_short:.4f}")
 
     # Build modelo alternativo
     shape_short = X_tr["seq_short"].shape[1:]
@@ -186,12 +200,17 @@ def _train_and_eval(
     n_ctx       = int(X_tr["context"].shape[1])
     n_time      = int(X_tr["time"].shape[1])
 
-    model = TradingModel(general_config=general_config, model_config=mc, side=None)
-    model.model = build_model_by_arch(
-        arch, shape_short, shape_long, n_ctx, n_time,
-        mc, init_bias=init_bias,
-    )
-    model.compile_model()
+    try:
+        model = TradingModel(general_config=general_config, model_config=mc, side=None)
+        model.model = build_model_by_arch(
+            arch, shape_short, shape_long, n_ctx, n_time,
+            mc, init_bias=init_bias,
+        )
+        model.compile_model()
+    except Exception as e:
+        print(f"      ❌ build_or_compile failed: {e}")
+        print(_tb.format_exc())
+        return -1.0
 
     try:
         history = model.train(
@@ -201,13 +220,16 @@ def _train_and_eval(
             verbose=0,
         )
     except Exception as e:
-        print(f"      train failed: {e}")
+        print(f"      ❌ train failed: {e}")
+        print(_tb.format_exc())
         return -1.0
 
     # Score: avg max val AUC PR across epochs
     hk_long  = history.get("val_signal_long_auc_pr",  [])
     hk_short = history.get("val_signal_short_auc_pr", [])
     if not hk_long or not hk_short:
+        print(f"      ❌ val_auc_pr histórico vacío. "
+              f"history keys: {list(history.keys())}")
         return -1.0
     return float((max(hk_long) + max(hk_short)) / 2.0)
 
