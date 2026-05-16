@@ -259,7 +259,11 @@ def _train_and_predict_window(
         )
         best_iter = int(history.get("best_epoch", len(history.get("loss", [])) if isinstance(history, dict) else 0))
     except Exception as e:
-        return {"skipped": True, "reason": f"train_failed: {str(e)[:200]}"}
+        import traceback as _tb
+        _trace = _tb.format_exc()
+        print(f"    ❌ train_failed traceback:\n{_trace}")
+        return {"skipped": True, "reason": f"train_failed: {str(e)[:200]}",
+                "trace_tail": _trace[-1500:]}
 
     # Sequences test con fit_scalers=False
     try:
