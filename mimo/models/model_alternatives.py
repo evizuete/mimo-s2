@@ -9,6 +9,7 @@ compatibles con el pipeline existente:
 
 ARQUITECTURAS DISPONIBLES:
   · 'mlp'         → MLP-tabular puro (sequences colapsadas a stats)
+  · 'mlp_flatten' → MLP sobre sequences APLANADAS (conserva historial completo)
   · 'hybrid'      → Conv1D + GAP + MLP fuerte (sin LSTM)
   · 'transformer' → Transformer encoder ligero sobre seq_long + MLP
   · 'tcn'         → Temporal Convolutional Network (dilated convs)
@@ -154,6 +155,60 @@ def build_mlp_tabular(
     return Model(
         inputs=[inp_s, inp_l, inp_ctx, inp_t],
         outputs=outputs, name='mlp_tabular',
+    )
+
+
+# ─── A2: MLP-flatten — aplana secuencias en lugar de colapsar a stats ───
+
+def build_mlp_flatten(
+    shape_short, shape_long, n_context, n_time, model_config, init_bias=0.0,
+):
+    """Variante de build_mlp_tabular que CONSERVA la información temporal:
+    aplana seq_short (T_s, F_s) → (T_s*F_s) y seq_long análogamente, en lugar
+    de colapsar a mean/std/last. El MLP recibe el historial completo como
+    vector tabular plano y puede aprender qué timesteps usar.
+
+    Motivación: build_mlp_tabular destruye la dinámica temporal al reducir
+    cada secuencia a 3 stats; el GBM en cambio ve features tabulares planas
+    (último snapshot) y consigue +103R Sharpe 1.15 walkforward. Esta variante
+    da al MLP TODA la historia, no sólo stats agregadas ni el último valor.
+
+    Coste: dimensión del input aumenta de (3*F_s + 3*F_l) a (T_s*F_s + T_l*F_l)
+    — para shapes típicas (24,30)+(96,30) pasa de 180 a 3600 features. La
+    primera Dense con head_units=128 ⇒ ~460k parámetros, regularizable con
+    dropout/L2 estándar del config.
+    """
+    inp_s, inp_l, inp_ctx, inp_t = _make_inputs(
+        shape_short, shape_long, n_context, n_time)
+
+    flat_short = layers.Flatten(name='short_flat')(inp_s)
+    flat_long  = layers.Flatten(name='long_flat')(inp_l)
+    all_feat   = layers.Concatenate(name='all_features')([
+        flat_short, flat_long, inp_ctx, inp_t,
+    ])
+
+    l2 = float(getattr(model_config, 'l2_reg', 1e-5))
+    drop_d = float(getattr(model_config, 'dropout_dense', 0.2))
+    units = int(getattr(model_config, 'head_units', 128))
+
+    x = layers.Dense(units, activation='gelu',
+                     kernel_regularizer=regularizers.l2(l2),
+                     name='mlp_dense1')(all_feat)
+    x = layers.LayerNormalization(name='mlp_ln1')(x)
+    x = layers.Dropout(drop_d * 1.5, name='mlp_drop1')(x)
+    x = layers.Dense(units // 2, activation='gelu',
+                     kernel_regularizer=regularizers.l2(l2),
+                     name='mlp_dense2')(x)
+    x = layers.Dropout(drop_d, name='mlp_drop2')(x)
+    x = layers.Dense(max(units // 4, 16), activation='gelu',
+                     name='mlp_dense3')(x)
+
+    bias_l, bias_s = _parse_init_bias(init_bias)
+    outputs = _multitask_head(x, bias_l, bias_s)
+
+    return Model(
+        inputs=[inp_s, inp_l, inp_ctx, inp_t],
+        outputs=outputs, name='mlp_flatten',
     )
 
 
@@ -351,6 +406,7 @@ def build_tcn_mlp(
 
 ARCH_REGISTRY = {
     'mlp':         build_mlp_tabular,
+    'mlp_flatten': build_mlp_flatten,
     'hybrid':      build_hybrid_cnn_mlp,
     'transformer': build_transformer_lite,
     'tcn':         build_tcn_mlp,

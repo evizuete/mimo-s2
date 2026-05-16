@@ -591,10 +591,10 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--patience", type=int, default=8,
                     help="Early stopping patience.")
     ap.add_argument("--arch", default="original_v3",
-                    choices=("original_v3", "mlp", "hybrid", "transformer", "tcn"),
+                    choices=("original_v3", "mlp", "mlp_flatten", "hybrid", "transformer", "tcn"),
                     help="Arquitectura del modelo. original_v3 = CNN-LSTM jerárquico "
-                         "del proyecto. mlp/hybrid/transformer/tcn = alternativas de "
-                         "model_alternatives.py.")
+                         "del proyecto. mlp/mlp_flatten/hybrid/transformer/tcn = "
+                         "alternativas de model_alternatives.py.")
 
     ap.add_argument("--cost-per-signal", type=float, default=0.05)
     ap.add_argument("--max-drawdown-R", type=float, default=30.0)
