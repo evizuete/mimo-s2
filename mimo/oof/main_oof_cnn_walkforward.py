@@ -503,10 +503,30 @@ def _eval_predictions(
     long_smooth_k  = _i("THR_SMOOTH_K_LONG",  str(base_smooth_k))
     short_smooth_k = _i("THR_SMOOTH_K_SHORT", str(base_smooth_k))
 
+    # Scanner asimétrico por side: recortar df_val_eval a los últimos N meses
+    # contados desde el final de val (proxy de train_end). Útil cuando el modelo
+    # se entrena con VAL_THR_MONTHS grande pero queremos que el threshold scanner
+    # use ventanas distintas por side (e.g. long usa 1mo, short usa 3mo).
+    # Si no se setean, usa todo el df_val_eval disponible (comportamiento previo).
+    val_scan_m_long  = _i("VAL_SCAN_MONTHS_LONG",  "0")
+    val_scan_m_short = _i("VAL_SCAN_MONTHS_SHORT", "0")
+
+    def _val_eval_for_side(side_is_long: bool) -> Optional[pd.DataFrame]:
+        if df_val_eval is None:
+            return None
+        m = val_scan_m_long if side_is_long else val_scan_m_short
+        if m <= 0:
+            return df_val_eval
+        t_end = pd.Timestamp(df_val_eval["time"].max()) + pd.Timedelta(microseconds=1)
+        t_lo = t_end - relativedelta(months=int(m))
+        sub = df_val_eval.loc[df_val_eval["time"] >= t_lo]
+        return sub.reset_index(drop=True) if len(sub) >= 50 else df_val_eval
+
     def _one_side(proba_col: str, side_is_long: bool) -> Dict[str, Any]:
         side_min_prec = long_min_prec if side_is_long else short_min_prec
         side_smooth_k = long_smooth_k if side_is_long else short_smooth_k
-        if df_val_eval is None:
+        side_val_eval = _val_eval_for_side(side_is_long)
+        if side_val_eval is None:
             # Modo estándar: scanner sobre test
             return compute_ev_at_best_threshold(
                 df_eval, proba_col=proba_col, side_is_long=side_is_long,
@@ -516,12 +536,10 @@ def _eval_predictions(
                 min_signals=min_signals, max_drawdown_R=max_drawdown_R,
                 min_prec=side_min_prec, smooth_k=side_smooth_k,
             )
-        # Modo sin look-ahead: scanner sobre val_internal
-        # min_signals proporcional: val es ~1/12 de un mes test típico,
-        # bajamos el threshold de mínimo de señales coherentemente
+        # Modo sin look-ahead: scanner sobre val_internal (side-specific)
         val_min_signals = max(int(min_signals / 6), 10)
         scan_res = compute_ev_at_best_threshold(
-            df_val_eval, proba_col=proba_col, side_is_long=side_is_long,
+            side_val_eval, proba_col=proba_col, side_is_long=side_is_long,
             horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
             cost_per_signal=cost_per_signal,
             n_thr=n_thr, thr_lo=thr_lo, thr_hi=thr_hi,
@@ -701,6 +719,12 @@ def main() -> None:
         print(f"   🛡️  Scanner robustness: "
               f"long(min_prec={long_mp}, smooth_k={long_sk})  "
               f"short(min_prec={short_mp}, smooth_k={short_sk})")
+    vsm_long  = int(os.environ.get("VAL_SCAN_MONTHS_LONG",  "0") or 0)
+    vsm_short = int(os.environ.get("VAL_SCAN_MONTHS_SHORT", "0") or 0)
+    if vsm_long > 0 or vsm_short > 0:
+        print(f"   🪟 Scanner val ventana: "
+              f"long={vsm_long or val_thr_m}m  short={vsm_short or val_thr_m}m "
+              f"(modelo entrenado con VAL_THR_MONTHS={val_thr_m})")
 
     # 4) OHLCV completo
     print(f"\n📊 Cargando OHLCV {earliest.date()} → {latest.date()}")
