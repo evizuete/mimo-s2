@@ -287,6 +287,12 @@ def _build_argparser() -> argparse.ArgumentParser:
         "OPTUNA_STORAGE",
         "mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db",
     ))
+    ap.add_argument("--reset-study", action="store_true",
+                    help="Borra el study existente antes de crear uno nuevo. "
+                         "Útil cuando se cambia el espacio de búsqueda (HPs nuevos, "
+                         "rangos distintos) o se quiere empezar limpio sin trials "
+                         "previos contaminando el sampler. Usa optuna.delete_study() "
+                         "internamente; idempotente si el study no existe.")
     ap.add_argument("--out-dir", default=None,
                     help="Default: artifacts/<RELEASE>/oof/tuning")
     # resolve_regime_weights() los lee del Namespace; pasamos None por defecto
@@ -383,6 +389,15 @@ def main() -> None:
         raise SystemExit("❌ Splits insuficientes para tuning")
 
     # 4) Crear/cargar study
+    if args.reset_study:
+        try:
+            optuna.delete_study(study_name=study_name, storage=args.optuna_storage)
+            print(f"🗑️  Study previo '{study_name}' BORRADO (--reset-study)")
+        except KeyError:
+            print(f"🗑️  --reset-study: no había study previo con nombre '{study_name}' (OK)")
+        except Exception as e:
+            print(f"⚠️  --reset-study: error al borrar study previo: {e}")
+
     study = optuna.create_study(
         study_name=study_name, storage=args.optuna_storage,
         direction="maximize", load_if_exists=True,
