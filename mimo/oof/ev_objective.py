@@ -97,6 +97,86 @@ def _max_drawdown_R(r_signal_sorted: np.ndarray) -> float:
 # API principal — encuentra el threshold que maximiza EV_net y reporta métricas
 # -----------------------------------------------------------------------------
 
+def apply_fixed_threshold(
+    df_oof: pd.DataFrame,
+    *,
+    proba_col: str,
+    side_is_long: bool,
+    thr: float,
+    horizon: int,
+    tp_mult: float,
+    sl_mult: float,
+    cost_per_signal: float = 0.05,
+    min_signals: int = 1,
+) -> Dict[str, float]:
+    """
+    Aplica un threshold FIJO (sin scanning) a df_oof y devuelve las mismas
+    métricas que compute_ev_at_best_threshold pero sin look-ahead.
+
+    Usar cuando el threshold se eligió en un periodo PREVIO (val_internal)
+    y se quiere evaluar su performance OOS en otro periodo (test).
+
+    Devuelve dict con mismas keys que compute_ev_at_best_threshold.
+    Si no hay suficientes señales tras aplicar thr, devuelve _empty_result.
+    """
+    needed = {"time", "high", "low", "close", "atr", proba_col}
+    miss = needed - set(df_oof.columns)
+    if miss:
+        raise ValueError(f"df_oof falta columnas: {miss}")
+
+    mask = df_oof[proba_col].notna() & df_oof["atr"].notna() & (df_oof["atr"] > 0)
+    df = df_oof.loc[mask].reset_index(drop=False)
+    if len(df) < max(min_signals, 50):
+        return _empty_result(reason="too_few_rows_fixed_thr")
+
+    df = df.sort_values("time").reset_index(drop=True)
+    high  = df_oof["high"].to_numpy(dtype=np.float64)
+    low   = df_oof["low"].to_numpy(dtype=np.float64)
+    close = df_oof["close"].to_numpy(dtype=np.float64)
+    atr   = df_oof["atr"].to_numpy(dtype=np.float64)
+    orig_idx = df["index"].to_numpy(dtype=np.int64)
+    p = df[proba_col].to_numpy(dtype=np.float64)
+
+    outcome, r_real = _simulate_outcomes_for_indices(
+        orig_idx, high, low, close, atr,
+        horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
+        side_is_long=side_is_long,
+    )
+    valid = outcome != 3
+    pred = (p >= thr) & valid
+    sig = int(pred.sum())
+    if sig < min_signals:
+        return _empty_result(reason="too_few_signals_fixed_thr")
+
+    sub_r = r_real[pred]
+    sub_outcome = outcome[pred]
+    ev_gross = float(sub_r.mean())
+    ev_net   = ev_gross - cost_per_signal
+    mdd      = _max_drawdown_R(sub_r - cost_per_signal)
+
+    n_tp  = int((sub_outcome == 0).sum())
+    n_sl  = int((sub_outcome == 1).sum())
+    n_exp = int((sub_outcome == 2).sum())
+    prec_tp = n_tp / sig if sig > 0 else 0.0
+
+    return {
+        "thr":         float(thr),
+        "score":       float(ev_net),
+        "ev_net":      float(ev_net),
+        "ev_gross":    float(ev_gross),
+        "mdd_R":       float(mdd),
+        "penalty_mdd": 1.0,
+        "penalty_R":   0.0,
+        "sig_rate":    float(sig / len(p)),
+        "n_signals":   sig,
+        "n_TP":  n_tp, "n_SL": n_sl, "n_EXPIRE": n_exp,
+        "prec_TP":     float(prec_tp),
+        "frac_SL":     float(n_sl / sig),
+        "frac_EXP":    float(n_exp / sig),
+        "total_R_net": float((sub_r - cost_per_signal).sum()),
+    }
+
+
 def compute_ev_at_best_threshold(
     df_oof: pd.DataFrame,
     *,

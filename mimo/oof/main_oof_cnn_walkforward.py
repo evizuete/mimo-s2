@@ -172,11 +172,31 @@ def _train_and_predict_window(
     import tensorflow as tf
     tf.keras.utils.set_random_seed(int(seed))
 
+    # Modo sin look-ahead: reservar último mes del train como val_threshold.
+    # El threshold scanner se aplicará sobre val_threshold (no test), evitando
+    # la optimización post-hoc del threshold con datos futuros.
+    no_lookahead = os.environ.get("NO_LOOKAHEAD_SCANNER", "0") == "1"
+
     # Split por fecha
-    df_train = df_prepared.loc[
-        (df_prepared["time"] >= pd.Timestamp(train_start)) &
-        (df_prepared["time"] <  pd.Timestamp(train_end))
-    ].reset_index(drop=True)
+    if no_lookahead:
+        # train: [train_start, train_end - 1 mes]
+        # val_threshold: [train_end - 1 mes, train_end]
+        val_thr_start = pd.Timestamp(train_end) - relativedelta(months=1)
+        df_train = df_prepared.loc[
+            (df_prepared["time"] >= pd.Timestamp(train_start)) &
+            (df_prepared["time"] <  val_thr_start)
+        ].reset_index(drop=True)
+        df_val_thr = df_prepared.loc[
+            (df_prepared["time"] >= val_thr_start) &
+            (df_prepared["time"] <  pd.Timestamp(train_end))
+        ].reset_index(drop=True)
+    else:
+        df_train = df_prepared.loc[
+            (df_prepared["time"] >= pd.Timestamp(train_start)) &
+            (df_prepared["time"] <  pd.Timestamp(train_end))
+        ].reset_index(drop=True)
+        df_val_thr = None
+
     df_test = df_prepared.loc[
         (df_prepared["time"] >= pd.Timestamp(test_start)) &
         (df_prepared["time"] <  pd.Timestamp(test_end))
@@ -337,10 +357,53 @@ def _train_and_predict_window(
         "p_long_raw":  p_long,
         "p_short_raw": p_short,
     })
+    # ─── Modo sin look-ahead: predecir también sobre val_thr ───
+    df_val_eval = None
+    if no_lookahead and df_val_thr is not None and len(df_val_thr) >= L + 50:
+        try:
+            seq_val = pipeline.create_sequences_by_side(
+                df_val_thr, sides=("long", "short"),
+                fit_scalers=False, train=False,
+            )
+            pack_va = seq_val.get("long") or {}
+            Xv_seq_short = pack_va.get("seq_short"); Xv_seq_long = pack_va.get("seq_long")
+            Xv_context   = pack_va.get("context");   Xv_time     = pack_va.get("time")
+            if Xv_seq_long is not None and len(Xv_seq_long) > 0:
+                preds_val = model.model.predict(
+                    {"seq_short": Xv_seq_short, "seq_long": Xv_seq_long,
+                     "context":   Xv_context,   "time":     Xv_time},
+                    batch_size=int(model_config.batch_size), verbose=0,
+                )
+                if isinstance(preds_val, dict):
+                    pv_long  = np.asarray(preds_val["signal_long"]).reshape(-1).astype(np.float32)
+                    pv_short = np.asarray(preds_val["signal_short"]).reshape(-1).astype(np.float32)
+                    df_va_aligned = df_val_thr.iloc[context_offset:context_offset + len(pv_long)].reset_index(drop=True)
+                    if len(df_va_aligned) < len(pv_long):
+                        pv_long  = pv_long[:len(df_va_aligned)]
+                        pv_short = pv_short[:len(df_va_aligned)]
+                    df_val_eval = pd.DataFrame({
+                        "time": df_va_aligned["time"].values,
+                        "high": df_va_aligned["high"].astype(np.float64).values,
+                        "low":  df_va_aligned["low"].astype(np.float64).values,
+                        "close":df_va_aligned["close"].astype(np.float64).values,
+                        "atr":  df_va_aligned["atr"].astype(np.float64).values,
+                        "signal_long":  df_va_aligned["signal_long"].astype(np.int8).values
+                            if "signal_long" in df_va_aligned.columns else 0,
+                        "signal_short": df_va_aligned["signal_short"].astype(np.int8).values
+                            if "signal_short" in df_va_aligned.columns else 0,
+                        "p_long_raw":  pv_long,
+                        "p_short_raw": pv_short,
+                    })
+        except Exception as e:
+            print(f"    ⚠️  predict_val_thr_failed: {str(e)[:200]} → fallback al modo con look-ahead")
+            df_val_eval = None
+
     return {
         "skipped": False,
         "df_eval": df_eval,
+        "df_val_eval": df_val_eval,   # None si NO_LOOKAHEAD_SCANNER!=1 o si falló
         "n_train": len(df_train), "n_test": len(df_test),
+        "n_val_thr": (len(df_val_thr) if df_val_thr is not None else 0),
         "best_epoch": best_iter,
         "n_features_seq_long": X_seq_long.shape[-1],
         "n_features_context": X_context.shape[-1] if X_context is not None else 0,
@@ -351,27 +414,77 @@ def _eval_predictions(
     df_eval: pd.DataFrame, *, horizon: int, tp_mult: float, sl_mult: float,
     cost_per_signal: float, max_drawdown_R: float,
     min_signals: int, use_raw_probs: bool = True,
+    df_val_eval: Optional[pd.DataFrame] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Threshold scan por side sobre df_eval y devuelve (long_res, short_res)."""
+    """
+    Threshold scan por side y devuelve (long_res, short_res).
+
+    MODO ESTÁNDAR (df_val_eval=None): scanner sobre df_eval (test). Las
+    métricas reportadas son las del best threshold encontrado en test.
+    OJO: el threshold se eligió viendo outcomes futuros → look-ahead.
+
+    MODO SIN LOOK-AHEAD (df_val_eval != None): scanner sobre df_val_eval
+    (val_internal, último mes del train) para ELEGIR threshold. Luego se
+    APLICA ese threshold al df_eval (test) y se calculan métricas reales.
+    Adicionalmente, el dict resultante incluye una sub-key `scan_*` con
+    las métricas del scanner sobre val (útil para predecir performance).
+    """
     if use_raw_probs:
         thr_lo, thr_hi, n_thr = 0.05, 0.95, 180
     else:
         thr_lo, thr_hi, n_thr = 0.05, 0.60, 80
 
-    long_res = compute_ev_at_best_threshold(
-        df_eval, proba_col="p_long_raw", side_is_long=True,
-        horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
-        cost_per_signal=cost_per_signal,
-        n_thr=n_thr, thr_lo=thr_lo, thr_hi=thr_hi,
-        min_signals=min_signals, max_drawdown_R=max_drawdown_R,
-    )
-    short_res = compute_ev_at_best_threshold(
-        df_eval, proba_col="p_short_raw", side_is_long=False,
-        horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
-        cost_per_signal=cost_per_signal,
-        n_thr=n_thr, thr_lo=thr_lo, thr_hi=thr_hi,
-        min_signals=min_signals, max_drawdown_R=max_drawdown_R,
-    )
+    def _one_side(proba_col: str, side_is_long: bool) -> Dict[str, Any]:
+        if df_val_eval is None:
+            # Modo estándar: scanner sobre test
+            return compute_ev_at_best_threshold(
+                df_eval, proba_col=proba_col, side_is_long=side_is_long,
+                horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
+                cost_per_signal=cost_per_signal,
+                n_thr=n_thr, thr_lo=thr_lo, thr_hi=thr_hi,
+                min_signals=min_signals, max_drawdown_R=max_drawdown_R,
+            )
+        # Modo sin look-ahead: scanner sobre val_internal
+        # min_signals proporcional: val es ~1/12 de un mes test típico,
+        # bajamos el threshold de mínimo de señales coherentemente
+        val_min_signals = max(int(min_signals / 6), 10)
+        scan_res = compute_ev_at_best_threshold(
+            df_val_eval, proba_col=proba_col, side_is_long=side_is_long,
+            horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
+            cost_per_signal=cost_per_signal,
+            n_thr=n_thr, thr_lo=thr_lo, thr_hi=thr_hi,
+            min_signals=val_min_signals, max_drawdown_R=max_drawdown_R,
+        )
+        chosen_thr = scan_res.get("thr")
+        if chosen_thr is None or (isinstance(chosen_thr, float) and (np.isnan(chosen_thr) or not np.isfinite(chosen_thr))):
+            # Scanner no encontró threshold válido en val → no operar en test
+            from mimo.oof.ev_objective import _empty_result
+            empty = _empty_result(reason="no_valid_thr_in_val")
+            empty["scan"] = scan_res
+            return empty
+        # Aplicar threshold elegido al test
+        from mimo.oof.ev_objective import apply_fixed_threshold
+        test_res = apply_fixed_threshold(
+            df_eval, proba_col=proba_col, side_is_long=side_is_long,
+            thr=float(chosen_thr),
+            horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
+            cost_per_signal=cost_per_signal,
+            min_signals=1,  # ya tenemos thr, no exigimos volumen mínimo en test
+        )
+        # Adjuntar las métricas del scanner para trazabilidad y filtros
+        test_res["scan"] = {
+            "thr":         scan_res.get("thr"),
+            "score":       scan_res.get("score"),
+            "ev_net":      scan_res.get("ev_net"),
+            "ev_gross":    scan_res.get("ev_gross"),
+            "prec_TP":     scan_res.get("prec_TP"),
+            "n_signals":   scan_res.get("n_signals"),
+            "sig_rate":    scan_res.get("sig_rate"),
+        }
+        return test_res
+
+    long_res  = _one_side("p_long_raw",  side_is_long=True)
+    short_res = _one_side("p_short_raw", side_is_long=False)
     return long_res, short_res
 
 
@@ -384,6 +497,7 @@ def _json_safe(d: Dict[str, Any]) -> Dict[str, Any]:
             out[k] = None if (np.isnan(fv) or np.isinf(fv)) else fv
         elif isinstance(v, (np.integer, int)): out[k] = int(v)
         elif isinstance(v, np.ndarray): out[k] = v.tolist()
+        elif isinstance(v, dict): out[k] = _json_safe(v)  # recursivo para sub-dicts (ej. 'scan')
         else: out[k] = v
     return out
 
@@ -493,6 +607,14 @@ def main() -> None:
           f"test={args.test_months}m step={args.step_months}m  "
           f"({args.walk_from.date()} → {args.walk_to.date()})")
 
+    no_lookahead = os.environ.get("NO_LOOKAHEAD_SCANNER", "0") == "1"
+    if no_lookahead:
+        print(f"   🔬 MODO SIN LOOK-AHEAD: threshold scanner usa val_internal "
+              f"(último mes del train), no test. Métricas reales del test reportadas.")
+    else:
+        print(f"   ⚠️  MODO ESTÁNDAR: threshold scanner usa test (look-ahead). "
+              f"Para producción usar NO_LOOKAHEAD_SCANNER=1.")
+
     # 4) OHLCV completo
     print(f"\n📊 Cargando OHLCV {earliest.date()} → {latest.date()}")
     db = Database()
@@ -574,13 +696,15 @@ def main() -> None:
             })
             continue
 
-        df_eval = tr_out["df_eval"]
+        df_eval     = tr_out["df_eval"]
+        df_val_eval = tr_out.get("df_val_eval")
         long_res, short_res = _eval_predictions(
             df_eval, horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
             cost_per_signal=args.cost_per_signal,
             max_drawdown_R=args.max_drawdown_R,
             min_signals=args.min_signals_window,
             use_raw_probs=True,   # raw probs + threshold scan
+            df_val_eval=df_val_eval,  # None salvo NO_LOOKAHEAD_SCANNER=1
         )
 
         dt_sec = time.time() - t0
@@ -600,10 +724,12 @@ def main() -> None:
             "window": [str(ts.date()), str(te.date()),
                        str(vs.date()), str(ve.date())],
             "n_train": tr_out["n_train"], "n_test": tr_out["n_test"],
+            "n_val_thr": tr_out.get("n_val_thr", 0),
             "best_epoch": tr_out.get("best_epoch"),
             "skipped": False,
             "long":  _json_safe(long_res),
             "short": _json_safe(short_res),
+            "no_lookahead": (df_val_eval is not None),
         })
 
     # 8) Summary

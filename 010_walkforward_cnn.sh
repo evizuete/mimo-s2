@@ -18,6 +18,14 @@
 # USO:
 #   bash 010_walkforward_cnn.sh
 #   RELEASE=202500 CNN_STUDY=oof_study_202500_multitask bash 010_walkforward_cnn.sh
+#
+# FLAGS de variabilidad:
+#   COST_PER_SIGNAL=0.10       Cost por señal usado en threshold scanner.
+#   NO_LOOKAHEAD_SCANNER=1     Threshold scanner sobre val_internal (último
+#                              mes del train), NO sobre test. Elimina el
+#                              look-ahead implícito en el scanner. Recomendado
+#                              para validar antes de despliegue en producción.
+#                              Default 0 (modo legacy con look-ahead).
 
 set -euo pipefail
 
@@ -25,6 +33,7 @@ export RELEASE=${RELEASE:-202500}
 export CNN_STUDY=${CNN_STUDY:-oof_study_${RELEASE}_multitask}
 export TAG=${TAG:-deploy_2026_04_combined_specialists_seed47}
 export SEED=${SEED:-47}
+export NO_LOOKAHEAD_SCANNER=${NO_LOOKAHEAD_SCANNER:-0}
 
 # Arquitectura: original_v3 | mlp | hybrid | transformer | tcn
 # Defaults razonables de epochs por arch:
