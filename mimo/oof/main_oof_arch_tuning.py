@@ -93,29 +93,37 @@ def _suggest_hp(trial: optuna.Trial, arch: str) -> Dict[str, Any]:
         }
         return hp
 
-    # TCN v2: espacio ampliado (HP estándar + estructurales). Nunca se tuneó
-    # antes, así que partimos limpio. Estructurales clave: kernel_size,
-    # n_tcn_blocks_long (define receptive field con dilations 2^i), pooling.
-    # Mismo patrón de retorno temprano que mlp_flatten para que el bloque
-    # genérico de abajo no contamine el espacio.
+    # TCN v3: ampliación de bordes basada en los HPs que el TPE empujó al
+    # extremo en v2 (study oof_study_202500_tcn_multitask, 20 trials,
+    # best_value=0.143). Bordes detectados:
+    #   focal_alpha_long  → 0.591 (techo v2 0.60)        → v3 [0.30, 0.80]
+    #   focal_alpha_short → 0.678 (techo v2 0.70)        → v3 [0.30, 0.85]
+    #   focal_gamma       → 0.508 (suelo v2 0.50)        → v3 [0.10, 2.5]
+    #   conv1d_filters    → 128 (techo v2 128)           → v3 [32..256]
+    #   learning_rate     → 4.7e-3 (cerca techo v2 5e-3) → v3 [3e-4, 1e-2]
+    #   dropout_seq       → 0.064 (cerca suelo v2 0.05)  → v3 [0.03, 0.30]
+    #
+    # IMPORTANTE: el rango de learning_rate cambia (no es superconjunto), así
+    # que NO reuses el study v2 — lanza con STUDY_NAME diferente:
+    #   STUDY_NAME=oof_study_202500_tcn_v3_multitask bash 012_optuna_arch.sh tcn
     if arch == "tcn":
         hp = {
             "l2_reg":             trial.suggest_float("l2_reg", 1e-7, 1e-3, log=True),
-            "dropout_dense":      trial.suggest_float("dropout_dense", 0.10, 0.50),
-            "dropout_seq":        trial.suggest_float("dropout_seq", 0.05, 0.40),
-            "learning_rate":      trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
+            "dropout_dense":      trial.suggest_float("dropout_dense", 0.05, 0.40),
+            "dropout_seq":        trial.suggest_float("dropout_seq", 0.03, 0.30),
+            "learning_rate":      trial.suggest_float("learning_rate", 3e-4, 1e-2, log=True),
             "batch_size":         trial.suggest_categorical("batch_size",
                                                             [128, 256, 512, 1024]),
             "head_units":         trial.suggest_categorical("head_units",
-                                                            [64, 128, 256, 512]),
-            "focal_alpha_long":   trial.suggest_float("focal_alpha_long", 0.20, 0.60),
-            "focal_alpha_short":  trial.suggest_float("focal_alpha_short", 0.20, 0.70),
-            "focal_gamma":        trial.suggest_float("focal_gamma", 0.5, 3.0),
+                                                            [64, 128, 192, 256, 384, 512]),
+            "focal_alpha_long":   trial.suggest_float("focal_alpha_long", 0.30, 0.80),
+            "focal_alpha_short":  trial.suggest_float("focal_alpha_short", 0.30, 0.85),
+            "focal_gamma":        trial.suggest_float("focal_gamma", 0.10, 2.5),
             "activation":         trial.suggest_categorical("activation",
                                                             ["gelu", "relu", "swish", "elu"]),
-            "loss_weight_short":  trial.suggest_float("loss_weight_short", 0.5, 2.0),
+            "loss_weight_short":  trial.suggest_float("loss_weight_short", 0.5, 2.5),
             "conv1d_filters":     trial.suggest_categorical("conv1d_filters",
-                                                            [16, 32, 48, 64, 96, 128]),
+                                                            [32, 48, 64, 96, 128, 192, 256]),
             # Estructurales
             "kernel_size":        trial.suggest_categorical("kernel_size", [3, 5, 7]),
             "n_tcn_blocks_long":  trial.suggest_int("n_tcn_blocks_long", 3, 6),

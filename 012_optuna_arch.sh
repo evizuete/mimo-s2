@@ -53,7 +53,9 @@ export PATIENCE=${PATIENCE:-4}
 
 export OPTUNA_STORAGE=${OPTUNA_STORAGE:-mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db}
 
-STUDY_NAME="oof_study_${RELEASE}_${ARCH}_multitask"
+# STUDY_NAME override permite separar espacios HP incompatibles (p.ej. tcn v2
+# vs v3 donde el rango de learning_rate cambia). Default = nombre canónico del arch.
+STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}_multitask"}
 
 log_section() { echo ""; echo "═══════════════════════════════════════════════════════════════"; echo "  $1"; echo "═══════════════════════════════════════════════════════════════"; }
 
