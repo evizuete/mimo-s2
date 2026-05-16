@@ -168,9 +168,12 @@ def _train_and_eval(
         return -1.0
 
     # Sequences val
+    # IMPORTANTE: train=True para que extraiga labels (train=False → labels=None
+    # porque el pipeline asume modo inferencia). fit_scalers=False mantiene
+    # los scalers ya fitted en el paso anterior.
     try:
         seq_val = pipeline.create_sequences_by_side(
-            df_val, sides=("long", "short"), fit_scalers=False, train=False,
+            df_val, sides=("long", "short"), fit_scalers=False, train=True,
         )
     except Exception as e:
         print(f"      ❌ create_sequences_val failed: {e}")
