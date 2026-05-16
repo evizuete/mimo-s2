@@ -101,37 +101,60 @@ def _load_best_params_from_study(study_name: str, storage: str) -> Tuple[Dict[st
 
 def _model_config_from_params(params: Dict[str, Any], *, target_type: str = "multitask",
                               epochs: int = 40, patience: int = 8) -> ModelConfig:
-    """Construye un ModelConfig desde los best params del Optuna trial."""
-    mc = ModelConfig(
-        seq_len_short=int(params.get("seq_len_short", 24)),
-        seq_len_long=int(params.get("seq_len_long", 96)),
-        epochs=int(epochs),
-        patience=int(patience),
-        target_type=target_type,
-        # Capacidad
-        conv1d_filters=int(params.get("conv1d_filters", 64)),
-        lstm_units=int(params.get("lstm_units", 64)),
-        context_units=int(params.get("context_units", 32)),
-        head_units=int(params.get("head_units", 64)),
-        time_units=int(params.get("time_units", 16)),
-        # Regularización
-        dropout_seq=float(params.get("dropout_seq", 0.05)),
-        dropout_lstm=float(params.get("dropout_lstm", 0.1)),
-        dropout_dense=float(params.get("dropout_dense", 0.1)),
-        l2_reg=float(params.get("l2_reg", 1e-5)),
-        # Optimizer
-        learning_rate=float(params.get("learning_rate", 5e-4)),
-        batch_size=int(params.get("batch_size", 2048)),
-        # Loss
-        focal_gamma=float(params.get("focal_gamma", 1.0)),
-        focal_alpha_long=float(params.get("focal_alpha_long", 0.30)),
-        focal_alpha_short=float(params.get("focal_alpha_short", 0.30)),
-        loss_weight_long=float(params.get("loss_weight_long", 1.0)),
-        loss_weight_short=float(params.get("loss_weight_short", 1.0)),
-        ranking_loss_weight=float(params.get("ranking_loss_weight", 0.0)),
-        # Arch
-        use_hierarchical_fusion=bool(params.get("use_hierarchical_fusion", True)),
-    )
+    """Construye un ModelConfig desde los best params del Optuna trial.
+
+    Robusto a evolución del schema: si el trial guardó keys que ya no son
+    campos del dataclass (p.ej. focal_alpha_long/short cuando ModelConfig
+    solo tiene focal_alpha único), las pasamos vía setattr y emitimos warning
+    en lugar de crashear el constructor."""
+    import dataclasses
+    valid_fields = {f.name for f in dataclasses.fields(ModelConfig)}
+
+    # Defaults explícitos sobre params (params del trial sobreescriben defaults)
+    candidate = {
+        "seq_len_short": int(params.get("seq_len_short", 24)),
+        "seq_len_long":  int(params.get("seq_len_long", 96)),
+        "epochs":        int(epochs),
+        "patience":      int(patience),
+        "target_type":   target_type,
+        "conv1d_filters": int(params.get("conv1d_filters", 64)),
+        "lstm_units":     int(params.get("lstm_units", 64)),
+        "context_units":  int(params.get("context_units", 32)),
+        "head_units":     int(params.get("head_units", 64)),
+        "time_units":     int(params.get("time_units", 16)),
+        "dropout_seq":    float(params.get("dropout_seq", 0.05)),
+        "dropout_lstm":   float(params.get("dropout_lstm", 0.1)),
+        "dropout_dense":  float(params.get("dropout_dense", 0.1)),
+        "l2_reg":         float(params.get("l2_reg", 1e-5)),
+        "learning_rate":  float(params.get("learning_rate", 5e-4)),
+        "batch_size":     int(params.get("batch_size", 2048)),
+        "focal_gamma":    float(params.get("focal_gamma", 1.0)),
+        # focal_alpha único: si el trial guardó _long/_short separados,
+        # promediamos como mejor approximation para el campo único.
+        "focal_alpha":    float(
+            params.get("focal_alpha",
+                       (float(params.get("focal_alpha_long", 0.30))
+                        + float(params.get("focal_alpha_short", 0.30))) / 2.0)),
+        "loss_weight_long":  float(params.get("loss_weight_long", 1.0)),
+        "loss_weight_short": float(params.get("loss_weight_short", 1.0)),
+        "ranking_loss_weight": float(params.get("ranking_loss_weight", 0.0)),
+        "use_hierarchical_fusion": bool(params.get("use_hierarchical_fusion", True)),
+    }
+
+    # Filtrar a campos válidos del dataclass (silenciosamente ignora los no reconocidos)
+    init_kwargs = {k: v for k, v in candidate.items() if k in valid_fields}
+    dropped = [k for k in candidate if k not in valid_fields]
+    if dropped:
+        print(f"   ⚠️ Params no soportados por ModelConfig (ignorados): {dropped}")
+
+    mc = ModelConfig(**init_kwargs)
+
+    # Atributos no-init (consumidos por compile_model vía getattr) — set
+    # también los de _long/_short por si compile_model los lee directos.
+    for k in ("focal_alpha_long", "focal_alpha_short"):
+        if k in params:
+            setattr(mc, k, float(params[k]))
+
     return mc
 
 
