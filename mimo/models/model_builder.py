@@ -86,6 +86,12 @@ class ModelConfig:
     loss_weight_long: float = 1.0
     loss_weight_short: float = 1.0
 
+    # Activación de las capas Dense del MLP (gelu | relu | swish | elu).
+    # Solo lo leen las archs que invocan get_activation() del model_config
+    # (actualmente: mlp_flatten). Las archs legacy (mlp, hybrid, etc.)
+    # ignoran este campo y usan 'gelu' hardcoded para mantener compat.
+    activation: str = 'gelu'
+
 class TradingModel:
     """Modelo de deep learning con arquitectura multi-scale"""
 

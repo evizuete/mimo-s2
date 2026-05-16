@@ -64,20 +64,32 @@ def _suggest_hp(trial: optuna.Trial, arch: str) -> Dict[str, Any]:
     optimizer, regularización) + específicos según arch (filters, conv, etc.)."""
 
     # mlp_flatten ve un input ~20x mayor que mlp_tabular (~3600 vs 180 dim)
-    # por aplanar las secuencias en lugar de colapsarlas a stats. El espacio
-    # de regularización y capacidad se desplaza hacia valores más agresivos
-    # para evitar overfitting de la primera Dense (~head_units * 3600 params).
+    # por aplanar las secuencias en lugar de colapsarlas a stats.
+    #
+    # Espacio v2 (post run 30-trial inicial que dio best_value=0.144 con
+    # l2_reg, batch_size, head_units todos en el suelo del rango y
+    # focal_alpha_short cerca del techo): ampliamos los suelos y añadimos
+    # HPs nuevos para dar más libertad al TPE.
+    #   · l2_reg: suelo 1e-7 (vs 1e-5) — el TPE pidió aún menos regularización.
+    #   · batch_size: añadir {64, 128}; quitar {2048, 4096} (nunca elegidos).
+    #   · head_units: quitar 64 (nunca elegido); mantener {128, 256, 512}.
+    #   · focal_alpha_short: ampliar techo a 0.70.
+    #   · activation: NUEVO — categorical {gelu, relu, swish, elu}.
+    #   · loss_weight_short: NUEVO — float [0.5, 2.0]. loss_weight_long ancla a 1.0.
     if arch == "mlp_flatten":
         hp = {
-            "l2_reg":             trial.suggest_float("l2_reg", 1e-5, 1e-1, log=True),
+            "l2_reg":             trial.suggest_float("l2_reg", 1e-7, 1e-3, log=True),
             "dropout_dense":      trial.suggest_float("dropout_dense", 0.20, 0.60),
             "learning_rate":      trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
             "batch_size":         trial.suggest_categorical("batch_size",
-                                                            [256, 512, 1024, 2048, 4096]),
-            "head_units":         trial.suggest_categorical("head_units", [64, 128, 256, 512]),
+                                                            [64, 128, 256, 512, 1024]),
+            "head_units":         trial.suggest_categorical("head_units", [128, 256, 512]),
             "focal_alpha_long":   trial.suggest_float("focal_alpha_long", 0.20, 0.60),
-            "focal_alpha_short":  trial.suggest_float("focal_alpha_short", 0.20, 0.60),
+            "focal_alpha_short":  trial.suggest_float("focal_alpha_short", 0.20, 0.70),
             "focal_gamma":        trial.suggest_float("focal_gamma", 0.5, 3.0),
+            "activation":         trial.suggest_categorical("activation",
+                                                            ["gelu", "relu", "swish", "elu"]),
+            "loss_weight_short":  trial.suggest_float("loss_weight_short", 0.5, 2.0),
         }
         return hp
 

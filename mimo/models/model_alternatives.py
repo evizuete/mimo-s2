@@ -190,17 +190,22 @@ def build_mlp_flatten(
     l2 = float(getattr(model_config, 'l2_reg', 1e-5))
     drop_d = float(getattr(model_config, 'dropout_dense', 0.2))
     units = int(getattr(model_config, 'head_units', 128))
+    act = str(getattr(model_config, 'activation', 'gelu')).lower()
+    # swish viene como nombre 'swish' (tf.keras.activations.swish), válido en
+    # Keras 2.4+. Mapeo defensivo por si alguien pasa 'silu' (alias PyTorch).
+    if act == 'silu':
+        act = 'swish'
 
-    x = layers.Dense(units, activation='gelu',
+    x = layers.Dense(units, activation=act,
                      kernel_regularizer=regularizers.l2(l2),
                      name='mlp_dense1')(all_feat)
     x = layers.LayerNormalization(name='mlp_ln1')(x)
     x = layers.Dropout(drop_d * 1.5, name='mlp_drop1')(x)
-    x = layers.Dense(units // 2, activation='gelu',
+    x = layers.Dense(units // 2, activation=act,
                      kernel_regularizer=regularizers.l2(l2),
                      name='mlp_dense2')(x)
     x = layers.Dropout(drop_d, name='mlp_drop2')(x)
-    x = layers.Dense(max(units // 4, 16), activation='gelu',
+    x = layers.Dense(max(units // 4, 16), activation=act,
                      name='mlp_dense3')(x)
 
     bias_l, bias_s = _parse_init_bias(init_bias)

@@ -139,6 +139,8 @@ def _model_config_from_params(params: Dict[str, Any], *, target_type: str = "mul
         "loss_weight_short": float(params.get("loss_weight_short", 1.0)),
         "ranking_loss_weight": float(params.get("ranking_loss_weight", 0.0)),
         "use_hierarchical_fusion": bool(params.get("use_hierarchical_fusion", True)),
+        # mlp_flatten lo lee; otras archs ignoran (gelu hardcoded)
+        "activation":     str(params.get("activation", "gelu")),
     }
 
     # Filtrar a campos válidos del dataclass (silenciosamente ignora los no reconocidos)
