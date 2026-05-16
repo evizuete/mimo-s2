@@ -349,23 +349,37 @@ def build_tcn_mlp(
     shape_short, shape_long, n_context, n_time, model_config, init_bias=0.0,
 ):
     """Temporal Convolutional Network (dilated convs con residual blocks)
-    sobre ambas secuencias + MLP sobre context+time."""
+    sobre ambas secuencias + MLP sobre context+time.
+
+    HPs estructurales expuestos (vía model_config / setattr extras):
+      · activation          ∈ {gelu, relu, swish, elu}   default 'gelu'
+      · kernel_size         ∈ {3, 5, 7}                  default 3
+      · n_tcn_blocks_long   ∈ {3..6} (dilations 2^i)     default 5
+      · tcn_pooling         ∈ {gap, gmp, gap_gmp}        default 'gap'
+      · conv1d_filters      categórico                   default 32
+      · dropout_seq/dense, l2_reg, head_units            ya existentes
+    """
     inp_s, inp_l, inp_ctx, inp_t = _make_inputs(
         shape_short, shape_long, n_context, n_time)
 
-    l2 = float(getattr(model_config, 'l2_reg', 1e-5))
+    l2       = float(getattr(model_config, 'l2_reg', 1e-5))
     drop_seq = float(getattr(model_config, 'dropout_seq', 0.1))
     drop_d   = float(getattr(model_config, 'dropout_dense', 0.2))
-    filters  = max(int(getattr(model_config, 'conv1d_filters', 32)), 32)
+    filters  = max(int(getattr(model_config, 'conv1d_filters', 32)), 16)
+    act      = str(getattr(model_config, 'activation', 'gelu')).lower()
+    ksize    = int(getattr(model_config, 'kernel_size', 3))
+    n_long   = int(getattr(model_config, 'n_tcn_blocks_long', 5))
+    n_short  = min(3, max(2, n_long - 2))  # derivado: seq_short=24 << seq_long=96
+    pooling  = str(getattr(model_config, 'tcn_pooling', 'gap')).lower()
 
     def _tcn_block(x, dilation, filt, name):
         residual = x
-        x = layers.Conv1D(filt, 3, dilation_rate=dilation, padding='causal',
-                          activation='gelu', kernel_regularizer=regularizers.l2(l2),
+        x = layers.Conv1D(filt, ksize, dilation_rate=dilation, padding='causal',
+                          activation=act, kernel_regularizer=regularizers.l2(l2),
                           name=f'{name}_c1')(x)
         x = layers.Dropout(drop_seq, name=f'{name}_d1')(x)
-        x = layers.Conv1D(filt, 3, dilation_rate=dilation, padding='causal',
-                          activation='gelu', kernel_regularizer=regularizers.l2(l2),
+        x = layers.Conv1D(filt, ksize, dilation_rate=dilation, padding='causal',
+                          activation=act, kernel_regularizer=regularizers.l2(l2),
                           name=f'{name}_c2')(x)
         x = layers.Dropout(drop_seq, name=f'{name}_d2')(x)
         if int(residual.shape[-1]) != filt:
@@ -375,20 +389,29 @@ def build_tcn_mlp(
         x = layers.LayerNormalization(name=f'{name}_norm')(x)
         return x
 
-    # TCN seq_long: receptive field 1+2+4+8+16 → 31 con kernel=3 (cubre seq_long=96)
-    s = inp_l
-    for i, d in enumerate([1, 2, 4, 8, 16]):
-        s = _tcn_block(s, d, filters, f'tcn_l{i}')
-    s_long = layers.GlobalAveragePooling1D(name='long_gap')(s)
+    def _pool(seq, name_prefix: str):
+        if pooling == 'gmp':
+            return layers.GlobalMaxPooling1D(name=f'{name_prefix}_gmp')(seq)
+        if pooling == 'gap_gmp':
+            gap = layers.GlobalAveragePooling1D(name=f'{name_prefix}_gap')(seq)
+            gmp = layers.GlobalMaxPooling1D(name=f'{name_prefix}_gmp')(seq)
+            return layers.Concatenate(name=f'{name_prefix}_pool')([gap, gmp])
+        return layers.GlobalAveragePooling1D(name=f'{name_prefix}_gap')(seq)
 
-    # TCN seq_short: receptive field 1+2+4 → 7 (cubre seq_short=24)
+    # TCN seq_long: dilations [1, 2, 4, ..., 2^(n_long-1)]
+    s = inp_l
+    for i in range(n_long):
+        s = _tcn_block(s, 2 ** i, filters, f'tcn_l{i}')
+    s_long = _pool(s, 'long')
+
+    # TCN seq_short: dilations [1, 2, 4, ..., 2^(n_short-1)]
     s = inp_s
-    for i, d in enumerate([1, 2, 4]):
-        s = _tcn_block(s, d, max(filters // 2, 16), f'tcn_s{i}')
-    s_short = layers.GlobalAveragePooling1D(name='short_gap')(s)
+    for i in range(n_short):
+        s = _tcn_block(s, 2 ** i, max(filters // 2, 16), f'tcn_s{i}')
+    s_short = _pool(s, 'short')
 
     c = layers.Concatenate(name='ctx_time')([inp_ctx, inp_t])
-    c = layers.Dense(64, activation='gelu',
+    c = layers.Dense(64, activation=act,
                      kernel_regularizer=regularizers.l2(l2),
                      name='ctx_dense')(c)
     c = layers.LayerNormalization(name='ctx_ln')(c)
@@ -396,7 +419,7 @@ def build_tcn_mlp(
 
     head_units = int(getattr(model_config, 'head_units', 64))
     x = layers.Concatenate(name='fusion')([s_short, s_long, c])
-    x = layers.Dense(head_units, activation='gelu', name='head_dense')(x)
+    x = layers.Dense(head_units, activation=act, name='head_dense')(x)
     x = layers.Dropout(drop_d, name='head_drop')(x)
 
     bias_l, bias_s = _parse_init_bias(init_bias)

@@ -93,6 +93,37 @@ def _suggest_hp(trial: optuna.Trial, arch: str) -> Dict[str, Any]:
         }
         return hp
 
+    # TCN v2: espacio ampliado (HP estándar + estructurales). Nunca se tuneó
+    # antes, así que partimos limpio. Estructurales clave: kernel_size,
+    # n_tcn_blocks_long (define receptive field con dilations 2^i), pooling.
+    # Mismo patrón de retorno temprano que mlp_flatten para que el bloque
+    # genérico de abajo no contamine el espacio.
+    if arch == "tcn":
+        hp = {
+            "l2_reg":             trial.suggest_float("l2_reg", 1e-7, 1e-3, log=True),
+            "dropout_dense":      trial.suggest_float("dropout_dense", 0.10, 0.50),
+            "dropout_seq":        trial.suggest_float("dropout_seq", 0.05, 0.40),
+            "learning_rate":      trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
+            "batch_size":         trial.suggest_categorical("batch_size",
+                                                            [128, 256, 512, 1024]),
+            "head_units":         trial.suggest_categorical("head_units",
+                                                            [64, 128, 256, 512]),
+            "focal_alpha_long":   trial.suggest_float("focal_alpha_long", 0.20, 0.60),
+            "focal_alpha_short":  trial.suggest_float("focal_alpha_short", 0.20, 0.70),
+            "focal_gamma":        trial.suggest_float("focal_gamma", 0.5, 3.0),
+            "activation":         trial.suggest_categorical("activation",
+                                                            ["gelu", "relu", "swish", "elu"]),
+            "loss_weight_short":  trial.suggest_float("loss_weight_short", 0.5, 2.0),
+            "conv1d_filters":     trial.suggest_categorical("conv1d_filters",
+                                                            [16, 32, 48, 64, 96, 128]),
+            # Estructurales
+            "kernel_size":        trial.suggest_categorical("kernel_size", [3, 5, 7]),
+            "n_tcn_blocks_long":  trial.suggest_int("n_tcn_blocks_long", 3, 6),
+            "tcn_pooling":        trial.suggest_categorical("tcn_pooling",
+                                                            ["gap", "gmp", "gap_gmp"]),
+        }
+        return hp
+
     hp = {
         # Optimizer + regularización (todos los archs)
         "l2_reg":             trial.suggest_float("l2_reg", 1e-6, 1e-2, log=True),
@@ -153,6 +184,12 @@ def _build_model_config(hp: Dict[str, Any], epochs: int, patience: int,
     # Adjunto _long/_short como atributos por si compile_model los lee
     setattr(mc, "focal_alpha_long",  fa_l)
     setattr(mc, "focal_alpha_short", fa_s)
+    # HPs extra que NO están en el dataclass pero los lee algún builder via
+    # getattr (p.ej. TCN: kernel_size, n_tcn_blocks_long, tcn_pooling).
+    EXTRA_HP_KEYS = ("kernel_size", "n_tcn_blocks_long", "tcn_pooling")
+    for k in EXTRA_HP_KEYS:
+        if k in candidate:
+            setattr(mc, k, candidate[k])
     return mc
 
 
