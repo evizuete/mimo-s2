@@ -365,10 +365,15 @@ def analyze(wf: Dict[str, Any],
 
     filters = {
         "BASELINE (sin filtro)":            lambda sd: True,
-        "Filter: score > 0":                lambda sd: (sd.get("score") or -999) > 0,
-        "Filter: prec_TP >= 0.22":          lambda sd: (sd.get("prec_TP") or 0) >= 0.22,
-        "Filter: score > 0 AND prec >= 0.22": lambda sd: (sd.get("score") or -999) > 0 and (sd.get("prec_TP") or 0) >= 0.22,
-        "Filter: thr >= 0.42 (hard floor)": lambda sd: (sd.get("thr") or 0) >= 0.42,
+        # IMPORTANTE: todos los filtros se aplican sobre sd["scan"] (métricas
+        # del scanner en val_thr, ex-ante), NUNCA sobre sd top-level (que son
+        # métricas del test, ex-post → look-ahead bias). El campo "scan" lo
+        # guarda main_oof_cnn_walkforward._one_side para trazabilidad y para
+        # poder filtrar honestamente en producción.
+        "Filter: scan.score > 0":              lambda sd: (((sd or {}).get("scan") or {}).get("score") or -999) > 0,
+        "Filter: scan.prec_TP >= 0.22":        lambda sd: (((sd or {}).get("scan") or {}).get("prec_TP") or 0) >= 0.22,
+        "Filter: scan.score > 0 AND scan.prec >= 0.22": lambda sd: ((((sd or {}).get("scan") or {}).get("score") or -999) > 0) and ((((sd or {}).get("scan") or {}).get("prec_TP") or 0) >= 0.22),
+        "Filter: scan.thr >= 0.42 (hard floor)": lambda sd: (((sd or {}).get("scan") or {}).get("thr") or 0) >= 0.42,
     }
 
     for side in ("long", "short", "combined"):
