@@ -245,6 +245,10 @@ def _build_argparser() -> argparse.ArgumentParser:
     ))
     ap.add_argument("--out-dir", default=None,
                     help="Default: artifacts/<RELEASE>/oof/tuning")
+    # resolve_regime_weights() los lee del Namespace; pasamos None por defecto
+    # (mismo comportamiento que el walkforward).
+    ap.add_argument("--regime-weights-long-json", default=None)
+    ap.add_argument("--regime-weights-short-json", default=None)
     return ap
 
 
