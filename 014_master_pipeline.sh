@@ -72,6 +72,10 @@ TUNE_TRIALS=${TUNE_TRIALS:-30}
 COSTS_BASELINE=0.05
 COSTS_STRESS=(0.10 0.15)
 
+# Position sizing para traducción monetaria
+INITIAL_CAPITAL=${INITIAL_CAPITAL:-10000}    # EUR
+RISK_PER_TRADE_PCT=${RISK_PER_TRADE_PCT:-1}  # % capital arriesgado por trade
+
 # Flags de control
 FORCE_RETUNE=${FORCE_RETUNE:-0}    # 1=borrar studies existentes y re-tune
 SKIP_TUNE=${SKIP_TUNE:-0}          # 1=saltar tune, usar studies existentes
@@ -183,6 +187,8 @@ for ARCH in ${ARCHS_TO_TUNE}; do
   python3 -m mimo.oof.diag_long_only_simulator \
     --walkforward-json "${WF_JSON}" \
     --out-json "${SIM_JSON}" \
+    --initial-capital "${INITIAL_CAPITAL}" \
+    --risk-per-trade-pct "${RISK_PER_TRADE_PCT}" \
     || echo "⚠️  Simulator falló para ${ARCH}"
 done
 
@@ -360,8 +366,52 @@ if winner:
                   f"{_fmt(d.get('profit_factor'), '{:6.1f}')}")
         print()
 
+# ─── Tabla 3: traducción monetaria ───
+init_cap = ${INITIAL_CAPITAL}
+risk_pct = ${RISK_PER_TRADE_PCT}
+print(f"\n  TABLA 3 — Equivalencia monetaria  (capital inicial={init_cap:,.0f}€, riesgo/trade={risk_pct:.2f}% → 1R={init_cap*risk_pct/100:,.2f}€)")
+print(f"  {'─' * 100}")
+print(f"  {'Arch':<14} {'Cost':>5} {'Strat':<10} | {'%  LIN':>8} | {'EUR LIN':>11} | {'Final LIN':>11} | "
+      f"{'% COMP':>7} | {'EUR COMP':>11} | {'Final COMP':>11}")
+print(f"  {'─' * 100}")
+
+# Para el ganador, mostrar 3 costs. Para los demás archs, sólo baseline.
+table3_rows = []
+if winner:
+    for cost in all_costs:
+        table3_rows.append((winner, cost))
+for arch in archs:
+    if arch != winner:
+        table3_rows.append((arch, cost_baseline))
+
+for arch, cost in table3_rows:
+    sim = _load_sim(arch, cost)
+    if not sim: continue
+    money = sim.get("money_equivalence", {})
+    for strat_key, strat_label in [("long_only", "LONG"),
+                                     ("short_only", "SHORT"),
+                                     ("combined", "COMBINED")]:
+        m = money.get(strat_key, {})
+        if not m:
+            continue
+        lin = m.get("linear", {})
+        comp = m.get("compound", {})
+        ruined = comp.get("ruined", False)
+        comp_pct = "RUINED" if ruined else (f"{comp.get('pct_total', 0):+7.1f}%" if comp.get('pct_total') is not None else "  n/a")
+        comp_eur = "  n/a" if ruined else (f"{comp.get('eur_total', 0):+11,.0f}€" if comp.get('eur_total') is not None else "  n/a")
+        comp_fin = "  n/a" if ruined else (f"{comp.get('final_capital', 0):11,.0f}€" if comp.get('final_capital') is not None else "  n/a")
+        print(f"  {arch:<14} {cost:>5} {strat_label:<10} | "
+              f"{lin.get('pct_total', 0):+7.1f}% | "
+              f"{lin.get('eur_total', 0):+10,.0f}€ | "
+              f"{lin.get('final_capital', 0):10,.0f}€ | "
+              f"{comp_pct:>7} | {comp_eur:>11} | {comp_fin:>11}")
+    print()
+
 # ─── Referencias ───
 print(f"\n  REFERENCIA: GBM baseline LONG-only ~ R=+103R  Sharpe~1.15")
+print(f"             → {init_cap*risk_pct/100*103:,.0f}€ LIN (+{103*risk_pct:.1f}%)")
+print(f"  Nota:  LIN = position sizing fijo sobre capital INICIAL (sin compounding)")
+print(f"        COMP = position sizing fijo sobre capital ACTUAL (con compounding)")
 print("═" * 105)
 EOF
 

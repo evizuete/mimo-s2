@@ -31,6 +31,10 @@ export SEED=${SEED:-47}
 export TAG=${TAG:-deploy_2026_04_combined_specialists_seed47}
 export OPTUNA_STORAGE=${OPTUNA_STORAGE:-mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db}
 
+# Position sizing para traducción monetaria
+INITIAL_CAPITAL=${INITIAL_CAPITAL:-10000}
+RISK_PER_TRADE_PCT=${RISK_PER_TRADE_PCT:-1}
+
 ARTIFACT_DIR=artifacts/${RELEASE}/oof/${TAG}
 REPORTS_DIR=${ARTIFACT_DIR}/reports
 STUDY_NAME="oof_study_${RELEASE}_mlp_multitask"
@@ -126,7 +130,10 @@ for COST in 0.05 0.10 0.15; do
 
   python3 -m mimo.oof.diag_long_only_simulator \
     --walkforward-json "${WF_JSON}" \
-    --out-json "${SIM_JSON}" || echo "⚠️  Simulator falló para cost=${COST}"
+    --out-json "${SIM_JSON}" \
+    --initial-capital "${INITIAL_CAPITAL}" \
+    --risk-per-trade-pct "${RISK_PER_TRADE_PCT}" \
+    || echo "⚠️  Simulator falló para cost=${COST}"
 done
 
 # ═══ Tabla comparativa final ══════════════════════════════════════════════

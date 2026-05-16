@@ -45,6 +45,81 @@ def _fnum(v, d=float("nan")):
     return d if v is None else float(v)
 
 
+def _money_equivalence(returns: np.ndarray,
+                       *,
+                       initial_capital: float,
+                       risk_per_trade_pct: float) -> Dict[str, Any]:
+    """
+    Convierte una secuencia de R/ventana a equivalentes monetarios.
+
+    Dos modelos de position sizing:
+      · LINEAL (fixed fractional sobre CAPITAL INICIAL):
+        cada R vale (initial_capital × risk_pct), constante.
+        capital_final = initial × (1 + risk_pct × R_total)
+      · COMPOUND (fixed fractional sobre CAPITAL ACTUAL):
+        cada R_i se aplica como factor (1 + risk_pct × R_i).
+        capital_final = initial × ∏(1 + risk_pct × R_i)
+
+    El método LINEAL es más conservador y suele usarse en backtests
+    académicos. El COMPOUND refleja mejor la realidad de reinvertir
+    profits pero amplifica drawdowns (y picos).
+    """
+    r = np.asarray([x for x in returns if x is not None and not math.isnan(float(x))],
+                   dtype=np.float64)
+    if len(r) == 0 or initial_capital <= 0 or risk_per_trade_pct <= 0:
+        return {}
+
+    risk_frac = risk_per_trade_pct / 100.0
+    r_total = float(r.sum())
+    r_per_eur = initial_capital * risk_frac  # 1R = X €
+
+    # ─── LINEAL (no compound) ───
+    pct_total_linear = r_total * risk_per_trade_pct
+    eur_total_linear = r_total * r_per_eur
+    final_capital_linear = initial_capital + eur_total_linear
+
+    # ─── COMPOUND ───
+    # Cualquier R_i ≤ -1/risk_frac arruina al trader (ej. risk=1% → R_i ≤ -100)
+    # En la práctica esto no ocurre en estos walkforwards.
+    growth_factors = 1.0 + risk_frac * r
+    if (growth_factors <= 0).any():
+        # Trader liquidado en algún punto: NaN
+        pct_total_compound = float("nan")
+        eur_total_compound = float("nan")
+        final_capital_compound = float("nan")
+    else:
+        compound_factor = float(np.prod(growth_factors))
+        final_capital_compound = initial_capital * compound_factor
+        eur_total_compound = final_capital_compound - initial_capital
+        pct_total_compound = (compound_factor - 1.0) * 100.0
+
+    # ─── Drawdown monetario (sobre cumsum lineal) ───
+    cumsum = np.cumsum(r)
+    running_max = np.maximum.accumulate(np.concatenate(([0.0], cumsum)))[1:]
+    max_dd_R = float((running_max - cumsum).max()) if len(cumsum) > 0 else 0.0
+    max_dd_eur_linear = max_dd_R * r_per_eur
+    max_dd_pct_linear = max_dd_R * risk_per_trade_pct
+
+    return {
+        "initial_capital_eur": float(initial_capital),
+        "risk_per_trade_pct":  float(risk_per_trade_pct),
+        "r_value_eur":         float(r_per_eur),
+        "linear": {
+            "pct_total":      float(pct_total_linear),
+            "eur_total":      float(eur_total_linear),
+            "final_capital":  float(final_capital_linear),
+            "max_dd_pct":     float(max_dd_pct_linear),
+            "max_dd_eur":     float(max_dd_eur_linear),
+        },
+        "compound": {
+            "pct_total":      float(pct_total_compound) if not math.isnan(pct_total_compound) else None,
+            "eur_total":      float(eur_total_compound) if not math.isnan(eur_total_compound) else None,
+            "final_capital":  float(final_capital_compound) if not math.isnan(final_capital_compound) else None,
+            "ruined":         bool(math.isnan(pct_total_compound)),
+        },
+    }
+
+
 def _compute_metrics(returns: np.ndarray, *, periods_per_year: int = 12) -> Dict[str, Any]:
     """Métricas de una secuencia de retornos por ventana (no NaN)."""
     r = np.asarray([x for x in returns if x is not None and not math.isnan(float(x))],
@@ -209,6 +284,10 @@ def main() -> None:
                     help="Anualización factor. test_months=1 → 12. Si "
                          "test_months=3, usar 4. Etc.")
     ap.add_argument("--out-json", default=None)
+    ap.add_argument("--initial-capital", type=float, default=10000.0,
+                    help="Capital inicial en EUR para traducción monetaria. Default 10000€.")
+    ap.add_argument("--risk-per-trade-pct", type=float, default=1.0,
+                    help="Porcentaje del capital arriesgado por trade (1R). Default 1%%.")
     args = ap.parse_args()
 
     print(f"📂 Cargando {args.walkforward_json}")
@@ -252,6 +331,11 @@ def main() -> None:
     m_comb  = _compute_metrics(np.array(combined_R), periods_per_year=pp)
     per_strat = {"LONG-only": m_long, "SHORT-only": m_short, "COMBINED L+S": m_comb}
 
+    # Equivalencia monetaria
+    money_long  = _money_equivalence(np.array(long_R),     initial_capital=args.initial_capital, risk_per_trade_pct=args.risk_per_trade_pct)
+    money_short = _money_equivalence(np.array(short_R),    initial_capital=args.initial_capital, risk_per_trade_pct=args.risk_per_trade_pct)
+    money_comb  = _money_equivalence(np.array(combined_R), initial_capital=args.initial_capital, risk_per_trade_pct=args.risk_per_trade_pct)
+
     # Comparative table
     print("\n" + "═" * 75)
     print("  TABLA COMPARATIVA DE ESTRATEGIAS")
@@ -264,6 +348,33 @@ def main() -> None:
     print("═" * 75)
     for label, m in per_strat.items():
         print(f"  {label:<14} : {_verdict(m)}")
+
+    # ─── Equivalencia monetaria ───
+    print("\n" + "═" * 95)
+    print(f"  EQUIVALENCIA MONETARIA  (capital inicial = {args.initial_capital:,.0f}€, "
+          f"riesgo/trade = {args.risk_per_trade_pct:.2f}% → 1R = {args.initial_capital * args.risk_per_trade_pct / 100:,.2f}€)")
+    print("═" * 95)
+    print(f"  {'Estrategia':<14} | {'R total':>9} | "
+          f"{'%  LIN':>8} | {'EUR LIN':>11} | {'Final LIN':>11} | "
+          f"{'%  COMP':>8} | {'EUR COMP':>11} | {'Final COMP':>11} | "
+          f"{'MaxDD %':>7} | {'MaxDD €':>9}")
+    print("  " + "─" * 130)
+    for label, met, money in (("LONG-only", m_long, money_long),
+                               ("SHORT-only", m_short, money_short),
+                               ("COMBINED",   m_comb,  money_comb)):
+        if not money:
+            print(f"  {label:<14} | sin datos")
+            continue
+        lin = money["linear"]; comp = money["compound"]
+        comp_pct_str = "RUINED" if comp.get("ruined") else (f"{comp['pct_total']:+8.2f}%" if comp.get('pct_total') is not None else "  n/a")
+        comp_eur_str = "    n/a   " if comp.get("ruined") else (f"{comp['eur_total']:+11,.0f}€" if comp.get('eur_total') is not None else "    n/a   ")
+        comp_fin_str = "    n/a   " if comp.get("ruined") else (f"{comp['final_capital']:11,.0f}€" if comp.get('final_capital') is not None else "    n/a   ")
+        print(f"  {label:<14} | {met['R_total']:+8.2f}R | "
+              f"{lin['pct_total']:+7.2f}% | {lin['eur_total']:+10,.0f}€ | {lin['final_capital']:10,.0f}€ | "
+              f"{comp_pct_str:>8} | {comp_eur_str:>11} | {comp_fin_str:>11} | "
+              f"{lin['max_dd_pct']:6.2f}% | {lin['max_dd_eur']:8,.0f}€")
+    print(f"\n  Nota: LIN = position sizing fijo sobre capital inicial (conservador, sin compounding)")
+    print(f"        COMP = position sizing fijo sobre capital actual (compounding, refleja realidad)")
 
     # Equity curves (only LONG-only — the candidate)
     _print_equity_curve_ascii(m_long, "LONG-only")
@@ -284,6 +395,11 @@ def main() -> None:
             "long_only":   _verdict(m_long),
             "short_only":  _verdict(m_short),
             "combined":    _verdict(m_comb),
+        },
+        "money_equivalence": {
+            "long_only":   money_long,
+            "short_only":  money_short,
+            "combined":    money_comb,
         },
     }
     out_json = args.out_json or str(Path(args.walkforward_json).parent / "long_only_sim.json")
