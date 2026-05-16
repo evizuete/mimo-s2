@@ -179,9 +179,10 @@ def _train_and_predict_window(
 
     # Split por fecha
     if no_lookahead:
-        # train: [train_start, train_end - 1 mes]
-        # val_threshold: [train_end - 1 mes, train_end]
-        val_thr_start = pd.Timestamp(train_end) - relativedelta(months=1)
+        # train: [train_start, train_end - VAL_THR_MONTHS]
+        # val_threshold: [train_end - VAL_THR_MONTHS, train_end]
+        val_thr_months = int(os.environ.get("VAL_THR_MONTHS", "1"))
+        val_thr_start = pd.Timestamp(train_end) - relativedelta(months=val_thr_months)
         df_train = df_prepared.loc[
             (df_prepared["time"] >= pd.Timestamp(train_start)) &
             (df_prepared["time"] <  val_thr_start)
@@ -298,6 +299,35 @@ def _train_and_predict_window(
         return {"skipped": True, "reason": f"train_failed: {str(e)[:200]}",
                 "trace_tail": _trace[-1500:]}
 
+    # ─── Calibración isotónica (opt-in: CALIBRATION=isotonic) ───
+    # Entrena IsotonicRegression sobre las probas crudas de X_va (10% del train
+    # reservado para early-stop) usando los labels reales. Las probas dejan de
+    # ser "scores" y pasan a ser frecuencias relativas calibradas, lo que
+    # estabiliza el threshold scanner entre val_internal y test.
+    calibrator = os.environ.get("CALIBRATION", "").lower()
+    iso_long = iso_short = None
+    if calibrator == "isotonic":
+        try:
+            from sklearn.isotonic import IsotonicRegression
+            preds_cal = model.model.predict(
+                X_va,
+                batch_size=int(model_config.batch_size), verbose=0,
+            )
+            if isinstance(preds_cal, dict):
+                pcal_long  = np.asarray(preds_cal["signal_long"]).reshape(-1).astype(np.float64)
+                pcal_short = np.asarray(preds_cal["signal_short"]).reshape(-1).astype(np.float64)
+                y_long_cal  = y_va[:, 0].astype(np.float64)
+                y_short_cal = y_va[:, 1].astype(np.float64) if y_va.shape[1] >= 2 else None
+                if len(pcal_long) >= 200 and y_long_cal.sum() >= 5:
+                    iso_long = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip").fit(pcal_long, y_long_cal)
+                if y_short_cal is not None and y_short_cal.sum() >= 5:
+                    iso_short = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip").fit(pcal_short, y_short_cal)
+                print(f"    🎯 calibration: iso_long={'✓' if iso_long else '✗'} iso_short={'✓' if iso_short else '✗'}")
+            else:
+                print(f"    ⚠️  calibration: preds_cal tipo inesperado, skip")
+        except Exception as e:
+            print(f"    ⚠️  calibration_failed: {str(e)[:200]} → fallback sin calibración")
+
     # Sequences test con fit_scalers=False
     try:
         seq_test = pipeline.create_sequences_by_side(
@@ -330,6 +360,11 @@ def _train_and_predict_window(
         if len(p_long) != len(p_short):
             return {"skipped": True,
                     "reason": f"preds longitud inconsistente: long={len(p_long)} short={len(p_short)}"}
+        # Aplicar calibración isotónica si se entrenó
+        if iso_long is not None:
+            p_long = iso_long.transform(p_long.astype(np.float64)).astype(np.float32)
+        if iso_short is not None:
+            p_short = iso_short.transform(p_short.astype(np.float64)).astype(np.float32)
     except Exception as e:
         import traceback as _tb
         print(f"    ❌ predict_failed traceback:\n{_tb.format_exc()}")
@@ -377,6 +412,11 @@ def _train_and_predict_window(
                 if isinstance(preds_val, dict):
                     pv_long  = np.asarray(preds_val["signal_long"]).reshape(-1).astype(np.float32)
                     pv_short = np.asarray(preds_val["signal_short"]).reshape(-1).astype(np.float32)
+                    # Aplicar calibración isotónica si está disponible
+                    if iso_long is not None:
+                        pv_long = iso_long.transform(pv_long.astype(np.float64)).astype(np.float32)
+                    if iso_short is not None:
+                        pv_short = iso_short.transform(pv_short.astype(np.float64)).astype(np.float32)
                     df_va_aligned = df_val_thr.iloc[context_offset:context_offset + len(pv_long)].reset_index(drop=True)
                     if len(df_va_aligned) < len(pv_long):
                         pv_long  = pv_long[:len(df_va_aligned)]
@@ -608,12 +648,15 @@ def main() -> None:
           f"({args.walk_from.date()} → {args.walk_to.date()})")
 
     no_lookahead = os.environ.get("NO_LOOKAHEAD_SCANNER", "0") == "1"
+    val_thr_m   = int(os.environ.get("VAL_THR_MONTHS", "1"))
+    calibration = os.environ.get("CALIBRATION", "").lower() or "none"
     if no_lookahead:
-        print(f"   🔬 MODO SIN LOOK-AHEAD: threshold scanner usa val_internal "
-              f"(último mes del train), no test. Métricas reales del test reportadas.")
+        print(f"   🔬 MODO SIN LOOK-AHEAD: threshold scanner sobre val_internal "
+              f"({val_thr_m}m antes del train_end), no test.")
     else:
-        print(f"   ⚠️  MODO ESTÁNDAR: threshold scanner usa test (look-ahead). "
+        print(f"   ⚠️  MODO ESTÁNDAR: threshold scanner sobre test (look-ahead). "
               f"Para producción usar NO_LOOKAHEAD_SCANNER=1.")
+    print(f"   🎯 Calibración: {calibration}")
 
     # 4) OHLCV completo
     print(f"\n📊 Cargando OHLCV {earliest.date()} → {latest.date()}")

@@ -26,6 +26,16 @@
 #                              look-ahead implícito en el scanner. Recomendado
 #                              para validar antes de despliegue en producción.
 #                              Default 0 (modo legacy con look-ahead).
+#   VAL_THR_MONTHS=2           Tamaño del val_internal en meses (solo si
+#                              NO_LOOKAHEAD_SCANNER=1). Default 1.
+#                              Valores mayores reducen distribution shift pero
+#                              quitan datos al train. Recomendado 1-3.
+#   CALIBRATION=isotonic       Aplica IsotonicRegression a las probas crudas
+#                              del modelo. Entrenada sobre el X_va de early-stop
+#                              (10% del train). Estabiliza el threshold scanner
+#                              haciendo las probas representen frecuencias reales.
+#                              Default "" (sin calibración).
+#                              Recomendado en combinación con NO_LOOKAHEAD_SCANNER=1.
 
 set -euo pipefail
 
@@ -34,6 +44,8 @@ export CNN_STUDY=${CNN_STUDY:-oof_study_${RELEASE}_multitask}
 export TAG=${TAG:-deploy_2026_04_combined_specialists_seed47}
 export SEED=${SEED:-47}
 export NO_LOOKAHEAD_SCANNER=${NO_LOOKAHEAD_SCANNER:-0}
+export VAL_THR_MONTHS=${VAL_THR_MONTHS:-1}
+export CALIBRATION=${CALIBRATION:-}
 
 # Arquitectura: original_v3 | mlp | hybrid | transformer | tcn
 # Defaults razonables de epochs por arch:
