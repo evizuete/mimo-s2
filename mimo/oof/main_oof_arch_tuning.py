@@ -62,6 +62,25 @@ from mimo.oof.main_oof_regime_weights_v7 import (
 def _suggest_hp(trial: optuna.Trial, arch: str) -> Dict[str, Any]:
     """Define HP space específico por arch. Comunes para todos (loss,
     optimizer, regularización) + específicos según arch (filters, conv, etc.)."""
+
+    # mlp_flatten ve un input ~20x mayor que mlp_tabular (~3600 vs 180 dim)
+    # por aplanar las secuencias en lugar de colapsarlas a stats. El espacio
+    # de regularización y capacidad se desplaza hacia valores más agresivos
+    # para evitar overfitting de la primera Dense (~head_units * 3600 params).
+    if arch == "mlp_flatten":
+        hp = {
+            "l2_reg":             trial.suggest_float("l2_reg", 1e-5, 1e-1, log=True),
+            "dropout_dense":      trial.suggest_float("dropout_dense", 0.20, 0.60),
+            "learning_rate":      trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
+            "batch_size":         trial.suggest_categorical("batch_size",
+                                                            [256, 512, 1024, 2048, 4096]),
+            "head_units":         trial.suggest_categorical("head_units", [64, 128, 256, 512]),
+            "focal_alpha_long":   trial.suggest_float("focal_alpha_long", 0.20, 0.60),
+            "focal_alpha_short":  trial.suggest_float("focal_alpha_short", 0.20, 0.60),
+            "focal_gamma":        trial.suggest_float("focal_gamma", 0.5, 3.0),
+        }
+        return hp
+
     hp = {
         # Optimizer + regularización (todos los archs)
         "l2_reg":             trial.suggest_float("l2_reg", 1e-6, 1e-2, log=True),
@@ -243,7 +262,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="Optuna tuning para arquitecturas alternativas drop-in.")
     ap.add_argument("--arch", required=True,
-                    choices=("mlp", "hybrid", "transformer", "tcn"),
+                    choices=("mlp", "mlp_flatten", "hybrid", "transformer", "tcn"),
                     help="Arquitectura a tunear.")
     ap.add_argument("--release", default="202500")
     ap.add_argument("--study-name", default=None,
