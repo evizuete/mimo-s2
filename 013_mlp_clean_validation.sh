@@ -167,11 +167,15 @@ for cost in ("005", "010", "015"):
     try:
         r = json.load(open(sim_path))
         s = r["strategies"]
+        money = r.get("money_equivalence", {})
         results.append({
             "cost":      cost_label,
             "long":      s.get("long_only", {}),
             "short":     s.get("short_only", {}),
             "combined":  s.get("combined",   {}),
+            "money_long":     money.get("long_only", {}),
+            "money_short":    money.get("short_only", {}),
+            "money_combined": money.get("combined", {}),
         })
     except Exception as e:
         print(f"⚠️  Error leyendo {sim_path}: {e}")
@@ -184,20 +188,41 @@ else:
         print(f"  {'cost':>6} | {'R_total':>9} | {'Sharpe':>7} | {'Sortino':>8} | "
               f"{'Calmar':>7} | {'MaxDD':>7} | {'WinRate':>7} | {'PF':>5} | verdict")
         print("  " + "─" * 92)
+        # Mapeo de strat externo → key en results
+        key = {"long_only": "long", "short_only": "short", "combined": "combined"}[strat]
         for row in results:
-            d = row[strat.replace("_only", "_only") if "only" in strat else strat]
-            # 'combined' no tiene sufijo _only en el JSON
-            if strat == "combined":
-                d = row["combined"]
-            elif strat == "long_only":
-                d = row["long"]
-            elif strat == "short_only":
-                d = row["short"]
+            d = row[key] or {}
             verdict = ""  # simplified
             print(f"  {row['cost']:>6} | {_fmt(d.get('R_total'),'{:+9.2f}')} | "
                   f"{_fmt(d.get('sharpe'),'{:+7.3f}')} | {_fmt(d.get('sortino'),'{:+8.3f}')} | "
                   f"{_fmt(d.get('calmar'),'{:+7.3f}')} | {_fmt(d.get('max_dd'),'{:7.2f}')} | "
                   f"{_fmt(d.get('win_rate'),'{:7.3f}')} | {_fmt(d.get('profit_factor'),'{:5.1f}')}")
+
+    # ─── Tabla EUR/% ───
+    init_cap = ${INITIAL_CAPITAL}
+    risk_pct = ${RISK_PER_TRADE_PCT}
+    print(f"\n  EQUIVALENCIA MONETARIA  (capital inicial={init_cap:,.0f}€, riesgo/trade={risk_pct:.2f}% → 1R={init_cap*risk_pct/100:,.2f}€)")
+    for strat_label, key_money in (("LONG_ONLY", "money_long"),
+                                     ("SHORT_ONLY", "money_short"),
+                                     ("COMBINED", "money_combined")):
+        print(f"\n  {strat_label}")
+        print(f"  {'cost':>6} | {'%  LIN':>8} | {'EUR LIN':>11} | {'Final LIN':>11} | "
+              f"{'%  COMP':>8} | {'EUR COMP':>11} | {'Final COMP':>11}")
+        print("  " + "─" * 80)
+        for row in results:
+            m = row.get(key_money, {})
+            if not m:
+                print(f"  {row['cost']:>6} | (sin datos)")
+                continue
+            lin = m.get("linear", {})
+            comp = m.get("compound", {})
+            ruined = comp.get("ruined", False)
+            comp_pct = "RUINED" if ruined else (f"{comp.get('pct_total',0):+7.1f}%" if comp.get('pct_total') is not None else "n/a")
+            comp_eur = "    n/a   " if ruined else (f"{comp.get('eur_total',0):+11,.0f}€" if comp.get('eur_total') is not None else "n/a")
+            comp_fin = "    n/a   " if ruined else (f"{comp.get('final_capital',0):11,.0f}€" if comp.get('final_capital') is not None else "n/a")
+            print(f"  {row['cost']:>6} | "
+                  f"{lin.get('pct_total',0):+7.2f}% | {lin.get('eur_total',0):+10,.0f}€ | {lin.get('final_capital',0):10,.0f}€ | "
+                  f"{comp_pct:>8} | {comp_eur:>11} | {comp_fin:>11}")
 
     # Comparativa contra resultado anterior (solape, cost=0.05)
     print("\n" + "─" * 95)
@@ -206,7 +231,7 @@ else:
     print("    SHORT:     R=+116.4  Sharpe=4.18  Calmar=18.75  MaxDD=4.96")
     print("    COMBINED:  R=+237.0  Sharpe=3.92  Calmar=62.26  MaxDD=3.05")
     print("\n  REFERENCIA: GBM baseline (LONG only):")
-    print("    LONG:      R=~+103   Sharpe~1.15")
+    print(f"    LONG:      R=~+103   Sharpe~1.15  → ~{int(init_cap*risk_pct/100*103):,}€ LIN (+{103*risk_pct:.0f}%)")
 
 print("\n" + "═" * 95)
 EOF
