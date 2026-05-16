@@ -211,14 +211,27 @@ def _train_and_predict_window(
         return {"skipped": True, "reason": f"y_train shape inesperado: "
                                             f"{None if y_train is None else y_train.shape}"}
 
-    # Validation interna (90/10 de train)
+    # Validation interna (90/10 de train).
+    # TradingModel.train espera X como dict keyed por 'seq_short'/'seq_long'/
+    # 'context'/'time' (indexa con strings). Construir como list rompía:
+    #   TypeError: list indices must be integers or slices, not str
     n = len(X_seq_long)
     n_val = max(int(n * 0.10), 500)
     n_tr  = n - n_val
-    X_tr = [X_seq_short[:n_tr], X_seq_long[:n_tr], X_context[:n_tr], X_time[:n_tr]]
-    X_va = [X_seq_short[n_tr:], X_seq_long[n_tr:], X_context[n_tr:], X_time[n_tr:]]
+    X_tr = {
+        "seq_short": X_seq_short[:n_tr], "seq_long": X_seq_long[:n_tr],
+        "context":   X_context[:n_tr],   "time":     X_time[:n_tr],
+    }
+    X_va = {
+        "seq_short": X_seq_short[n_tr:], "seq_long": X_seq_long[n_tr:],
+        "context":   X_context[n_tr:],   "time":     X_time[n_tr:],
+    }
     y_tr = y_train[:n_tr]
     y_va = y_train[n_tr:]
+
+    # sample_weight: debe ir alineado con X_tr (n_tr filas), no con N completo.
+    _sw_full = pack.get("sample_weight")
+    sw_tr = _sw_full[:n_tr] if _sw_full is not None else None
 
     # Build & train modelo
     try:
@@ -254,7 +267,7 @@ def _train_and_predict_window(
         history = model.train(
             X_train=X_tr, y_train=y_tr,
             X_val=X_va,   y_val=y_va,
-            sample_weight=pack.get("sample_weight"),
+            sample_weight=sw_tr,  # split a n_tr para alinear con X_tr
             verbose=0,
         )
         best_iter = int(history.get("best_epoch", len(history.get("loss", [])) if isinstance(history, dict) else 0))
@@ -280,15 +293,26 @@ def _train_and_predict_window(
     if Xt_seq_long is None or len(Xt_seq_long) == 0:
         return {"skipped": True, "reason": "test_sequences_empty"}
 
-    # Predict
+    # Predict — directo sobre model.model porque TradingModel.predict hace
+    # .ravel() asumiendo single-output, lo cual rompe en multitask
+    # (outputs = dict {'signal_long', 'signal_short'}).
     try:
-        preds = model.predict([Xt_seq_short, Xt_seq_long, Xt_context, Xt_time])
-        # Para multitask: preds shape (N, 2) con [p_long, p_short]
-        if preds.ndim != 2 or preds.shape[1] != 2:
-            return {"skipped": True, "reason": f"preds shape inesperado: {preds.shape}"}
-        p_long = preds[:, 0].astype(np.float32)
-        p_short = preds[:, 1].astype(np.float32)
+        preds_dict = model.model.predict(
+            {"seq_short": Xt_seq_short, "seq_long": Xt_seq_long,
+             "context":   Xt_context,   "time":     Xt_time},
+            batch_size=int(model_config.batch_size), verbose=0,
+        )
+        if not isinstance(preds_dict, dict):
+            return {"skipped": True,
+                    "reason": f"preds tipo inesperado: {type(preds_dict).__name__}"}
+        p_long  = np.asarray(preds_dict["signal_long"]).reshape(-1).astype(np.float32)
+        p_short = np.asarray(preds_dict["signal_short"]).reshape(-1).astype(np.float32)
+        if len(p_long) != len(p_short):
+            return {"skipped": True,
+                    "reason": f"preds longitud inconsistente: long={len(p_long)} short={len(p_short)}"}
     except Exception as e:
+        import traceback as _tb
+        print(f"    ❌ predict_failed traceback:\n{_tb.format_exc()}")
         return {"skipped": True, "reason": f"predict_failed: {str(e)[:200]}"}
 
     # Alinear con df_test: context_offset = seq_len_long - 1
