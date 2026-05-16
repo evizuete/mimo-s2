@@ -36,6 +36,18 @@
 #                              haciendo las probas representen frecuencias reales.
 #                              Default "" (sin calibración).
 #                              Recomendado en combinación con NO_LOOKAHEAD_SCANNER=1.
+#   NO_ROLLING_SCALER=1        Deshabilita el RollingRobustScaler del pipeline
+#                              (data_pipeline_v2.py:90). Sin el flag, el pipeline
+#                              fittea el scaler muestreando con stride TODO el
+#                              train (línea 885-886 + rolling_scaler.py:212-216),
+#                              lo que produce look-ahead INTRA-TRAIN: la fila 0
+#                              se escala con stats de filas posteriores del mismo
+#                              train. NO afecta al test (que usa el scaler fitado),
+#                              pero contamina el aprendizaje. Con el flag, usa
+#                              sklearn RobustScaler estándar (fit sobre todo el
+#                              train sin sampling) — más lento (~+30s/ventana)
+#                              pero honest. Default 0 (legacy).
+#                              Recomendado en combinación con NO_LOOKAHEAD_SCANNER=1.
 
 set -euo pipefail
 
@@ -46,6 +58,7 @@ export SEED=${SEED:-47}
 export NO_LOOKAHEAD_SCANNER=${NO_LOOKAHEAD_SCANNER:-0}
 export VAL_THR_MONTHS=${VAL_THR_MONTHS:-1}
 export CALIBRATION=${CALIBRATION:-}
+export NO_ROLLING_SCALER=${NO_ROLLING_SCALER:-0}
 
 # Arquitectura: original_v3 | mlp | hybrid | transformer | tcn
 # Defaults razonables de epochs por arch:

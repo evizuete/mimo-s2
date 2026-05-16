@@ -87,7 +87,17 @@ class DataPipeline:
         self.scalers = {}
         self.is_fitted = False
 
-        self.use_rolling_scaler = True
+        # use_rolling_scaler: si True, _fit_scaler_from_raw muestrea TODO el
+        # train con stride (data_pipeline_v2.py:885-886 + rolling_scaler.py:212-216,
+        # ambos hacen el mismo muestreo) → look-ahead INTRA-TRAIN (la fila 0 del
+        # train se escala con stats de filas 30000+). NO afecta al test (que usa
+        # el scaler fitado en train), pero contamina el aprendizaje y los val_auc
+        # de tuning. Para experimentos honest (NO_LOOKAHEAD_SCANNER=1), poner
+        # NO_ROLLING_SCALER=1 → usa sklearn RobustScaler estándar fitado sobre
+        # todo el train sin sampling. Default permanece True por compatibilidad.
+        import os as _os
+        _no_rolling = _os.environ.get("NO_ROLLING_SCALER", "0") == "1"
+        self.use_rolling_scaler = not _no_rolling
         self.scaler_window_size = 2880
         self.scaler_warmup_size = 390
         self.scaler_smooth_alpha = 0.1
