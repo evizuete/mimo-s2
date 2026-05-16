@@ -482,16 +482,30 @@ def _eval_predictions(
     #                 estadística" con pocas señales y prec inflado.
     #   THR_SMOOTH_K: tamaño de kernel (vecinos por lado) para suavizar el
     #                 score sobre el eje de thresholds antes de elegir el mejor.
-    try:
-        thr_min_prec = float(os.environ.get("THR_MIN_PREC", "0") or 0)
-    except ValueError:
-        thr_min_prec = 0.0
-    try:
-        thr_smooth_k = int(os.environ.get("THR_SMOOTH_K", "0") or 0)
-    except ValueError:
-        thr_smooth_k = 0
+    # Asimétricos por side (overrides los genéricos): THR_MIN_PREC_LONG,
+    # THR_MIN_PREC_SHORT, THR_SMOOTH_K_LONG, THR_SMOOTH_K_SHORT. Útil cuando
+    # long y short tienen distinta distribución de probs (e.g. long es escaso
+    # y selectivo → sin filtros; short es ruidoso → con filtros).
+    def _f(name: str, default: str = "0") -> float:
+        try:
+            return float(os.environ.get(name, default) or 0)
+        except ValueError:
+            return 0.0
+    def _i(name: str, default: str = "0") -> int:
+        try:
+            return int(os.environ.get(name, default) or 0)
+        except ValueError:
+            return 0
+    base_min_prec = _f("THR_MIN_PREC")
+    base_smooth_k = _i("THR_SMOOTH_K")
+    long_min_prec  = _f("THR_MIN_PREC_LONG",  str(base_min_prec))
+    short_min_prec = _f("THR_MIN_PREC_SHORT", str(base_min_prec))
+    long_smooth_k  = _i("THR_SMOOTH_K_LONG",  str(base_smooth_k))
+    short_smooth_k = _i("THR_SMOOTH_K_SHORT", str(base_smooth_k))
 
     def _one_side(proba_col: str, side_is_long: bool) -> Dict[str, Any]:
+        side_min_prec = long_min_prec if side_is_long else short_min_prec
+        side_smooth_k = long_smooth_k if side_is_long else short_smooth_k
         if df_val_eval is None:
             # Modo estándar: scanner sobre test
             return compute_ev_at_best_threshold(
@@ -500,7 +514,7 @@ def _eval_predictions(
                 cost_per_signal=cost_per_signal,
                 n_thr=n_thr, thr_lo=thr_lo, thr_hi=thr_hi,
                 min_signals=min_signals, max_drawdown_R=max_drawdown_R,
-                min_prec=thr_min_prec, smooth_k=thr_smooth_k,
+                min_prec=side_min_prec, smooth_k=side_smooth_k,
             )
         # Modo sin look-ahead: scanner sobre val_internal
         # min_signals proporcional: val es ~1/12 de un mes test típico,
@@ -512,7 +526,7 @@ def _eval_predictions(
             cost_per_signal=cost_per_signal,
             n_thr=n_thr, thr_lo=thr_lo, thr_hi=thr_hi,
             min_signals=val_min_signals, max_drawdown_R=max_drawdown_R,
-            min_prec=thr_min_prec, smooth_k=thr_smooth_k,
+            min_prec=side_min_prec, smooth_k=side_smooth_k,
         )
         chosen_thr = scan_res.get("thr")
         if chosen_thr is None or (isinstance(chosen_thr, float) and (np.isnan(chosen_thr) or not np.isfinite(chosen_thr))):
@@ -678,9 +692,15 @@ def main() -> None:
     print(f"   🎯 Calibración: {calibration}")
     thr_min_prec_env = os.environ.get("THR_MIN_PREC", "0")
     thr_smooth_k_env = os.environ.get("THR_SMOOTH_K", "0")
-    if float(thr_min_prec_env or 0) > 0 or int(thr_smooth_k_env or 0) > 0:
-        print(f"   🛡️  Scanner robustness: THR_MIN_PREC={thr_min_prec_env} "
-              f"THR_SMOOTH_K={thr_smooth_k_env}")
+    long_mp = os.environ.get("THR_MIN_PREC_LONG", thr_min_prec_env)
+    short_mp = os.environ.get("THR_MIN_PREC_SHORT", thr_min_prec_env)
+    long_sk = os.environ.get("THR_SMOOTH_K_LONG", thr_smooth_k_env)
+    short_sk = os.environ.get("THR_SMOOTH_K_SHORT", thr_smooth_k_env)
+    if (float(long_mp or 0) > 0 or float(short_mp or 0) > 0 or
+        int(long_sk or 0) > 0 or int(short_sk or 0) > 0):
+        print(f"   🛡️  Scanner robustness: "
+              f"long(min_prec={long_mp}, smooth_k={long_sk})  "
+              f"short(min_prec={short_mp}, smooth_k={short_sk})")
 
     # 4) OHLCV completo
     print(f"\n📊 Cargando OHLCV {earliest.date()} → {latest.date()}")
