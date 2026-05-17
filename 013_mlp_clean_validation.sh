@@ -17,7 +17,7 @@
 # TIEMPO TOTAL: ~7-8h en GPU. Lanzar en screen/tmux.
 #
 # OUTPUTS:
-#   artifacts/202500/oof/tuning/best_params_mlp.json           ← tune limpio
+#   artifacts/202500/oof/tuning/best_params_mlp_multitask.json ← tune limpio
 #   …/reports/walkforward_report_cnn_mlp_clean_cost005.json    ← cost 0.05
 #   …/reports/walkforward_report_cnn_mlp_clean_cost010.json    ← cost 0.10
 #   …/reports/walkforward_report_cnn_mlp_clean_cost015.json    ← cost 0.15
@@ -89,7 +89,7 @@ VAL_FROM=2024-09-01   VAL_TO=2024-12-01 \
   bash 012_optuna_arch.sh mlp 30
 
 # Verificar que generó best_params
-BEST_PARAMS_JSON="artifacts/${RELEASE}/oof/tuning/best_params_mlp.json"
+BEST_PARAMS_JSON="artifacts/${RELEASE}/oof/tuning/best_params_mlp_multitask.json"
 [ -f "${BEST_PARAMS_JSON}" ] || { echo "❌ Falta ${BEST_PARAMS_JSON}"; exit 1; }
 echo ""
 echo "✅ Best params nuevo:"

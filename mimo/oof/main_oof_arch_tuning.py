@@ -546,7 +546,8 @@ def main() -> None:
 
     out_dir = args.out_dir or f"artifacts/{release}/oof/tuning"
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"best_params_{arch}.json")
+    side_suffix = {"both": "multitask", "long": "long_only", "short": "short_only"}[args.side]
+    out_path = os.path.join(out_dir, f"best_params_{arch}_{side_suffix}.json")
     with open(out_path, "w") as f:
         json.dump({
             "arch": arch, "release": release,

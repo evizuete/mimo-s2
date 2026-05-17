@@ -93,17 +93,23 @@ python3 -m mimo.oof.main_oof_arch_tuning \
   --optuna-storage "${OPTUNA_STORAGE}" \
   --seed ${SEED}
 
+if [ "${SIDE}" = "both" ]; then
+  SIDE_SUFFIX="multitask"
+else
+  SIDE_SUFFIX="${SIDE}_only"
+fi
+
 log_section "TUNING COMPLETADO — arch=${ARCH} side=${SIDE}"
 echo ""
-echo "📋 Best params en: artifacts/${RELEASE}/oof/tuning/best_params_${ARCH}.json"
+echo "📋 Best params en: artifacts/${RELEASE}/oof/tuning/best_params_${ARCH}_${SIDE_SUFFIX}.json"
 echo ""
-echo "🚀 Ahora lanza el walkforward con la arch tuneada:"
-echo "   CNN_STUDY=${STUDY_NAME} ARCH=${ARCH} bash 010_walkforward_cnn.sh"
-if [ "${SIDE}" != "both" ]; then
-  echo ""
-  echo "ℹ️  side=${SIDE}: este study contiene HPs single-side. Para usarlo en el"
-  echo "   walkforward necesitas otro study para el side opuesto y combinar"
-  echo "   ambos con SPLIT_MODELS=1 + un mecanismo de carga 2-study (no"
-  echo "   implementado todavía en el walkforward — falta CNN_STUDY_LONG /"
-  echo "   CNN_STUDY_SHORT)."
+if [ "${SIDE}" = "both" ]; then
+  echo "🚀 Ahora lanza el walkforward con la arch tuneada:"
+  echo "   CNN_STUDY=${STUDY_NAME} ARCH=${ARCH} bash 010_walkforward_cnn.sh"
+else
+  echo "🚀 Ahora lanza el walkforward 2-study combinando este side con el opuesto:"
+  echo "   CNN_STUDY_LONG=oof_study_${RELEASE}_${ARCH}_long_only \\"
+  echo "   CNN_STUDY_SHORT=oof_study_${RELEASE}_${ARCH}_short_only \\"
+  echo "   SPLIT_MODELS=1 SPLIT_ZERO_OTHER_LOSS=1 ARCH=${ARCH} \\"
+  echo "   bash 010_walkforward_cnn.sh"
 fi

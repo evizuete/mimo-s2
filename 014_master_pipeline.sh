@@ -16,7 +16,7 @@
 #
 # FASE 1 — Tuning Optuna SIN solape (val Sep-Dic 2024, anterior al walkforward)
 #   Para cada arch en ARCHS_TO_TUNE: ~1.5h cada uno.
-#   Output: oof_study_<R>_<arch>_multitask en MySQL + best_params_<arch>.json
+#   Output: oof_study_<R>_<arch>_multitask en MySQL + best_params_<arch>_multitask.json
 #
 # FASE 2 — Walkforward de cada arch con cost=0.05 (baseline cost)
 #   Para cada arch: ~1.5h cada uno.
