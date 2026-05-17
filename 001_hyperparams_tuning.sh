@@ -11,6 +11,17 @@
 #   - Para SMOKE TEST del pipeline: --optuna-trials 1 (no es búsqueda, solo
 #     verifica que la cadena 001→002→...→006 funciona end-to-end)
 #
+# OVERRIDE DE GRID HP (sin tocar release real):
+#   CNN_LSTM_GRID=202500_v4 bash 001_hyperparams_tuning.sh
+#     → usa el grid HP de 202500_v4 (espacio ampliado: continuous lr/dropouts,
+#       loss_weight_* libres desde 0.0, HPs estructurales nuevos como
+#       activation, kernel_size_short/long, gru_units, attn_num_heads).
+#     → mantiene release=202500 para barriers/feature_masks/artifact paths.
+#   IMPORTANTE: usar STUDY_NAME distinto al de v3 (espacios incompatibles).
+#     Ej. export OPTUNA_STUDY_OVERRIDE=oof_study_202500_v4_multitask antes
+#     de relanzar (o borrar el existente con --reset-study si tu workflow lo
+#     soporta).
+#
 # Si solo quieres reusar best_per_side.json de otra release:
 #   cp artifacts/<source_release>/oof/<TAG>/reports/best_per_side.json \
 #      artifacts/${RELEASE}/oof/${TAG}/reports/best_per_side.json
@@ -19,7 +30,7 @@
 set -euo pipefail
 
 # ─── Configuración ─────────────────────────────────────────────────
-export RELEASE=${RELEASE:-202601}
+export RELEASE=${RELEASE:-202500}
 export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202500}
 export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
 export SEED=${SEED:-47}
@@ -59,6 +70,10 @@ echo "  Seed:              ${SEED}"
 echo "  Train period:      ${TRAIN_FROM} → ${TRAIN_TO}"
 echo "  Holdout period:    ${HOLDOUT_FROM} → ${HOLDOUT_TO}"
 echo "  Optuna trials:     ${OPTUNA_TRIALS}"
+if [ -n "${CNN_LSTM_GRID:-}" ]; then
+  echo "  Grid override:     CNN_LSTM_GRID=${CNN_LSTM_GRID}"
+  echo "                     (release real sigue siendo ${RELEASE} para barriers/features)"
+fi
 if [ "${OPTUNA_TRIALS}" -lt 10 ]; then
   echo ""
   echo "  ⚠️  TRIALS BAJO (${OPTUNA_TRIALS}). Esto NO es búsqueda real."

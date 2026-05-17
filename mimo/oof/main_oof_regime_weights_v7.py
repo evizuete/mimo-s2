@@ -830,22 +830,99 @@ GRID_BY_RELEASE = {
         # loss no ayuda (no puedes rankear lo que no discriminas).
         "ranking_loss_weight": {"low": 0.0, "high": 0.15, "step": 0.05},
     },
+    # 202500_v4: refinamiento del CNN-LSTM v3 para release 202500.
+    # Anclado al ganador del study oof_study_202500_multitask Trial #14
+    # (conv1d_filters=48 suelo, lr=3e-4 techo, focal_alpha_short=0.35 techo,
+    #  dropout_seq=0.15 techo, dropout_lstm=0.20 suelo) — todos los HPs del
+    # v3 que pegaron en algún borde se amplían. Mismo feature set y barriers
+    # que 202500.
+    #
+    # Lecciones aplicadas:
+    #   · De 202601: lr más alto (techo del v3 antiguo era moribundo), batch
+    #     bajo (más updates/epoch), focal_gamma libre (no fijo en 2.0).
+    #   · De 202500 v3: NO ir tan agresivo como 202601 con dropouts a 0.0; el
+    #     ganador del v3 estaba sano (no colapsado en prior) → mantener
+    #     dropouts moderados.
+    #   · Loss weights LIBRES con suelo 0.0 → Optuna puede explorar single-side
+    #     (LONG-only o SHORT-only) si esa configuración gana, sin tener que
+    #     definir grids separados por side (paralelo conceptual al TCN v4).
+    #
+    # HPs estructurales NUEVOS (requieren build_model_v3 v4, commit ≥ 121fe2e):
+    #   · activation        respetado en Conv1D/Dense (antes 'relu' hard-coded)
+    #   · kernel_size_short Conv1D rama corta (antes 3 hard-coded)
+    #   · kernel_size_long  Conv1D rama larga (antes 5 hard-coded)
+    #   · gru_units         GRU rama larga (antes lstm_units // 2 derivado)
+    #   · attn_num_heads    MultiHeadAttention (antes 4 hard-coded)
+    #
+    # use_hierarchical_fusion LOCKED a True: los HPs estructurales solo aplican
+    # en v3 (rama jerárquica). Para honestamente comparar v2 vs v3, usar 202601.
+    #
+    # Requiere: --use-tpe --optuna-trials >= 40. Borrar study oof_study_202500_v4_multitask
+    # si existe antes de relanzar (espacio no es superconjunto del v3).
+    "202500_v4": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        # ── Capacidad / arquitectura — categóricos ──
+        "conv1d_filters":    [32, 48, 64, 96],
+        "lstm_units":        [64, 96, 128],
+        "gru_units":         [32, 48, 64, 96],
+        "context_units":     [32, 64, 96],
+        "head_units":        [64, 128, 192, 256],
+        "time_units":        [16, 32, 64],
+        "batch_size":        [2048, 4096, 8192],
+        "kernel_size_short": [3, 5],
+        "kernel_size_long":  [3, 5, 7],
+        "attn_num_heads":    [2, 4, 8],
+        "activation":        ["relu", "gelu", "swish", "elu"],
+        "use_attention":     [False, True],
+        "use_gate":          [False, True],
+        "use_hierarchical_fusion": [True],  # locked: v4 estructural solo en v3
+        # ── Continuous distributions (TPE-only) ──
+        "learning_rate":       {"low": 1e-4, "high": 1e-3, "log": True},
+        "l2_reg":              {"low": 1e-7, "high": 1e-3, "log": True},
+        "dropout_seq":         {"low": 0.05, "high": 0.25, "step": 0.05},
+        "dropout_lstm":        {"low": 0.10, "high": 0.40, "step": 0.05},
+        "dropout_dense":       {"low": 0.10, "high": 0.35, "step": 0.05},
+        "focal_alpha_long":    {"low": 0.20, "high": 0.50, "step": 0.05},
+        "focal_alpha_short":   {"low": 0.20, "high": 0.55, "step": 0.05},
+        "focal_gamma":         {"low": 0.5, "high": 3.0, "step": 0.5},
+        # Loss weights con suelo 0.0 → TPE puede explorar single-side natural.
+        "loss_weight_long":    {"low": 0.0, "high": 2.5, "step": 0.25},
+        "loss_weight_short":   {"low": 0.0, "high": 2.5, "step": 0.25},
+        "ranking_loss_weight": {"low": 0.0, "high": 0.20, "step": 0.05},
+    },
 }
 
 
 def _get_grid_for_release(release: str) -> dict:
-    """Devuelve el grid para el release solicitado, con fallback a _DEFAULT_GRID."""
+    """Devuelve el grid para el release solicitado, con fallback a _DEFAULT_GRID.
+
+    Override via env var CNN_LSTM_GRID: permite seleccionar un grid distinto al
+    de la release real sin tocar barriers/feature_masks/artifact_paths (que sí
+    dependen del valor de release). Caso de uso típico — tunear release 202500
+    con el espacio HP del v4 ampliado:
+        CNN_LSTM_GRID=202500_v4 \
+        python -m mimo.oof.main_oof_regime_weights_v7 --release 202500 ...
+    """
+    import os as _os
     release_str = str(release)
-    grid = GRID_BY_RELEASE.get(release_str, _DEFAULT_GRID)
-    if release_str not in GRID_BY_RELEASE:
-        print(f"⚠️  [GRID] No hay entrada en GRID_BY_RELEASE para release={release_str}. Usando _DEFAULT_GRID.")
+    override = _os.environ.get("CNN_LSTM_GRID", "").strip()
+    effective = override if override else release_str
+
+    grid = GRID_BY_RELEASE.get(effective, _DEFAULT_GRID)
+    if override:
+        print(f"🎯 [GRID] CNN_LSTM_GRID override = '{override}' "
+              f"(release real='{release_str}' sigue gobernando "
+              f"barriers/feature_masks/paths)")
+    if effective not in GRID_BY_RELEASE:
+        print(f"⚠️  [GRID] No hay entrada en GRID_BY_RELEASE para "
+              f"'{effective}'. Usando _DEFAULT_GRID.")
     else:
         delta_keys = [k for k in grid if grid[k] != _DEFAULT_GRID.get(k)]
         if delta_keys:
             deltas = ", ".join(f"{k}={grid[k]}" for k in delta_keys)
-            print(f"🎯 [GRID] release={release_str} | overrides vs default: {deltas}")
+            print(f"🎯 [GRID] effective='{effective}' | overrides vs default: {deltas}")
         else:
-            print(f"🎯 [GRID] release={release_str} | usando configuración default (sin overrides)")
+            print(f"🎯 [GRID] effective='{effective}' | configuración default")
     return grid
 
 
@@ -3093,4 +3170,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main()

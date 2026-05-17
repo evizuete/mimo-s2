@@ -318,6 +318,17 @@ class OptunaOOFTrainer:
         if self.grid_space and 'use_hierarchical_fusion' in self.grid_space:
             model_config.use_hierarchical_fusion = bool(self._suggest(trial, 'use_hierarchical_fusion'))
 
+        # HPs estructurales v4 para build_model_v3 (release 202500_v4+).
+        # Todos son backward-compat: si la release no los declara, build_model_v3
+        # cae a los defaults legacy (activation='relu', kernel_size_short=3,
+        # kernel_size_long=5, gru_units=lstm_units//2, attn_num_heads=4).
+        # Se asignan vía setattr porque la mayoría NO son fields del dataclass
+        # ModelConfig (excepto 'activation', que ya existe desde release 202600).
+        for _k in ("activation", "kernel_size_short", "kernel_size_long",
+                   "gru_units", "attn_num_heads", "attn_key_dim"):
+            if self.grid_space and _k in self.grid_space:
+                setattr(model_config, _k, self._suggest(trial, _k))
+
         return model_config
 
     def _trial_oof_cache_paths(self, *, study_name: str, side: str, trial_number: int) -> Dict[str, str]:
@@ -2035,4 +2046,4 @@ class OptunaOOFTrainer:
         if return_predictions:
             out["predictions"] = pred_rows
 
-        return out
+        return out

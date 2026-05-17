@@ -463,8 +463,28 @@ class TradingModel:
         - Compatible con los mismos 4 inputs que v2.
 
         Activar con: ModelConfig(use_hierarchical_fusion=True)
+
+        HPs estructurales expuestos en v4 (backward-compat vía getattr):
+          · activation        ∈ {relu, gelu, swish, elu}    default 'relu' (legacy)
+          · kernel_size_short ∈ {3, 5, 7}                   default 3
+          · kernel_size_long  ∈ {3, 5, 7}                   default 5
+          · gru_units         int                           default lstm_units // 2
+          · attn_num_heads    ∈ {2, 4, 8}                   default 4
+          · attn_key_dim      int                           default max(8, ch_short // 4)
+
+        Antes (v3 legacy) activation estaba hard-coded a 'relu' en TODAS las
+        Dense/Conv (el campo model_config.activation existía pero se ignoraba
+        silenciosamente — bug). v4 lo respeta.
         """
         config = self.model_config
+
+        # HPs estructurales (todos via getattr → defaults idénticos al v3 legacy
+        # si la release no los suministra → cero impacto en estudios antiguos).
+        act        = str(getattr(config, 'activation', 'relu')).lower()
+        ksize_s    = int(getattr(config, 'kernel_size_short', 3))
+        ksize_l    = int(getattr(config, 'kernel_size_long', 5))
+        gru_units  = int(getattr(config, 'gru_units', config.lstm_units // 2))
+        attn_heads = int(getattr(config, 'attn_num_heads', 4))
 
         # === INPUTS (idénticos a v2) ===
         input_short   = Input(shape=shape_short, name='seq_short')
@@ -475,18 +495,20 @@ class TradingModel:
         # === RAMA CORTA — microestructura y trigger local ===
         x_short = layers.Conv1D(
             config.conv1d_filters,
-            kernel_size=3,
+            kernel_size=ksize_s,
             padding='same',
-            activation='relu',
+            activation=act,
             kernel_regularizer=regularizers.l2(config.l2_reg)
         )(input_short)
         x_short = layers.BatchNormalization()(x_short)
         x_short = layers.Dropout(config.dropout_seq)(x_short)
 
         if config.use_attention:
+            attn_key_dim = int(getattr(
+                config, 'attn_key_dim', max(8, int(x_short.shape[-1]) // 4)))
             att = layers.MultiHeadAttention(
-                num_heads=4,
-                key_dim=max(8, x_short.shape[-1] // 4),
+                num_heads=attn_heads,
+                key_dim=attn_key_dim,
             )(x_short, x_short)
             x_short = layers.Add()([x_short, att])
             x_short = layers.LayerNormalization()(x_short)
@@ -502,15 +524,15 @@ class TradingModel:
         # === RAMA LARGA — régimen y estructura macro ===
         x_long = layers.Conv1D(
             config.conv1d_filters // 2,
-            kernel_size=5,
+            kernel_size=ksize_l,
             strides=2,
             padding='same',
-            activation='relu'
+            activation=act
         )(input_long)
         x_long = layers.BatchNormalization()(x_long)
 
         x_long = layers.GRU(
-            config.lstm_units // 2,
+            gru_units,
             return_sequences=False,
             dropout=config.dropout_lstm,
             kernel_regularizer=regularizers.l2(config.l2_reg)
@@ -519,7 +541,7 @@ class TradingModel:
         # === CONTEXTO ===
         x_context = layers.Dense(
             config.context_units,
-            activation='relu',
+            activation=act,
             kernel_regularizer=regularizers.l2(config.l2_reg)
         )(input_context)
         x_context = layers.LayerNormalization()(x_context)
@@ -528,18 +550,19 @@ class TradingModel:
         # === TIEMPO ===
         x_time = layers.Dense(
             config.time_units,
-            activation='relu',
+            activation=act,
             kernel_regularizer=regularizers.l2(config.l2_reg)
         )(input_time)
 
         # === FUSIÓN JERÁRQUICA ===
         # Paso A: representación de mercado (contexto estructural)
         # Responde: "¿el régimen y la estructura de fondo son favorables?"
+        # NB: market_units sigue derivado de gru_units (no de lstm_units // 2).
         market_repr = layers.Concatenate()([x_long, x_context])
-        market_units = config.lstm_units // 2 + config.context_units
+        market_units = gru_units + config.context_units
         market_repr = layers.Dense(
             market_units,
-            activation='relu',
+            activation=act,
             kernel_regularizer=regularizers.l2(config.l2_reg)
         )(market_repr)
         market_repr = layers.Dropout(config.dropout_dense)(market_repr)
@@ -550,7 +573,7 @@ class TradingModel:
         entry_units = config.lstm_units + config.time_units
         entry_repr = layers.Dense(
             entry_units,
-            activation='relu',
+            activation=act,
             kernel_regularizer=regularizers.l2(config.l2_reg)
         )(entry_repr)
         entry_repr = layers.Dropout(config.dropout_dense)(entry_repr)
@@ -562,7 +585,7 @@ class TradingModel:
         if config.use_gate:
             gate = layers.Dense(
                 combined.shape[-1],
-                activation='sigmoid',
+                activation='sigmoid',  # gate semantics: sigmoid es estructural
                 kernel_regularizer=regularizers.l2(config.l2_reg * 0.1)
             )(combined)
             combined = layers.Multiply()([combined, gate])
@@ -570,14 +593,14 @@ class TradingModel:
         # === HEAD FINAL (idéntico a v2) ===
         x = layers.Dense(
             config.head_units,
-            activation='relu',
+            activation=act,
             kernel_regularizer=regularizers.l2(config.l2_reg)
         )(combined)
         x = layers.Dropout(config.dropout_dense)(x)
 
         x = layers.Dense(
             config.head_units // 2,
-            activation='relu',
+            activation=act,
             kernel_regularizer=regularizers.l2(config.l2_reg)
         )(x)
         x = layers.Dropout(config.dropout_dense)(x)
@@ -1196,4 +1219,4 @@ class TripleClassTPAUC(tf.keras.metrics.AUC):
         y_true_int = tf.cast(tf.reshape(y_true, (-1,)), tf.int32)
         y_true_tp = tf.cast(tf.equal(y_true_int, 2), tf.float32)
         p_tp = y_pred[:, 2]
-        return super().update_state(y_true_tp, p_tp, sample_weight=sample_weight)
+        return super().update_state(y_true_tp, p_tp, sample_weight=sample_weight)

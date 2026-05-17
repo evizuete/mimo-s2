@@ -272,25 +272,38 @@ def _train_and_predict_window(
     sw_tr = _sw_full[:n_tr] if _sw_full is not None else None
 
     # Build & train modelo
+    #
+    # Shapes extraídos una vez fuera del if/else porque build_model_v2/v3 los
+    # requieren igual que la rama de arch alternativa. Antes (pre-fix Phase 0)
+    # la rama original_v3 llamaba model.build_model_v3() sin args y todos los
+    # windows del walkforward CNN-LSTM fallaban con
+    # "missing 4 required positional arguments".
     try:
         model = TradingModel(
             general_config=general_config, model_config=model_config, side=None,  # multitask
         )
+        shape_short = X_seq_short.shape[1:]   # (seq_short, n_feat_short)
+        shape_long  = X_seq_long.shape[1:]
+        n_ctx       = int(X_context.shape[1])
+        n_time_feat = int(X_time.shape[1])
+        init_b      = float(getattr(model_config, "init_bias", 0.0))
+
         arch = str(getattr(model_config, "_walkforward_arch", "original_v3"))
         if arch == "original_v3":
             if getattr(model_config, "use_hierarchical_fusion", True):
-                model.build_model_v3()
+                model.build_model_v3(
+                    shape_short=shape_short, shape_long=shape_long,
+                    n_context=n_ctx, n_time=n_time_feat, init_bias=init_b,
+                )
             else:
-                model.build_model_v2()
+                model.build_model_v2(
+                    shape_short=shape_short, shape_long=shape_long,
+                    n_context=n_ctx, n_time=n_time_feat, init_bias=init_b,
+                )
         else:
             # Arquitectura alternativa drop-in (mlp / hybrid / transformer / tcn).
             # Sobrescribimos model.model con el modelo built por la factory.
             from mimo.models.model_alternatives import build_model_by_arch
-            shape_short = X_seq_short.shape[1:]   # (seq_short, n_feat_short)
-            shape_long  = X_seq_long.shape[1:]
-            n_ctx       = int(X_context.shape[1])
-            n_time_feat = int(X_time.shape[1])
-            init_b = float(getattr(model_config, "init_bias", 0.0))
             model.model = build_model_by_arch(
                 arch_name=arch,
                 shape_short=shape_short, shape_long=shape_long,
