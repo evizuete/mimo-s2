@@ -37,6 +37,11 @@ N_TRIALS=${2:-${N_TRIALS:-30}}
 
 export RELEASE=${RELEASE:-202500}
 export SEED=${SEED:-47}
+# SIDE=both|long|short. Default both (multitask, comportamiento legacy).
+# SIDE=long → single-side LONG (focal_alpha_short y loss_weight_short fijos
+# a valores que apagan la head SHORT). SIDE=short → simétrico.
+# Cuando SIDE!=both, el study default cambia a oof_study_..._<side>_only.
+export SIDE=${SIDE:-both}
 
 # Split train/val para tuning (12m train + 2m val por defecto)
 # Distinto del rango de walkforward para no contaminar:
@@ -54,14 +59,20 @@ export PATIENCE=${PATIENCE:-4}
 export OPTUNA_STORAGE=${OPTUNA_STORAGE:-mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db}
 
 # STUDY_NAME override permite separar espacios HP incompatibles (p.ej. tcn v2
-# vs v3 donde el rango de learning_rate cambia). Default = nombre canónico del arch.
-STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}_multitask"}
+# vs v3 donde el rango de learning_rate cambia). Default = nombre canónico del
+# arch, con sufijo según SIDE.
+if [ "${SIDE}" = "both" ]; then
+  STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}_multitask"}
+else
+  STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}_${SIDE}_only"}
+fi
 
 log_section() { echo ""; echo "═══════════════════════════════════════════════════════════════"; echo "  $1"; echo "═══════════════════════════════════════════════════════════════"; }
 
-log_section "OPTUNA TUNING — arch=${ARCH}"
+log_section "OPTUNA TUNING — arch=${ARCH} side=${SIDE}"
 echo "  Release:    ${RELEASE}"
 echo "  Study:      ${STUDY_NAME}"
+echo "  Side:       ${SIDE}"
 echo "  N trials:   ${N_TRIALS}"
 echo "  Train:      ${TRAIN_FROM} → ${TRAIN_TO}"
 echo "  Val:        ${VAL_FROM} → ${VAL_TO}"
@@ -70,6 +81,7 @@ echo "  Epochs/pat: ${EPOCHS} / ${PATIENCE}"
 python3 -m mimo.oof.main_oof_arch_tuning \
   --arch ${ARCH} \
   --release ${RELEASE} \
+  --side ${SIDE} \
   --study-name "${STUDY_NAME}" \
   --n-trials ${N_TRIALS} \
   --base-tf 5min \
@@ -81,9 +93,17 @@ python3 -m mimo.oof.main_oof_arch_tuning \
   --optuna-storage "${OPTUNA_STORAGE}" \
   --seed ${SEED}
 
-log_section "TUNING COMPLETADO — arch=${ARCH}"
+log_section "TUNING COMPLETADO — arch=${ARCH} side=${SIDE}"
 echo ""
 echo "📋 Best params en: artifacts/${RELEASE}/oof/tuning/best_params_${ARCH}.json"
 echo ""
 echo "🚀 Ahora lanza el walkforward con la arch tuneada:"
 echo "   CNN_STUDY=${STUDY_NAME} ARCH=${ARCH} bash 010_walkforward_cnn.sh"
+if [ "${SIDE}" != "both" ]; then
+  echo ""
+  echo "ℹ️  side=${SIDE}: este study contiene HPs single-side. Para usarlo en el"
+  echo "   walkforward necesitas otro study para el side opuesto y combinar"
+  echo "   ambos con SPLIT_MODELS=1 + un mecanismo de carga 2-study (no"
+  echo "   implementado todavía en el walkforward — falta CNN_STUDY_LONG /"
+  echo "   CNN_STUDY_SHORT)."
+fi

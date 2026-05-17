@@ -59,7 +59,7 @@ from mimo.oof.main_oof_regime_weights_v7 import (
 
 # ─── Espacio de búsqueda por arch ───────────────────────────────────────
 
-def _suggest_hp(trial: optuna.Trial, arch: str) -> Dict[str, Any]:
+def _suggest_hp(trial: optuna.Trial, arch: str, side: str = "both") -> Dict[str, Any]:
     """Define HP space específico por arch. Comunes para todos (loss,
     optimizer, regularización) + específicos según arch (filters, conv, etc.)."""
 
@@ -116,20 +116,33 @@ def _suggest_hp(trial: optuna.Trial, arch: str) -> Dict[str, Any]:
                                                             [128, 256, 512, 1024]),
             "head_units":         trial.suggest_categorical("head_units",
                                                             [64, 128, 192, 256, 384, 512]),
-            "focal_alpha_long":   trial.suggest_float("focal_alpha_long", 0.30, 0.80),
-            "focal_alpha_short":  trial.suggest_float("focal_alpha_short", 0.30, 0.85),
             "focal_gamma":        trial.suggest_float("focal_gamma", 0.10, 2.5),
             "activation":         trial.suggest_categorical("activation",
                                                             ["gelu", "relu", "swish", "elu"]),
-            "loss_weight_short":  trial.suggest_float("loss_weight_short", 0.5, 2.5),
             "conv1d_filters":     trial.suggest_categorical("conv1d_filters",
                                                             [32, 48, 64, 96, 128, 192, 256]),
-            # Estructurales
             "kernel_size":        trial.suggest_categorical("kernel_size", [3, 5, 7]),
             "n_tcn_blocks_long":  trial.suggest_int("n_tcn_blocks_long", 3, 6),
             "tcn_pooling":        trial.suggest_categorical("tcn_pooling",
                                                             ["gap", "gmp", "gap_gmp"]),
         }
+        # Side-specific HPs:
+        #  · both  → multitask (current behavior): ambos focal_alpha + loss_weight_short.
+        #  · long  → solo focal_alpha_long; fija loss_weight_short=0 (head SHORT no entrena).
+        #  · short → solo focal_alpha_short; fija loss_weight_long=0 (head LONG no entrena).
+        if side in ("both", "long"):
+            hp["focal_alpha_long"] = trial.suggest_float("focal_alpha_long", 0.30, 0.80)
+        if side in ("both", "short"):
+            hp["focal_alpha_short"] = trial.suggest_float("focal_alpha_short", 0.30, 0.85)
+        if side == "both":
+            hp["loss_weight_short"] = trial.suggest_float("loss_weight_short", 0.5, 2.5)
+        elif side == "long":
+            # Single-side LONG: forzar weights estáticos
+            hp["loss_weight_long"]  = 1.0
+            hp["loss_weight_short"] = 0.0
+        elif side == "short":
+            hp["loss_weight_long"]  = 0.0
+            hp["loss_weight_short"] = 1.0
         return hp
 
     hp = {
@@ -207,10 +220,13 @@ def _train_and_eval(
     general_config: Config, feature_config: FeatureConfig,
     regime_config: StateConfig,
     epochs: int, patience: int, seed: int,
+    side: str = "both",
 ) -> float:
     """Entrena modelo con hp del trial sobre df_train, evalúa sobre df_val.
-    Devuelve avg val_auc_pr (long+short)/2. Si algo falla, devuelve -1.0
-    Y EMITE el traceback completo a stdout para diagnóstico."""
+    side="both"  → score = avg val_auc_pr (long+short)/2 (multitask).
+    side="long"  → score = max val_signal_long_auc_pr (single-side).
+    side="short" → score = max val_signal_short_auc_pr (single-side).
+    Si algo falla, devuelve -1.0 y emite el traceback completo a stdout."""
     import tensorflow as tf
     import traceback as _tb
     tf.keras.utils.set_random_seed(int(seed))
@@ -303,9 +319,23 @@ def _train_and_eval(
         print(_tb.format_exc())
         return -1.0
 
-    # Score: avg max val AUC PR across epochs
+    # Score: max val AUC PR del side activo. Para side="both" promediamos
+    # ambos sides (comportamiento legacy multitask).
     hk_long  = history.get("val_signal_long_auc_pr",  [])
     hk_short = history.get("val_signal_short_auc_pr", [])
+    if side == "long":
+        if not hk_long:
+            print(f"      ❌ val_signal_long_auc_pr vacío. "
+                  f"history keys: {list(history.keys())}")
+            return -1.0
+        return float(max(hk_long))
+    if side == "short":
+        if not hk_short:
+            print(f"      ❌ val_signal_short_auc_pr vacío. "
+                  f"history keys: {list(history.keys())}")
+            return -1.0
+        return float(max(hk_short))
+    # side == "both"
     if not hk_long or not hk_short:
         print(f"      ❌ val_auc_pr histórico vacío. "
               f"history keys: {list(history.keys())}")
@@ -322,8 +352,20 @@ def _build_argparser() -> argparse.ArgumentParser:
                     choices=("mlp", "mlp_flatten", "hybrid", "transformer", "tcn"),
                     help="Arquitectura a tunear.")
     ap.add_argument("--release", default="202500")
+    ap.add_argument("--side", default="both",
+                    choices=("both", "long", "short"),
+                    help="Side a optimizar. 'both' (default) = multitask "
+                         "(ambos focal_alpha + loss_weight_short, objective "
+                         "promedia ambos val_auc_pr). 'long' = single-side "
+                         "LONG (focal_alpha_short y loss_weight_short fijos "
+                         "a 0 → head SHORT no entrena, objective solo LONG). "
+                         "'short' = simétrico al anterior pero para SHORT. "
+                         "Camino B: lanzar dos studies separados con --side=long "
+                         "y --side=short.")
     ap.add_argument("--study-name", default=None,
-                    help="Default: oof_study_<RELEASE>_<arch>_multitask")
+                    help="Default: oof_study_<RELEASE>_<arch>_multitask para "
+                         "side=both, oof_study_<RELEASE>_<arch>_<side>_only "
+                         "para side=long|short.")
     ap.add_argument("--n-trials", type=int, default=30,
                     help="Número de trials Optuna. 30 razonable para HP space ~10-dim.")
     ap.add_argument("--epochs", type=int, default=15,
@@ -365,10 +407,16 @@ def main() -> None:
 
     release = str(args.release)
     arch = str(args.arch)
-    study_name = args.study_name or f"oof_study_{release}_{arch}_multitask"
+    side = str(args.side)
+    if args.study_name:
+        study_name = args.study_name
+    elif side == "both":
+        study_name = f"oof_study_{release}_{arch}_multitask"
+    else:
+        study_name = f"oof_study_{release}_{arch}_{side}_only"
 
     print(f"\n{'═'*65}")
-    print(f"  OPTUNA TUNING — arch={arch}")
+    print(f"  OPTUNA TUNING — arch={arch} side={side}")
     print(f"{'═'*65}")
     print(f"  Study:       {study_name}")
     print(f"  N trials:    {args.n_trials}")
@@ -468,7 +516,7 @@ def main() -> None:
     # 5) Optimización
     def _objective(trial: optuna.Trial) -> float:
         t0 = time.time()
-        hp = _suggest_hp(trial, arch)
+        hp = _suggest_hp(trial, arch, side=side)
         print(f"\n  Trial #{trial.number} hp={hp}")
         try:
             score = _train_and_eval(
@@ -477,6 +525,7 @@ def main() -> None:
                 general_config=gc, feature_config=fc, regime_config=rc,
                 epochs=int(args.epochs), patience=int(args.patience),
                 seed=int(args.seed),
+                side=side,
             )
         except Exception as e:
             print(f"     ❌ Trial {trial.number} crashed: {str(e)[:200]}")

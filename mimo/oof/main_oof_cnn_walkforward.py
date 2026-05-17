@@ -650,7 +650,15 @@ def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--release", required=True)
     ap.add_argument("--cnn-study-name", required=True,
-                    help="Nombre del Optuna study del CNN (ej. oof_study_202500_multitask).")
+                    help="Nombre del Optuna study del CNN (ej. oof_study_202500_multitask). "
+                         "Usado por defecto para ambos modelos cuando SPLIT_MODELS=1, "
+                         "salvo que se especifique --cnn-study-name-long/short por separado.")
+    ap.add_argument("--cnn-study-name-long", default=None,
+                    help="(Opcional) Study específico para el modelo LONG cuando "
+                         "SPLIT_MODELS=1. Si se omite, se usa --cnn-study-name.")
+    ap.add_argument("--cnn-study-name-short", default=None,
+                    help="(Opcional) Study específico para el modelo SHORT cuando "
+                         "SPLIT_MODELS=1. Si se omite, se usa --cnn-study-name.")
     ap.add_argument("--base-tf", default="5min")
     ap.add_argument("--variant-long", choices=sorted(LONG_VARIANTS.keys()), default="moderate")
     ap.add_argument("--variant-short", choices=sorted(SHORT_VARIANTS.keys()), default="moderate")
@@ -695,7 +703,7 @@ def main() -> None:
     release = str(args.release)
     base_tf = str(args.base_tf)
 
-    # 1) Best CNN params
+    # 1) Best CNN params (study principal — usado en modo no-split o como fallback)
     best_params, best_trial_n = _load_best_params_from_study(
         args.cnn_study_name, args.optuna_storage)
     model_config = _model_config_from_params(
@@ -707,6 +715,41 @@ def main() -> None:
     # pero Python no se queja por atributos extra.
     setattr(model_config, "_walkforward_arch", str(args.arch))
     print(f"🏗️  Arquitectura: {args.arch}")
+
+    # 1b) Studies por side (opcionales): si --cnn-study-name-long/short están
+    # seteados, cargar best_params separados y construir model_configs distintos.
+    # Cada uno se usa en _train_one() según el side. Permite Camino B
+    # (Optuna single-side LONG + Optuna single-side SHORT).
+    model_config_long  = model_config
+    model_config_short = model_config
+    best_params_long  = best_params
+    best_params_short = best_params
+    best_trial_n_long  = best_trial_n
+    best_trial_n_short = best_trial_n
+    if args.cnn_study_name_long:
+        bp_l, bt_l = _load_best_params_from_study(
+            args.cnn_study_name_long, args.optuna_storage)
+        mc_l = _model_config_from_params(
+            bp_l, target_type="multitask",
+            epochs=int(args.epochs), patience=int(args.patience),
+        )
+        setattr(mc_l, "_walkforward_arch", str(args.arch))
+        model_config_long = mc_l
+        best_params_long  = bp_l
+        best_trial_n_long = bt_l
+        print(f"🎯 LONG study override: {args.cnn_study_name_long} (trial #{bt_l})")
+    if args.cnn_study_name_short:
+        bp_s, bt_s = _load_best_params_from_study(
+            args.cnn_study_name_short, args.optuna_storage)
+        mc_s = _model_config_from_params(
+            bp_s, target_type="multitask",
+            epochs=int(args.epochs), patience=int(args.patience),
+        )
+        setattr(mc_s, "_walkforward_arch", str(args.arch))
+        model_config_short = mc_s
+        best_params_short  = bp_s
+        best_trial_n_short = bt_s
+        print(f"🎯 SHORT study override: {args.cnn_study_name_short} (trial #{bt_s})")
 
     # 2) Regime weights + barriers + features (mismo patrón que GBM)
     regime_weights_by_side = resolve_regime_weights(args)
@@ -839,21 +882,23 @@ def main() -> None:
     def _train_one(side_label: str, vthm: int) -> Dict[str, Any]:
         prev = os.environ.get("VAL_THR_MONTHS")
         os.environ["VAL_THR_MONTHS"] = str(vthm)
-        # Override loss weights para single-side training
-        prev_lw_long  = float(getattr(model_config, "loss_weight_long",  1.0))
-        prev_lw_short = float(getattr(model_config, "loss_weight_short", 1.0))
+        # Selecciona model_config específico del side (Camino B: studies
+        # separados). Si no hay overrides, ambos apuntan al mismo objeto.
+        mc_active = model_config_long if side_label == "long" else model_config_short
+        prev_lw_long  = float(getattr(mc_active, "loss_weight_long",  1.0))
+        prev_lw_short = float(getattr(mc_active, "loss_weight_short", 1.0))
         if split_zero_other:
             if side_label == "long":
-                model_config.loss_weight_long  = prev_lw_long if prev_lw_long > 0 else 1.0
-                model_config.loss_weight_short = 0.0
+                mc_active.loss_weight_long  = prev_lw_long if prev_lw_long > 0 else 1.0
+                mc_active.loss_weight_short = 0.0
             elif side_label == "short":
-                model_config.loss_weight_long  = 0.0
-                model_config.loss_weight_short = prev_lw_short if prev_lw_short > 0 else 1.0
+                mc_active.loss_weight_long  = 0.0
+                mc_active.loss_weight_short = prev_lw_short if prev_lw_short > 0 else 1.0
         try:
             out = _train_and_predict_window(
                 df_prepared=df_prepared,
                 train_start=ts, train_end=te, test_start=vs, test_end=ve,
-                general_config=general_config, model_config=model_config,
+                general_config=general_config, model_config=mc_active,
                 feature_config=feature_config, regime_config=regime_config,
                 seed=int(args.seed),
             )
@@ -863,8 +908,8 @@ def main() -> None:
             else:
                 os.environ["VAL_THR_MONTHS"] = prev
             if split_zero_other:
-                model_config.loss_weight_long  = prev_lw_long
-                model_config.loss_weight_short = prev_lw_short
+                mc_active.loss_weight_long  = prev_lw_long
+                mc_active.loss_weight_short = prev_lw_short
         return out
 
     results: List[Dict[str, Any]] = []
@@ -992,6 +1037,12 @@ def main() -> None:
         "cnn_study_name": args.cnn_study_name,
         "cnn_best_trial": best_trial_n,
         "cnn_best_params": best_params,
+        "cnn_study_name_long":  args.cnn_study_name_long,
+        "cnn_study_name_short": args.cnn_study_name_short,
+        "cnn_best_trial_long":  best_trial_n_long if args.cnn_study_name_long  else None,
+        "cnn_best_trial_short": best_trial_n_short if args.cnn_study_name_short else None,
+        "cnn_best_params_long":  best_params_long  if args.cnn_study_name_long  else None,
+        "cnn_best_params_short": best_params_short if args.cnn_study_name_short else None,
         "mode": "raw_probs",
         "walk_config": {
             "walk_from": str(args.walk_from.date()),

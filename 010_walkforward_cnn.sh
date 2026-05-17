@@ -63,6 +63,11 @@ set -euo pipefail
 
 export RELEASE=${RELEASE:-202500}
 export CNN_STUDY=${CNN_STUDY:-oof_study_${RELEASE}_multitask}
+# Overrides por side (Camino B): si están seteados, se cargan studies separados
+# para los modelos LONG y SHORT en modo SPLIT_MODELS=1. Si no, ambos usan
+# CNN_STUDY.
+export CNN_STUDY_LONG=${CNN_STUDY_LONG:-}
+export CNN_STUDY_SHORT=${CNN_STUDY_SHORT:-}
 export TAG=${TAG:-deploy_2026_04_combined_specialists_seed47}
 export SEED=${SEED:-47}
 export NO_LOOKAHEAD_SCANNER=${NO_LOOKAHEAD_SCANNER:-0}
@@ -142,9 +147,19 @@ print(f\"✅ Study '${CNN_STUDY}' | {n_done} trials COMPLETE\")
 mkdir -p "${REPORTS_DIR}"
 
 log_section "2. Walkforward (esto va a tardar ~8-15h)"
+# Construir args de side-studies si los env vars están seteados (Camino B)
+EXTRA_STUDY_ARGS=""
+if [ -n "${CNN_STUDY_LONG}" ]; then
+  EXTRA_STUDY_ARGS="${EXTRA_STUDY_ARGS} --cnn-study-name-long ${CNN_STUDY_LONG}"
+fi
+if [ -n "${CNN_STUDY_SHORT}" ]; then
+  EXTRA_STUDY_ARGS="${EXTRA_STUDY_ARGS} --cnn-study-name-short ${CNN_STUDY_SHORT}"
+fi
+
 python3 -m mimo.oof.main_oof_cnn_walkforward \
   --release ${RELEASE} \
   --cnn-study-name "${CNN_STUDY}" \
+  ${EXTRA_STUDY_ARGS} \
   --base-tf 5min \
   --variant-long vol_boost_td_down --variant-short vol_boost \
   --label-horizon-long ${LH_LONG} --label-horizon-short ${LH_SHORT} \
