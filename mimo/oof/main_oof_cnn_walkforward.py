@@ -40,6 +40,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# DETERMINISTIC=1 activa modo bit-exact en TensorFlow. Debe configurarse antes
+# de cualquier import de TF (que ocurre transitivamente via mimo.models o
+# directamente en _train_and_predict_window). Coste: 2-3x más lento en GPU.
+if os.environ.get("DETERMINISTIC", "0") == "1":
+    os.environ.setdefault("TF_DETERMINISTIC_OPS", "1")
+    os.environ.setdefault("TF_CUDNN_DETERMINISTIC", "1")
+    os.environ.setdefault("PYTHONHASHSEED", "0")
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import numpy as np
 import optuna
 import pandas as pd
@@ -172,7 +181,13 @@ def _train_and_predict_window(
     """Entrena CNN multitask sobre train_window, predice sobre test_window.
     Devuelve dict con df_eval (con probs y outcomes simulados) o None si falla."""
     import tensorflow as tf
+    # set_random_seed setea numpy, tf y random simultáneamente
     tf.keras.utils.set_random_seed(int(seed))
+    if os.environ.get("DETERMINISTIC", "0") == "1":
+        # Reforzar por si algún módulo deshizo el seed entre ventanas
+        import random as _random
+        _random.seed(int(seed))
+        np.random.seed(int(seed))
 
     # Modo sin look-ahead: reservar último mes del train como val_threshold.
     # El threshold scanner se aplicará sobre val_threshold (no test), evitando
@@ -732,6 +747,14 @@ def main() -> None:
         print(f"   🛡️  Scanner robustness: "
               f"long(min_prec={long_mp}, smooth_k={long_sk})  "
               f"short(min_prec={short_mp}, smooth_k={short_sk})")
+    if os.environ.get("DETERMINISTIC", "0") == "1":
+        try:
+            import tensorflow as tf
+            tf.config.experimental.enable_op_determinism()
+            print(f"   🎯 DETERMINISTIC=1: TF_DETERMINISTIC_OPS, TF_CUDNN_DETERMINISTIC, "
+                  f"enable_op_determinism() activos")
+        except Exception as e:
+            print(f"   ⚠️  enable_op_determinism failed: {str(e)[:120]}")
     vsm_long  = int(os.environ.get("VAL_SCAN_MONTHS_LONG",  "0") or 0)
     vsm_short = int(os.environ.get("VAL_SCAN_MONTHS_SHORT", "0") or 0)
     if vsm_long > 0 or vsm_short > 0:
