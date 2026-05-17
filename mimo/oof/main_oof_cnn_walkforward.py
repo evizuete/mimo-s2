@@ -457,6 +457,10 @@ def _eval_predictions(
     cost_per_signal: float, max_drawdown_R: float,
     min_signals: int, use_raw_probs: bool = True,
     df_val_eval: Optional[pd.DataFrame] = None,
+    df_eval_long: Optional[pd.DataFrame] = None,
+    df_eval_short: Optional[pd.DataFrame] = None,
+    df_val_eval_long: Optional[pd.DataFrame] = None,
+    df_val_eval_short: Optional[pd.DataFrame] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Threshold scan por side y devuelve (long_res, short_res).
@@ -511,25 +515,34 @@ def _eval_predictions(
     val_scan_m_long  = _i("VAL_SCAN_MONTHS_LONG",  "0")
     val_scan_m_short = _i("VAL_SCAN_MONTHS_SHORT", "0")
 
-    def _val_eval_for_side(side_is_long: bool) -> Optional[pd.DataFrame]:
-        if df_val_eval is None:
+    def _val_eval_for_side(side_is_long: bool,
+                            source: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
+        src = source if source is not None else df_val_eval
+        if src is None:
             return None
         m = val_scan_m_long if side_is_long else val_scan_m_short
         if m <= 0:
-            return df_val_eval
-        t_end = pd.Timestamp(df_val_eval["time"].max()) + pd.Timedelta(microseconds=1)
+            return src
+        t_end = pd.Timestamp(src["time"].max()) + pd.Timedelta(microseconds=1)
         t_lo = t_end - relativedelta(months=int(m))
-        sub = df_val_eval.loc[df_val_eval["time"] >= t_lo]
-        return sub.reset_index(drop=True) if len(sub) >= 50 else df_val_eval
+        sub = src.loc[src["time"] >= t_lo]
+        return sub.reset_index(drop=True) if len(sub) >= 50 else src
 
     def _one_side(proba_col: str, side_is_long: bool) -> Dict[str, Any]:
         side_min_prec = long_min_prec if side_is_long else short_min_prec
         side_smooth_k = long_smooth_k if side_is_long else short_smooth_k
-        side_val_eval = _val_eval_for_side(side_is_long)
+        # En modo SPLIT_MODELS, df_eval_long y df_eval_short vienen de modelos
+        # distintos (uno entrenado para optimizar long, otro para short).
+        # Si están seteados, usar el correspondiente al side; si no, usar df_eval.
+        cand_eval = df_eval_long if side_is_long else df_eval_short
+        side_df_eval = cand_eval if cand_eval is not None else df_eval
+        cand_val = df_val_eval_long if side_is_long else df_val_eval_short
+        side_df_val_eval_raw = cand_val if cand_val is not None else df_val_eval
+        side_val_eval = _val_eval_for_side(side_is_long, side_df_val_eval_raw)
         if side_val_eval is None:
             # Modo estándar: scanner sobre test
             return compute_ev_at_best_threshold(
-                df_eval, proba_col=proba_col, side_is_long=side_is_long,
+                side_df_eval, proba_col=proba_col, side_is_long=side_is_long,
                 horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
                 cost_per_signal=cost_per_signal,
                 n_thr=n_thr, thr_lo=thr_lo, thr_hi=thr_hi,
@@ -553,10 +566,10 @@ def _eval_predictions(
             empty = _empty_result(reason="no_valid_thr_in_val")
             empty["scan"] = scan_res
             return empty
-        # Aplicar threshold elegido al test
+        # Aplicar threshold elegido al test (df_eval del side específico)
         from mimo.oof.ev_objective import apply_fixed_threshold
         test_res = apply_fixed_threshold(
-            df_eval, proba_col=proba_col, side_is_long=side_is_long,
+            side_df_eval, proba_col=proba_col, side_is_long=side_is_long,
             thr=float(chosen_thr),
             horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
             cost_per_signal=cost_per_signal,
@@ -780,19 +793,59 @@ def main() -> None:
     print(f"\n🔄 Walkforward CNN refit por ventana | epochs={args.epochs} "
           f"patience={args.patience}")
 
-    results: List[Dict[str, Any]] = []
-    for i, (ts, te, vs, ve) in enumerate(windows):
-        t0 = time.time()
-        print(f"\n── Window {i+1}/{len(windows)} | train={ts.date()}→{te.date()} "
-              f"test={vs.date()}→{ve.date()}")
+    # SPLIT_MODELS=1: entrenar dos modelos por ventana (uno para long, otro
+    # para short), cada uno con su VAL_THR_MONTHS_LONG/_SHORT. Permite tener
+    # long con val=1mo (modelo entrenado con 12mo de train) y short con val=3mo
+    # (modelo entrenado con 11mo + filtros), simultáneamente.
+    split_models = os.environ.get("SPLIT_MODELS", "0") == "1"
+    val_thr_m_long  = int(os.environ.get("VAL_THR_MONTHS_LONG",  str(val_thr_m)) or val_thr_m)
+    val_thr_m_short = int(os.environ.get("VAL_THR_MONTHS_SHORT", str(val_thr_m)) or val_thr_m)
+    if split_models:
+        print(f"   🪞 SPLIT_MODELS=1: 2 modelos por ventana "
+              f"(LONG con VAL_THR={val_thr_m_long}m, SHORT con VAL_THR={val_thr_m_short}m)")
+
+    def _train_one(side_label: str, vthm: int) -> Dict[str, Any]:
+        prev = os.environ.get("VAL_THR_MONTHS")
+        os.environ["VAL_THR_MONTHS"] = str(vthm)
         try:
-            tr_out = _train_and_predict_window(
+            out = _train_and_predict_window(
                 df_prepared=df_prepared,
                 train_start=ts, train_end=te, test_start=vs, test_end=ve,
                 general_config=general_config, model_config=model_config,
                 feature_config=feature_config, regime_config=regime_config,
                 seed=int(args.seed),
             )
+        finally:
+            if prev is None:
+                os.environ.pop("VAL_THR_MONTHS", None)
+            else:
+                os.environ["VAL_THR_MONTHS"] = prev
+        return out
+
+    results: List[Dict[str, Any]] = []
+    for i, (ts, te, vs, ve) in enumerate(windows):
+        t0 = time.time()
+        print(f"\n── Window {i+1}/{len(windows)} | train={ts.date()}→{te.date()} "
+              f"test={vs.date()}→{ve.date()}")
+        tr_out_long = tr_out_short = None
+        try:
+            if split_models:
+                print(f"   ⚙️  modelo LONG (val={val_thr_m_long}m)...")
+                tr_out_long = _train_one("long", val_thr_m_long)
+                if not tr_out_long.get("skipped"):
+                    print(f"   ⚙️  modelo SHORT (val={val_thr_m_short}m)...")
+                    tr_out_short = _train_one("short", val_thr_m_short)
+                # Si LONG falló, usar SHORT como representante y viceversa
+                tr_out = tr_out_long if not tr_out_long.get("skipped") \
+                    else (tr_out_short or tr_out_long)
+            else:
+                tr_out = _train_and_predict_window(
+                    df_prepared=df_prepared,
+                    train_start=ts, train_end=te, test_start=vs, test_end=ve,
+                    general_config=general_config, model_config=model_config,
+                    feature_config=feature_config, regime_config=regime_config,
+                    seed=int(args.seed),
+                )
         except Exception as e:
             tr_out = {"skipped": True, "reason": f"unexpected_error: {str(e)[:200]}"}
 
@@ -809,14 +862,28 @@ def main() -> None:
 
         df_eval     = tr_out["df_eval"]
         df_val_eval = tr_out.get("df_val_eval")
-        long_res, short_res = _eval_predictions(
-            df_eval, horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
-            cost_per_signal=args.cost_per_signal,
-            max_drawdown_R=args.max_drawdown_R,
-            min_signals=args.min_signals_window,
-            use_raw_probs=True,   # raw probs + threshold scan
-            df_val_eval=df_val_eval,  # None salvo NO_LOOKAHEAD_SCANNER=1
-        )
+        if split_models and tr_out_long is not None and tr_out_short is not None \
+           and not tr_out_long.get("skipped") and not tr_out_short.get("skipped"):
+            long_res, short_res = _eval_predictions(
+                df_eval, horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
+                cost_per_signal=args.cost_per_signal,
+                max_drawdown_R=args.max_drawdown_R,
+                min_signals=args.min_signals_window,
+                use_raw_probs=True,
+                df_eval_long=tr_out_long["df_eval"],
+                df_eval_short=tr_out_short["df_eval"],
+                df_val_eval_long=tr_out_long.get("df_val_eval"),
+                df_val_eval_short=tr_out_short.get("df_val_eval"),
+            )
+        else:
+            long_res, short_res = _eval_predictions(
+                df_eval, horizon=horizon, tp_mult=tp_mult, sl_mult=sl_mult,
+                cost_per_signal=args.cost_per_signal,
+                max_drawdown_R=args.max_drawdown_R,
+                min_signals=args.min_signals_window,
+                use_raw_probs=True,   # raw probs + threshold scan
+                df_val_eval=df_val_eval,  # None salvo NO_LOOKAHEAD_SCANNER=1
+            )
 
         dt_sec = time.time() - t0
         ev_l = long_res.get("ev_net"); sig_l = int(long_res.get("n_signals", 0) or 0)
@@ -831,7 +898,7 @@ def main() -> None:
         else:
             print(f"   SHORT sin señales")
 
-        results.append({
+        win_entry: Dict[str, Any] = {
             "window": [str(ts.date()), str(te.date()),
                        str(vs.date()), str(ve.date())],
             "n_train": tr_out["n_train"], "n_test": tr_out["n_test"],
@@ -840,8 +907,19 @@ def main() -> None:
             "skipped": False,
             "long":  _json_safe(long_res),
             "short": _json_safe(short_res),
-            "no_lookahead": (df_val_eval is not None),
-        })
+            "no_lookahead": (df_val_eval is not None) or split_models,
+        }
+        if split_models and tr_out_long is not None and tr_out_short is not None \
+           and not tr_out_long.get("skipped") and not tr_out_short.get("skipped"):
+            win_entry["split_models"] = {
+                "long":  {"n_train": tr_out_long["n_train"],
+                          "n_val_thr": tr_out_long.get("n_val_thr", 0),
+                          "best_epoch": tr_out_long.get("best_epoch")},
+                "short": {"n_train": tr_out_short["n_train"],
+                          "n_val_thr": tr_out_short.get("n_val_thr", 0),
+                          "best_epoch": tr_out_short.get("best_epoch")},
+            }
+        results.append(win_entry)
 
     # 8) Summary
     summary_long  = _summarize(results, "long")
