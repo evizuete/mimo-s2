@@ -823,13 +823,32 @@ def main() -> None:
     split_models = os.environ.get("SPLIT_MODELS", "0") == "1"
     val_thr_m_long  = int(os.environ.get("VAL_THR_MONTHS_LONG",  str(val_thr_m)) or val_thr_m)
     val_thr_m_short = int(os.environ.get("VAL_THR_MONTHS_SHORT", str(val_thr_m)) or val_thr_m)
+    # SPLIT_ZERO_OTHER_LOSS=1 hace que cada modelo de SPLIT_MODELS entrene
+    # SOLO su side: el modelo LONG pone loss_weight_short=0 (la head SHORT
+    # existe pero no contribuye al loss → gradient solo del LONG, backbone
+    # se especializa). Equivalente operacional a single-output sin tocar la
+    # arquitectura. Conserva los HPs del trial multitask actual.
+    split_zero_other = os.environ.get("SPLIT_ZERO_OTHER_LOSS", "0") == "1"
     if split_models:
         print(f"   🪞 SPLIT_MODELS=1: 2 modelos por ventana "
               f"(LONG con VAL_THR={val_thr_m_long}m, SHORT con VAL_THR={val_thr_m_short}m)")
+        if split_zero_other:
+            print(f"   🎯 SPLIT_ZERO_OTHER_LOSS=1: cada modelo entrena single-side "
+                  f"(loss_weight=0 en la head opuesta)")
 
     def _train_one(side_label: str, vthm: int) -> Dict[str, Any]:
         prev = os.environ.get("VAL_THR_MONTHS")
         os.environ["VAL_THR_MONTHS"] = str(vthm)
+        # Override loss weights para single-side training
+        prev_lw_long  = float(getattr(model_config, "loss_weight_long",  1.0))
+        prev_lw_short = float(getattr(model_config, "loss_weight_short", 1.0))
+        if split_zero_other:
+            if side_label == "long":
+                model_config.loss_weight_long  = prev_lw_long if prev_lw_long > 0 else 1.0
+                model_config.loss_weight_short = 0.0
+            elif side_label == "short":
+                model_config.loss_weight_long  = 0.0
+                model_config.loss_weight_short = prev_lw_short if prev_lw_short > 0 else 1.0
         try:
             out = _train_and_predict_window(
                 df_prepared=df_prepared,
@@ -843,6 +862,9 @@ def main() -> None:
                 os.environ.pop("VAL_THR_MONTHS", None)
             else:
                 os.environ["VAL_THR_MONTHS"] = prev
+            if split_zero_other:
+                model_config.loss_weight_long  = prev_lw_long
+                model_config.loss_weight_short = prev_lw_short
         return out
 
     results: List[Dict[str, Any]] = []
