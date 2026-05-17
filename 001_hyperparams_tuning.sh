@@ -131,7 +131,10 @@ python3 -m mimo.oof.main_oof_regime_weights_v7 \
 # ─── 3. Verificar que el study existe en MySQL ─────────────────────
 log_section "3. Verificar study creado en Optuna"
 
-EXPECTED_STUDY="oof_study_${RELEASE}_multitask"
+# Si CNN_LSTM_STUDY_PREFIX está exportado, el trainer construye el study con
+# ese prefix en lugar de "oof_study". Mantenemos el chequeo sincronizado.
+STUDY_PREFIX_EFFECTIVE="${CNN_LSTM_STUDY_PREFIX:-oof_study}"
+EXPECTED_STUDY="${STUDY_PREFIX_EFFECTIVE}_${RELEASE}_multitask"
 STUDY_EXISTS=$(python3 -c "
 import optuna
 names = optuna.get_all_study_names(storage='${OPTUNA_STORAGE}')

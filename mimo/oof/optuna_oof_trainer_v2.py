@@ -164,7 +164,19 @@ class OptunaOOFTrainer:
         self.base_model_config = base_model_config
         self.out_dir = out_dir
         self.optuna_db = optuna_db
-        self.study_prefix = study_prefix
+        # Env override CNN_LSTM_STUDY_PREFIX permite redirigir el study name
+        # sin tocar release/--study-prefix CLI. Útil para tunear con un grid
+        # HP nuevo (ej. CNN_LSTM_GRID=202500_v4) sin pisar el study legacy.
+        # Resultado: study name será f"{override}_{release}_{side}".
+        import os as _os
+        _env_prefix = _os.environ.get("CNN_LSTM_STUDY_PREFIX", "").strip()
+        if _env_prefix:
+            print(f"🎯 [OptunaOOFTrainer] study_prefix override via "
+                  f"CNN_LSTM_STUDY_PREFIX='{_env_prefix}' "
+                  f"(antes: '{study_prefix}')")
+            self.study_prefix = _env_prefix
+        else:
+            self.study_prefix = study_prefix
         self.seed = seed
         # Compatibilidad hacia atrás: si los nuevos son 1.0 pero el legacy != 1.0,
         # usar el legacy para ambos lados.
