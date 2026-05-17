@@ -352,12 +352,18 @@ def build_tcn_mlp(
     sobre ambas secuencias + MLP sobre context+time.
 
     HPs estructurales expuestos (vía model_config / setattr extras):
-      · activation          ∈ {gelu, relu, swish, elu}   default 'gelu'
-      · kernel_size         ∈ {3, 5, 7}                  default 3
-      · n_tcn_blocks_long   ∈ {3..6} (dilations 2^i)     default 5
-      · tcn_pooling         ∈ {gap, gmp, gap_gmp}        default 'gap'
-      · conv1d_filters      categórico                   default 32
-      · dropout_seq/dense, l2_reg, head_units            ya existentes
+      · activation              ∈ {gelu, relu, swish, elu}        default 'gelu'
+      · kernel_size             ∈ {2, 3, 5, 7}                    default 3
+      · n_tcn_blocks_long       ∈ {2..6} (dilations 2^i)          default 5
+      · n_tcn_blocks_short      ∈ {2..4}                          default derivado
+      · tcn_filters_short_ratio float (filters_short = ratio*long) default 0.5
+      · tcn_pooling             ∈ {gap, gmp, gap_gmp, attention}  default 'gap'
+      · conv1d_filters          categórico                         default 32
+      · ctx_dense_units         int (capacidad rama context+time)  default 64
+      · use_se                  bool (Squeeze-and-Excite por bloque) default False
+      · se_ratio                int (reducción canal SE)            default 8
+      · attn_units              int (proyección attention pooling)  default 32
+      · dropout_seq/dense, l2_reg, head_units                       ya existentes
     """
     inp_s, inp_l, inp_ctx, inp_t = _make_inputs(
         shape_short, shape_long, n_context, n_time)
@@ -369,8 +375,31 @@ def build_tcn_mlp(
     act      = str(getattr(model_config, 'activation', 'gelu')).lower()
     ksize    = int(getattr(model_config, 'kernel_size', 3))
     n_long   = int(getattr(model_config, 'n_tcn_blocks_long', 5))
-    n_short  = min(3, max(2, n_long - 2))  # derivado: seq_short=24 << seq_long=96
+    # n_short: si se expone vía HP (v4), úsalo; si no, deriva como v3.
+    _n_short_default = min(3, max(2, n_long - 2))
+    n_short  = int(getattr(model_config, 'n_tcn_blocks_short', _n_short_default))
     pooling  = str(getattr(model_config, 'tcn_pooling', 'gap')).lower()
+    fs_ratio = float(getattr(model_config, 'tcn_filters_short_ratio', 0.5))
+    filters_short = max(int(round(filters * fs_ratio)), 16)
+    use_se   = bool(int(getattr(model_config, 'use_se', 0)))
+    se_ratio = max(int(getattr(model_config, 'se_ratio', 8)), 2)
+    ctx_units = int(getattr(model_config, 'ctx_dense_units', 64))
+    attn_units = max(int(getattr(model_config, 'attn_units', 32)), 8)
+
+    def _se_block(x, name):
+        """Squeeze-and-Excite por canal: GAP → Dense(C/r,relu) → Dense(C,sigmoid)
+        → reescala canales. Coste ~2·C²/r params, muy bajo vs conv blocks."""
+        c = int(x.shape[-1])
+        r = max(c // se_ratio, 4)
+        s = layers.GlobalAveragePooling1D(name=f'{name}_gap')(x)
+        s = layers.Dense(r, activation='relu',
+                         kernel_regularizer=regularizers.l2(l2),
+                         name=f'{name}_d1')(s)
+        s = layers.Dense(c, activation='sigmoid',
+                         kernel_regularizer=regularizers.l2(l2),
+                         name=f'{name}_d2')(s)
+        s = layers.Reshape((1, c), name=f'{name}_rs')(s)
+        return layers.Multiply(name=f'{name}_mul')([x, s])
 
     def _tcn_block(x, dilation, filt, name):
         residual = x
@@ -387,7 +416,23 @@ def build_tcn_mlp(
                                      name=f'{name}_res_proj')(residual)
         x = layers.Add(name=f'{name}_add')([x, residual])
         x = layers.LayerNormalization(name=f'{name}_norm')(x)
+        if use_se:
+            x = _se_block(x, f'{name}_se')
         return x
+
+    def _attn_pool(seq, name_prefix: str):
+        """Attention pooling aprendible: score por timestep → softmax → weighted sum.
+        Captura "qué momento de la ventana importa" en lugar de promediar todo."""
+        h = layers.Dense(attn_units, activation='tanh',
+                         kernel_regularizer=regularizers.l2(l2),
+                         name=f'{name_prefix}_attn_proj')(seq)
+        scores = layers.Dense(1, name=f'{name_prefix}_attn_score')(h)
+        scores = layers.Reshape((-1,), name=f'{name_prefix}_attn_sq')(scores)
+        w = layers.Softmax(axis=1, name=f'{name_prefix}_attn_sm')(scores)
+        w = layers.Reshape((-1, 1), name=f'{name_prefix}_attn_rs')(w)
+        weighted = layers.Multiply(name=f'{name_prefix}_attn_mul')([seq, w])
+        return layers.Lambda(lambda t: tf.reduce_sum(t, axis=1),
+                             name=f'{name_prefix}_attn_sum')(weighted)
 
     def _pool(seq, name_prefix: str):
         if pooling == 'gmp':
@@ -396,6 +441,8 @@ def build_tcn_mlp(
             gap = layers.GlobalAveragePooling1D(name=f'{name_prefix}_gap')(seq)
             gmp = layers.GlobalMaxPooling1D(name=f'{name_prefix}_gmp')(seq)
             return layers.Concatenate(name=f'{name_prefix}_pool')([gap, gmp])
+        if pooling == 'attention':
+            return _attn_pool(seq, name_prefix)
         return layers.GlobalAveragePooling1D(name=f'{name_prefix}_gap')(seq)
 
     # TCN seq_long: dilations [1, 2, 4, ..., 2^(n_long-1)]
@@ -407,11 +454,11 @@ def build_tcn_mlp(
     # TCN seq_short: dilations [1, 2, 4, ..., 2^(n_short-1)]
     s = inp_s
     for i in range(n_short):
-        s = _tcn_block(s, 2 ** i, max(filters // 2, 16), f'tcn_s{i}')
+        s = _tcn_block(s, 2 ** i, filters_short, f'tcn_s{i}')
     s_short = _pool(s, 'short')
 
     c = layers.Concatenate(name='ctx_time')([inp_ctx, inp_t])
-    c = layers.Dense(64, activation=act,
+    c = layers.Dense(ctx_units, activation=act,
                      kernel_regularizer=regularizers.l2(l2),
                      name='ctx_dense')(c)
     c = layers.LayerNormalization(name='ctx_ln')(c)

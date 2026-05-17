@@ -31,12 +31,12 @@ import argparse
 import json
 import os
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import optuna
-from optuna.samplers import TPESampler
+from optuna.samplers import TPESampler, NSGAIISampler
 from dateutil.relativedelta import relativedelta
 
 # Reutilizamos toda la infra de carga de datos del walkforward existente
@@ -93,43 +93,63 @@ def _suggest_hp(trial: optuna.Trial, arch: str, side: str = "both") -> Dict[str,
         }
         return hp
 
-    # TCN v3: ampliación de bordes basada en los HPs que el TPE empujó al
-    # extremo en v2 (study oof_study_202500_tcn_multitask, 20 trials,
-    # best_value=0.143). Bordes detectados:
-    #   focal_alpha_long  → 0.591 (techo v2 0.60)        → v3 [0.30, 0.80]
-    #   focal_alpha_short → 0.678 (techo v2 0.70)        → v3 [0.30, 0.85]
-    #   focal_gamma       → 0.508 (suelo v2 0.50)        → v3 [0.10, 2.5]
-    #   conv1d_filters    → 128 (techo v2 128)           → v3 [32..256]
-    #   learning_rate     → 4.7e-3 (cerca techo v2 5e-3) → v3 [3e-4, 1e-2]
-    #   dropout_seq       → 0.064 (cerca suelo v2 0.05)  → v3 [0.03, 0.30]
+    # TCN v4: refinamiento sobre v3 (study oof_study_202500_tcn_v3_multitask, 35
+    # trials, best_value=0.144 multitask + best_value=0.16 short_only). Hallazgos:
+    #   l2_reg            → 1.7e-7 (suelo v3 1e-7)        → v4 [1e-8, 5e-4]
+    #   kernel_size       → 3 (suelo)                     → v4 [2, 3, 5]
+    #   n_tcn_blocks_long → 3 (suelo v3 3)                → v4 (2, 5)
+    #   conv1d_filters    → 48 (suelo bajo de v3 32..256) → v4 [16..96]
+    #   head_units        → 256 (centro)                  → v4 [64, 128, 192, 256]
+    #   learning_rate     → 2.3e-3 (centro)               → v4 (5e-4, 5e-3)
+    #   tcn_short_only eligió ksize=7, n_blocks=4, filt=128 (todos techos):
+    #     LONG y SHORT prefieren receptive fields distintos → v4 prioriza
+    #     SIDE=long y SIDE=short por separado (studies independientes).
     #
-    # IMPORTANTE: el rango de learning_rate cambia (no es superconjunto), así
-    # que NO reuses el study v2 — lanza con STUDY_NAME diferente:
-    #   STUDY_NAME=oof_study_202500_tcn_v3_multitask bash 012_optuna_arch.sh tcn
+    # HPs nuevos en v4 (antes hard-coded o derivados):
+    #   · n_tcn_blocks_short        (antes derivado de n_long)
+    #   · tcn_filters_short_ratio   (antes 0.5 hard-coded en builder)
+    #   · ctx_dense_units           (antes 64 hard-coded en builder)
+    #   · tcn_pooling añade "attention" (attention pooling aprendible)
+    #   · use_se + se_ratio         (squeeze-and-excite por bloque TCN)
+    #
+    # IMPORTANTE: estudio nuevo (espacio no es superconjunto del v3). Usar:
+    #   SIDE=long  STUDY_NAME=oof_study_202500_tcn_v4_long_only \
+    #     bash 012_optuna_arch.sh tcn 40
+    #   SIDE=short STUDY_NAME=oof_study_202500_tcn_v4_short_only \
+    #     bash 012_optuna_arch.sh tcn 40
     if arch == "tcn":
         hp = {
-            "l2_reg":             trial.suggest_float("l2_reg", 1e-7, 1e-3, log=True),
+            "l2_reg":             trial.suggest_float("l2_reg", 1e-8, 5e-4, log=True),
             "dropout_dense":      trial.suggest_float("dropout_dense", 0.05, 0.40),
             "dropout_seq":        trial.suggest_float("dropout_seq", 0.03, 0.30),
-            "learning_rate":      trial.suggest_float("learning_rate", 3e-4, 1e-2, log=True),
+            "learning_rate":      trial.suggest_float("learning_rate", 5e-4, 5e-3, log=True),
             "batch_size":         trial.suggest_categorical("batch_size",
                                                             [128, 256, 512, 1024]),
             "head_units":         trial.suggest_categorical("head_units",
-                                                            [64, 128, 192, 256, 384, 512]),
+                                                            [64, 128, 192, 256]),
             "focal_gamma":        trial.suggest_float("focal_gamma", 0.10, 2.5),
             "activation":         trial.suggest_categorical("activation",
                                                             ["gelu", "relu", "swish", "elu"]),
             "conv1d_filters":     trial.suggest_categorical("conv1d_filters",
-                                                            [32, 48, 64, 96, 128, 192, 256]),
-            "kernel_size":        trial.suggest_categorical("kernel_size", [3, 5, 7]),
-            "n_tcn_blocks_long":  trial.suggest_int("n_tcn_blocks_long", 3, 6),
-            "tcn_pooling":        trial.suggest_categorical("tcn_pooling",
-                                                            ["gap", "gmp", "gap_gmp"]),
+                                                            [16, 24, 32, 48, 64, 96]),
+            "kernel_size":        trial.suggest_categorical("kernel_size", [2, 3, 5]),
+            "n_tcn_blocks_long":  trial.suggest_int("n_tcn_blocks_long", 2, 5),
+            "n_tcn_blocks_short": trial.suggest_int("n_tcn_blocks_short", 2, 4),
+            "tcn_filters_short_ratio": trial.suggest_categorical(
+                "tcn_filters_short_ratio", [0.5, 0.75, 1.0]),
+            "ctx_dense_units":    trial.suggest_categorical("ctx_dense_units",
+                                                            [32, 64, 128]),
+            "tcn_pooling":        trial.suggest_categorical(
+                "tcn_pooling", ["gap", "gmp", "gap_gmp", "attention"]),
+            "use_se":             trial.suggest_categorical("use_se", [0, 1]),
         }
+        # se_ratio condicional — solo si use_se=1, evita explorar zona muerta.
+        if hp["use_se"]:
+            hp["se_ratio"] = trial.suggest_categorical("se_ratio", [4, 8, 16])
         # Side-specific HPs:
-        #  · both  → multitask (current behavior): ambos focal_alpha + loss_weight_short.
-        #  · long  → solo focal_alpha_long; fija loss_weight_short=0 (head SHORT no entrena).
-        #  · short → solo focal_alpha_short; fija loss_weight_long=0 (head LONG no entrena).
+        #  · both  → multitask: ambos focal_alpha + loss_weight_short libre.
+        #  · long  → solo focal_alpha_long; loss_weight_short=0 (head SHORT no entrena).
+        #  · short → solo focal_alpha_short; loss_weight_long=0 (head LONG no entrena).
         if side in ("both", "long"):
             hp["focal_alpha_long"] = trial.suggest_float("focal_alpha_long", 0.30, 0.80)
         if side in ("both", "short"):
@@ -137,7 +157,6 @@ def _suggest_hp(trial: optuna.Trial, arch: str, side: str = "both") -> Dict[str,
         if side == "both":
             hp["loss_weight_short"] = trial.suggest_float("loss_weight_short", 0.5, 2.5)
         elif side == "long":
-            # Single-side LONG: forzar weights estáticos
             hp["loss_weight_long"]  = 1.0
             hp["loss_weight_short"] = 0.0
         elif side == "short":
@@ -206,12 +225,76 @@ def _build_model_config(hp: Dict[str, Any], epochs: int, patience: int,
     setattr(mc, "focal_alpha_long",  fa_l)
     setattr(mc, "focal_alpha_short", fa_s)
     # HPs extra que NO están en el dataclass pero los lee algún builder via
-    # getattr (p.ej. TCN: kernel_size, n_tcn_blocks_long, tcn_pooling).
-    EXTRA_HP_KEYS = ("kernel_size", "n_tcn_blocks_long", "tcn_pooling")
+    # getattr (p.ej. TCN v3: kernel_size, n_tcn_blocks_long, tcn_pooling;
+    # TCN v4 añade: n_tcn_blocks_short, tcn_filters_short_ratio,
+    # ctx_dense_units, use_se, se_ratio).
+    EXTRA_HP_KEYS = (
+        "kernel_size", "n_tcn_blocks_long", "tcn_pooling",
+        "n_tcn_blocks_short", "tcn_filters_short_ratio",
+        "ctx_dense_units", "use_se", "se_ratio",
+    )
     for k in EXTRA_HP_KEYS:
         if k in candidate:
             setattr(mc, k, candidate[k])
     return mc
+
+
+def _eval_ev_score(
+    model, X_va, y_va, side: str,
+    tp_mult: float, sl_mult: float, cost_per_signal: float,
+    min_signals: int,
+) -> Tuple[float, float]:
+    """Threshold sweep en val para estimar max EV_net por side, alineado con la
+    métrica del walkforward final (en R, con triple-barrier tp_mult/sl_mult).
+
+    Para cada side activo:
+      ev_net(t) = precision(t) * tp_mult - (1 - precision(t)) * sl_mult - cost
+      sujeto a n_signals(t) >= min_signals. Si no hay threshold con suficientes
+      señales → -1.0 R (penaliza configs ranking-buenas pero sin volumen útil).
+
+    Devuelve (ev_long, ev_short); side no activo → 0.0 (no entra en el score)."""
+    try:
+        preds = model.model.predict(X_va, verbose=0)
+    except Exception as e:
+        print(f"      ❌ predict failed en EV sweep: {e}")
+        return -1.0, -1.0
+
+    if isinstance(preds, dict):
+        p_long  = np.asarray(preds.get("signal_long")).ravel()
+        p_short = np.asarray(preds.get("signal_short")).ravel()
+    elif isinstance(preds, (list, tuple)) and len(preds) >= 2:
+        p_long  = np.asarray(preds[0]).ravel()
+        p_short = np.asarray(preds[1]).ravel()
+    else:
+        arr = np.asarray(preds)
+        p_long  = arr[:, 0] if arr.ndim == 2 else arr.ravel()
+        p_short = arr[:, 1] if arr.ndim == 2 and arr.shape[1] >= 2 else p_long
+
+    y_long  = y_va[:, 0].astype(float)
+    y_short = y_va[:, 1].astype(float)
+
+    def _best_ev(p: np.ndarray, y: np.ndarray) -> float:
+        if p.size == 0 or p.size != y.size:
+            return -1.0
+        lo, hi = np.quantile(p, [0.10, 0.99])
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            return -1.0
+        thrs = np.linspace(lo, hi, 41)
+        best = -1.0
+        for t in thrs:
+            mask = p > t
+            n = int(mask.sum())
+            if n < min_signals:
+                continue
+            prec = float(y[mask].mean())
+            ev = prec * tp_mult - (1.0 - prec) * sl_mult - cost_per_signal
+            if ev > best:
+                best = ev
+        return best
+
+    ev_l = _best_ev(p_long, y_long)  if side in ("both", "long")  else 0.0
+    ev_s = _best_ev(p_short, y_short) if side in ("both", "short") else 0.0
+    return ev_l, ev_s
 
 
 def _train_and_eval(
@@ -221,12 +304,23 @@ def _train_and_eval(
     regime_config: StateConfig,
     epochs: int, patience: int, seed: int,
     side: str = "both",
-) -> float:
+    objective: str = "auc_pr",
+    multi_obj: bool = False,
+    ev_tp_mult: float = 2.0, ev_sl_mult: float = 0.8,
+    ev_cost: float = 0.05, ev_min_signals: int = 30,
+) -> Union[float, Tuple[float, float]]:
     """Entrena modelo con hp del trial sobre df_train, evalúa sobre df_val.
-    side="both"  → score = avg val_auc_pr (long+short)/2 (multitask).
-    side="long"  → score = max val_signal_long_auc_pr (single-side).
-    side="short" → score = max val_signal_short_auc_pr (single-side).
-    Si algo falla, devuelve -1.0 y emite el traceback completo a stdout."""
+
+    objective="auc_pr" → score = max val_signal_<side>_auc_pr (ranking puro).
+    objective="ev_net" → score = max EV_net via threshold sweep en val,
+                          alineado con la métrica final del walkforward.
+
+    side="both"  multi_obj=False → media de ambos sides.
+    side="both"  multi_obj=True  → tupla (long, short) para Pareto front.
+    side="long"  → solo LONG.
+    side="short" → solo SHORT.
+
+    Si algo falla, devuelve -1.0 (o (-1.0, -1.0) en multi_obj) y emite traceback."""
     import tensorflow as tf
     import traceback as _tb
     tf.keras.utils.set_random_seed(int(seed))
@@ -319,28 +413,41 @@ def _train_and_eval(
         print(_tb.format_exc())
         return -1.0
 
-    # Score: max val AUC PR del side activo. Para side="both" promediamos
-    # ambos sides (comportamiento legacy multitask).
-    hk_long  = history.get("val_signal_long_auc_pr",  [])
-    hk_short = history.get("val_signal_short_auc_pr", [])
-    if side == "long":
-        if not hk_long:
+    # Score por side según objective:
+    #   auc_pr → max(history[val_signal_<side>_auc_pr]) (ranking puro)
+    #   ev_net → max EV_net via threshold sweep en val (alineado a walkforward)
+    fail = (-1.0, -1.0) if (multi_obj and side == "both") else -1.0
+
+    if objective == "ev_net":
+        ev_l, ev_s = _eval_ev_score(
+            model, X_va, y_va, side,
+            tp_mult=float(ev_tp_mult), sl_mult=float(ev_sl_mult),
+            cost_per_signal=float(ev_cost), min_signals=int(ev_min_signals),
+        )
+        score_long, score_short = float(ev_l), float(ev_s)
+        print(f"      ev_long={score_long:+.4f}  ev_short={score_short:+.4f}")
+    else:
+        hk_long  = history.get("val_signal_long_auc_pr",  [])
+        hk_short = history.get("val_signal_short_auc_pr", [])
+        if side in ("both", "long") and not hk_long:
             print(f"      ❌ val_signal_long_auc_pr vacío. "
                   f"history keys: {list(history.keys())}")
-            return -1.0
-        return float(max(hk_long))
-    if side == "short":
-        if not hk_short:
+            return fail
+        if side in ("both", "short") and not hk_short:
             print(f"      ❌ val_signal_short_auc_pr vacío. "
                   f"history keys: {list(history.keys())}")
-            return -1.0
-        return float(max(hk_short))
+            return fail
+        score_long  = float(max(hk_long))  if hk_long  else 0.0
+        score_short = float(max(hk_short)) if hk_short else 0.0
+
+    if side == "long":
+        return score_long
+    if side == "short":
+        return score_short
     # side == "both"
-    if not hk_long or not hk_short:
-        print(f"      ❌ val_auc_pr histórico vacío. "
-              f"history keys: {list(history.keys())}")
-        return -1.0
-    return float((max(hk_long) + max(hk_short)) / 2.0)
+    if multi_obj:
+        return (score_long, score_short)
+    return float((score_long + score_short) / 2.0)
 
 
 # ─── Main entrypoint ────────────────────────────────────────────────────
@@ -392,6 +499,34 @@ def _build_argparser() -> argparse.ArgumentParser:
                          "rangos distintos) o se quiere empezar limpio sin trials "
                          "previos contaminando el sampler. Usa optuna.delete_study() "
                          "internamente; idempotente si el study no existe.")
+    ap.add_argument("--objective", default="auc_pr",
+                    choices=("auc_pr", "ev_net"),
+                    help="Métrica a maximizar. 'auc_pr' (default) = max val_auc_pr "
+                         "por side (ranking puro, estable). 'ev_net' = max EV_net "
+                         "via threshold sweep en val, alineado con la métrica del "
+                         "walkforward (en R con triple-barrier). EV_net es más "
+                         "ruidoso (depende de min_signals) pero refleja mejor el "
+                         "deploy. Recomendado: auc_pr para tuning amplio, ev_net "
+                         "como refinamiento final.")
+    ap.add_argument("--multi-objective", action="store_true",
+                    help="Solo para SIDE=both. Optimiza simultáneamente "
+                         "(score_long, score_short) y devuelve el frente de Pareto. "
+                         "Usa NSGAIISampler en vez de TPE. Recomendado cuando "
+                         "LONG y SHORT entran en trade-off (caso típico TCN 202500). "
+                         "El JSON de salida incluye 'pareto_front' en vez de "
+                         "'best_params'; elige luego el punto que respete tu floor "
+                         "de SHORT (ver --min-short-score).")
+    ap.add_argument("--ev-tp-mult", type=float, default=2.0,
+                    help="TP multiplier para EV sweep. Default 2.0 (debe coincidir "
+                         "con el walkforward; ver tp_mult en walk_config).")
+    ap.add_argument("--ev-sl-mult", type=float, default=0.8,
+                    help="SL multiplier para EV sweep. Default 0.8.")
+    ap.add_argument("--ev-cost", type=float, default=0.05,
+                    help="Coste por señal en R (slippage + comisiones). Default 0.05.")
+    ap.add_argument("--ev-min-signals", type=int, default=30,
+                    help="Mínimo de señales en val para considerar un threshold. "
+                         "Default 30. Si val es ~2 meses (~17k filas), 30 es "
+                         "~0.18% — razonable. Subir si val es más grande.")
     ap.add_argument("--out-dir", default=None,
                     help="Default: artifacts/<RELEASE>/oof/tuning")
     # resolve_regime_weights() los lee del Namespace; pasamos None por defecto
@@ -503,18 +638,40 @@ def main() -> None:
         except Exception as e:
             print(f"⚠️  --reset-study: error al borrar study previo: {e}")
 
-    study = optuna.create_study(
-        study_name=study_name, storage=args.optuna_storage,
-        direction="maximize", load_if_exists=True,
-        sampler=TPESampler(seed=int(args.seed), n_startup_trials=5),
-    )
+    multi_obj = bool(args.multi_objective)
+    if multi_obj and side != "both":
+        raise SystemExit(
+            "❌ --multi-objective requiere SIDE=both. "
+            f"side actual='{side}'. Usa SIDE=both o quita --multi-objective."
+        )
+
+    if multi_obj:
+        # NSGA-II para multi-obj; TPE no soporta directions natively de forma estable.
+        study = optuna.create_study(
+            study_name=study_name, storage=args.optuna_storage,
+            directions=["maximize", "maximize"], load_if_exists=True,
+            sampler=NSGAIISampler(seed=int(args.seed)),
+        )
+        print(f"🎯 Multi-objective study (long, short) — sampler=NSGAIISampler")
+    else:
+        study = optuna.create_study(
+            study_name=study_name, storage=args.optuna_storage,
+            direction="maximize", load_if_exists=True,
+            sampler=TPESampler(seed=int(args.seed), n_startup_trials=5),
+        )
 
     completed_before = sum(1 for t in study.trials if t.state.name == "COMPLETE")
     print(f"\n🚀 Study ya tiene {completed_before} trials COMPLETE. "
           f"Lanzando {args.n_trials} adicionales.")
+    print(f"   objective={args.objective}  multi_obj={multi_obj}")
+    if args.objective == "ev_net":
+        print(f"   EV sweep: tp={args.ev_tp_mult}R sl={args.ev_sl_mult}R "
+              f"cost={args.ev_cost}R min_signals={args.ev_min_signals}")
 
     # 5) Optimización
-    def _objective(trial: optuna.Trial) -> float:
+    fail_score = (-1.0, -1.0) if multi_obj else -1.0
+
+    def _objective(trial: optuna.Trial):
         t0 = time.time()
         hp = _suggest_hp(trial, arch, side=side)
         print(f"\n  Trial #{trial.number} hp={hp}")
@@ -526,12 +683,22 @@ def main() -> None:
                 epochs=int(args.epochs), patience=int(args.patience),
                 seed=int(args.seed),
                 side=side,
+                objective=str(args.objective),
+                multi_obj=multi_obj,
+                ev_tp_mult=float(args.ev_tp_mult),
+                ev_sl_mult=float(args.ev_sl_mult),
+                ev_cost=float(args.ev_cost),
+                ev_min_signals=int(args.ev_min_signals),
             )
         except Exception as e:
             print(f"     ❌ Trial {trial.number} crashed: {str(e)[:200]}")
-            return -1.0
+            return fail_score
         dt = time.time() - t0
-        print(f"     → score={score:+.4f}  ({dt/60:.1f}min)")
+        if isinstance(score, tuple):
+            print(f"     → score=(L={score[0]:+.4f}, S={score[1]:+.4f})  "
+                  f"({dt/60:.1f}min)")
+        else:
+            print(f"     → score={score:+.4f}  ({dt/60:.1f}min)")
         return score
 
     study.optimize(_objective, n_trials=int(args.n_trials), show_progress_bar=False)
@@ -540,33 +707,69 @@ def main() -> None:
     print(f"\n{'═'*65}")
     print(f"  TUNING DONE — arch={arch}")
     print(f"{'═'*65}")
-    print(f"  Best trial:  #{study.best_trial.number}")
-    print(f"  Best value:  {study.best_value:+.4f}")
-    print(f"  Best params: {study.best_params}")
 
     out_dir = args.out_dir or f"artifacts/{release}/oof/tuning"
     os.makedirs(out_dir, exist_ok=True)
     side_suffix = {"both": "multitask", "long": "long_only", "short": "short_only"}[args.side]
     out_path = os.path.join(out_dir, f"best_params_{arch}_{side_suffix}.json")
+
+    common = {
+        "arch": arch, "release": release,
+        "study_name": study_name,
+        "objective": str(args.objective),
+        "multi_objective": multi_obj,
+        "n_trials_total": len(study.trials),
+        "n_trials_completed": sum(
+            1 for t in study.trials if t.state.name == "COMPLETE"),
+        "epochs_per_trial": int(args.epochs),
+        "split": {
+            "train_from": args.train_from, "train_to": args.train_to,
+            "val_from":   args.val_from,   "val_to":   args.val_to,
+        },
+    }
+    if args.objective == "ev_net":
+        common["ev_config"] = {
+            "tp_mult": float(args.ev_tp_mult), "sl_mult": float(args.ev_sl_mult),
+            "cost_per_signal": float(args.ev_cost),
+            "min_signals": int(args.ev_min_signals),
+        }
+
+    if multi_obj:
+        pareto = sorted(
+            [
+                {
+                    "trial_number": int(t.number),
+                    "score_long":  float(t.values[0]),
+                    "score_short": float(t.values[1]),
+                    "params":      dict(t.params),
+                }
+                for t in study.best_trials
+                if t.values is not None and len(t.values) == 2
+            ],
+            key=lambda d: d["score_long"] + d["score_short"], reverse=True,
+        )
+        print(f"  Pareto front: {len(pareto)} trials")
+        for i, p in enumerate(pareto[:5]):
+            print(f"    #{p['trial_number']:3d}  "
+                  f"L={p['score_long']:+.4f}  S={p['score_short']:+.4f}")
+        out = {**common, "pareto_front": pareto, "n_pareto_trials": len(pareto)}
+    else:
+        print(f"  Best trial:  #{study.best_trial.number}")
+        print(f"  Best value:  {study.best_value:+.4f}")
+        print(f"  Best params: {study.best_params}")
+        out = {**common,
+               "best_trial":  int(study.best_trial.number),
+               "best_value":  float(study.best_value),
+               "best_params": dict(study.best_params)}
+
     with open(out_path, "w") as f:
-        json.dump({
-            "arch": arch, "release": release,
-            "study_name": study_name,
-            "best_trial":  int(study.best_trial.number),
-            "best_value":  float(study.best_value),
-            "best_params": study.best_params,
-            "n_trials_total": len(study.trials),
-            "n_trials_completed": sum(
-                1 for t in study.trials if t.state.name == "COMPLETE"),
-            "epochs_per_trial": int(args.epochs),
-            "split": {
-                "train_from": args.train_from, "train_to": args.train_to,
-                "val_from":   args.val_from,   "val_to":   args.val_to,
-            },
-        }, f, indent=2)
-    print(f"\n💾 Best params guardados en {out_path}")
+        json.dump(out, f, indent=2)
+    print(f"\n💾 Resultados guardados en {out_path}")
     print(f"\n📋 Lanzar walkforward con esta arch tuneada:")
     print(f"   CNN_STUDY={study_name} ARCH={arch} bash 010_walkforward_cnn.sh")
+    if multi_obj:
+        print(f"   ⚠️  Multi-obj: elige un trial del Pareto en {out_path} y "
+              f"pásalo a mano vía best_params_override.")
 
 
 if __name__ == "__main__":

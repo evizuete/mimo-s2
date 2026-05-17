@@ -14,11 +14,30 @@
 #   transformer ~2-3h
 #   tcn         ~4-6h
 #
-# FLUJO recomendado:
+# FLUJO recomendado (TCN — release 202500):
+#   Tras observar asimetría LONG/SHORT en tcn_v3 (LONG +60R, SHORT +11R con
+#   PWR 40%), v4 cambia la estrategia por defecto: tunear cada side por
+#   separado. SIDE=both queda como opción legacy o para multi-objective.
+#
+#   1. SIDE=long  bash 012_optuna_arch.sh tcn 40   # ~5-6h
+#   2. SIDE=short bash 012_optuna_arch.sh tcn 40   # ~5-6h
+#   3. Walkforward 2-study combinando ambos:
+#      CNN_STUDY_LONG=oof_study_202500_tcn_v4_long_only \
+#      CNN_STUDY_SHORT=oof_study_202500_tcn_v4_short_only \
+#      SPLIT_MODELS=1 SPLIT_ZERO_OTHER_LOSS=1 ARCH=tcn \
+#      bash 010_walkforward_cnn.sh
+#
+# FLUJO clásico (otros archs o SIDE=both para TCN):
 #   1. bash 012_optuna_arch.sh mlp           # tune (~1.5h)
 #   2. CNN_STUDY=oof_study_202500_mlp_multitask \
 #      ARCH=mlp bash 010_walkforward_cnn.sh  # walkforward (~1-2h)
 #   3. Comparar long_only_sim_cnn_mlp.json vs el del GBM
+#
+# OBJETIVO Y MULTI-OBJ:
+#   OBJECTIVE=auc_pr  (default) — max val AUC-PR, ranking puro, estable.
+#   OBJECTIVE=ev_net  — max EV_net via threshold sweep en val, alineado con
+#                       walkforward (en R, tp/sl/cost iguales al deploy).
+#   MULTI_OBJECTIVE=1 (solo SIDE=both) — Pareto front (long, short) con NSGA-II.
 #
 # Si quieres tunear varios archs en cadena:
 #   for a in mlp hybrid transformer tcn; do bash 012_optuna_arch.sh $a; done
@@ -58,13 +77,28 @@ export PATIENCE=${PATIENCE:-4}
 
 export OPTUNA_STORAGE=${OPTUNA_STORAGE:-mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db}
 
-# STUDY_NAME override permite separar espacios HP incompatibles (p.ej. tcn v2
-# vs v3 donde el rango de learning_rate cambia). Default = nombre canónico del
-# arch, con sufijo según SIDE.
-if [ "${SIDE}" = "both" ]; then
-  STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}_multitask"}
+# Objective config (default ranking puro). Para TCN v4 es opcional alinear a EV.
+export OBJECTIVE=${OBJECTIVE:-auc_pr}
+export MULTI_OBJECTIVE=${MULTI_OBJECTIVE:-0}
+export EV_TP_MULT=${EV_TP_MULT:-2.0}
+export EV_SL_MULT=${EV_SL_MULT:-0.8}
+export EV_COST=${EV_COST:-0.05}
+export EV_MIN_SIGNALS=${EV_MIN_SIGNALS:-30}
+
+# STUDY_NAME override permite separar espacios HP incompatibles (p.ej. tcn v3
+# vs v4 donde se amplían y reducen rangos en distintos HPs). Default por arch:
+#   · tcn  → sufijo v4 (espacio HP redefinido en main_oof_arch_tuning._suggest_hp).
+#   · otros → sufijo canónico sin versión.
+# Sub-sufijo según SIDE: _multitask para both, _<side>_only para single-side.
+if [ "${ARCH}" = "tcn" ]; then
+  ARCH_VER_SUFFIX="_v4"
 else
-  STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}_${SIDE}_only"}
+  ARCH_VER_SUFFIX=""
+fi
+if [ "${SIDE}" = "both" ]; then
+  STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}${ARCH_VER_SUFFIX}_multitask"}
+else
+  STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}${ARCH_VER_SUFFIX}_${SIDE}_only"}
 fi
 
 log_section() { echo ""; echo "═══════════════════════════════════════════════════════════════"; echo "  $1"; echo "═══════════════════════════════════════════════════════════════"; }
@@ -74,9 +108,37 @@ echo "  Release:    ${RELEASE}"
 echo "  Study:      ${STUDY_NAME}"
 echo "  Side:       ${SIDE}"
 echo "  N trials:   ${N_TRIALS}"
+echo "  Objective:  ${OBJECTIVE}  (multi_obj=${MULTI_OBJECTIVE})"
+if [ "${OBJECTIVE}" = "ev_net" ]; then
+  echo "  EV cfg:     tp=${EV_TP_MULT}R sl=${EV_SL_MULT}R cost=${EV_COST}R min_signals=${EV_MIN_SIGNALS}"
+fi
 echo "  Train:      ${TRAIN_FROM} → ${TRAIN_TO}"
 echo "  Val:        ${VAL_FROM} → ${VAL_TO}"
 echo "  Epochs/pat: ${EPOCHS} / ${PATIENCE}"
+
+# Aviso para TCN: la recomendación v4 es lanzar SIDE=long y SIDE=short
+# por separado (la asimetría observada en v3 hace que el multitask sacrifique
+# SHORT). SIDE=both queda como opción legacy o para uso con MULTI_OBJECTIVE=1.
+if [ "${ARCH}" = "tcn" ] && [ "${SIDE}" = "both" ] && [ "${MULTI_OBJECTIVE}" != "1" ]; then
+  echo ""
+  echo "  ⚠️  TCN v4: con SIDE=both en single-obj, LONG y SHORT comparten cabeza"
+  echo "      y se penalizan mutuamente. Considera:"
+  echo "        SIDE=long  bash 012_optuna_arch.sh tcn ${N_TRIALS}"
+  echo "        SIDE=short bash 012_optuna_arch.sh tcn ${N_TRIALS}"
+  echo "      o si insistes en SIDE=both, MULTI_OBJECTIVE=1 (Pareto NSGA-II)."
+fi
+
+# Construir flags opcionales del objective
+OBJ_FLAGS=(--objective "${OBJECTIVE}")
+if [ "${OBJECTIVE}" = "ev_net" ]; then
+  OBJ_FLAGS+=(--ev-tp-mult "${EV_TP_MULT}"
+              --ev-sl-mult "${EV_SL_MULT}"
+              --ev-cost "${EV_COST}"
+              --ev-min-signals "${EV_MIN_SIGNALS}")
+fi
+if [ "${MULTI_OBJECTIVE}" = "1" ]; then
+  OBJ_FLAGS+=(--multi-objective)
+fi
 
 python3 -m mimo.oof.main_oof_arch_tuning \
   --arch ${ARCH} \
@@ -91,7 +153,8 @@ python3 -m mimo.oof.main_oof_arch_tuning \
   --val-from ${VAL_FROM} --val-to ${VAL_TO} \
   --epochs ${EPOCHS} --patience ${PATIENCE} \
   --optuna-storage "${OPTUNA_STORAGE}" \
-  --seed ${SEED}
+  --seed ${SEED} \
+  "${OBJ_FLAGS[@]}"
 
 if [ "${SIDE}" = "both" ]; then
   SIDE_SUFFIX="multitask"
@@ -106,10 +169,16 @@ echo ""
 if [ "${SIDE}" = "both" ]; then
   echo "🚀 Ahora lanza el walkforward con la arch tuneada:"
   echo "   CNN_STUDY=${STUDY_NAME} ARCH=${ARCH} bash 010_walkforward_cnn.sh"
+  if [ "${MULTI_OBJECTIVE}" = "1" ]; then
+    echo ""
+    echo "   ⚠️  Multi-objective: el JSON contiene 'pareto_front' con todos los"
+    echo "       trials no dominados. Elige uno manualmente según el trade-off"
+    echo "       LONG/SHORT que prefieras antes del walkforward."
+  fi
 else
   echo "🚀 Ahora lanza el walkforward 2-study combinando este side con el opuesto:"
-  echo "   CNN_STUDY_LONG=oof_study_${RELEASE}_${ARCH}_long_only \\"
-  echo "   CNN_STUDY_SHORT=oof_study_${RELEASE}_${ARCH}_short_only \\"
+  echo "   CNN_STUDY_LONG=oof_study_${RELEASE}_${ARCH}${ARCH_VER_SUFFIX}_long_only \\"
+  echo "   CNN_STUDY_SHORT=oof_study_${RELEASE}_${ARCH}${ARCH_VER_SUFFIX}_short_only \\"
   echo "   SPLIT_MODELS=1 SPLIT_ZERO_OTHER_LOSS=1 ARCH=${ARCH} \\"
   echo "   bash 010_walkforward_cnn.sh"
 fi
