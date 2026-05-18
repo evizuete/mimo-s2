@@ -890,6 +890,76 @@ GRID_BY_RELEASE = {
         "loss_weight_short":   {"low": 0.0, "high": 2.5, "step": 0.25},
         "ranking_loss_weight": {"low": 0.0, "high": 0.20, "step": 0.05},
     },
+    # 202500_v4.1: refinamiento del v4 tras analizar los primeros 19 trials del
+    # study oof_study_v4_202500_multitask (best_value=+0.022 marginal, 12/19
+    # podados, 7 completados). Patrones detectados en los completados:
+    #
+    #   · use_attention=True → trials 3 (-0.85) y 8 (-0.55) — peores de todos.
+    #     MultiHeadAttention NO ayuda en esta combinación (LSTM ya attend).
+    #     → v4.1: FIJO a False.
+    #
+    #   · activation='relu' → único trial (#1) en -0.47. swish/elu dominan
+    #     los menos malos. → v4.1: quitar relu.
+    #
+    #   · lstm_units=96 → trial 3 (-0.85, el peor). 64 en todos los demás
+    #     completados. → v4.1: quitar 128, dejar [64, 96] solo por seguridad
+    #     (en realidad TPE seleccionará 64).
+    #
+    #   · conv1d_filters=96 → ningún completado lo probó (TPE no lo eligió).
+    #     32 fue peor que 48 (trial 14). → v4.1: [32, 48, 64].
+    #
+    #   · batch_size=8192 → trials 1, 3, 8 (todos peores). 2048-4096 dominan
+    #     los menos malos. → v4.1: [1024, 2048, 4096] (1024 nuevo para más
+    #     updates/epoch tipo 202601).
+    #
+    #   · learning_rate → los menos malos en 1e-4 a 4e-4. Trial 12 con lr=9.4e-4
+    #     → -0.12 (peor que los buenos). → v4.1: techo a 5e-4.
+    #
+    #   · focal_alpha_short=0.55 → trial 8 fail. 0.20-0.25 en los menos malos.
+    #     → v4.1: techo 0.40.
+    #
+    #   · loss_weight_short→ best=2.25, pero TPE quería techo (2.5).
+    #     → v4.1: ampliar techo a 3.0.
+    #
+    #   · loss_weight_long → 0.25-1.0 en los menos malos. 2.0 en trial 8 (fail).
+    #     → v4.1: techo 1.5.
+    #
+    # Resto de HPs sin cambios respecto a v4.
+    #
+    # Lanzar con study name NUEVO (espacios v4 y v4.1 incompatibles para TPE):
+    #   CNN_LSTM_GRID=202500_v4.1 \
+    #   CNN_LSTM_STUDY_PREFIX=oof_study_v4_1 \
+    #   OPTUNA_TRIALS=40 bash 001_hyperparams_tuning.sh
+    "202500_v4.1": {
+        **{k: v for k, v in _DEFAULT_GRID.items() if k != "focal_alpha"},
+        # ── Capacidad / arquitectura — categóricos (recortados) ──
+        "conv1d_filters":    [32, 48, 64],          # v4 [32,48,64,96] → quitar 96
+        "lstm_units":        [64, 96],              # v4 [64,96,128]   → quitar 128
+        "gru_units":         [32, 48, 64, 96],
+        "context_units":     [32, 64, 96],
+        "head_units":        [64, 128, 192, 256],
+        "time_units":        [16, 32, 64],
+        "batch_size":        [1024, 2048, 4096],    # v4 [2048,4096,8192] → 8192 fail
+        "kernel_size_short": [3, 5],
+        "kernel_size_long":  [3, 5, 7],
+        "attn_num_heads":    [2, 4, 8],             # ignorado (use_attention=False)
+        "activation":        ["gelu", "swish", "elu"],  # v4 incluía relu (fail)
+        "use_attention":     [False],               # v4 [F,T] — T sistemáticamente peor
+        "use_gate":          [False, True],
+        "use_hierarchical_fusion": [True],
+        # ── Continuous distributions (recortadas) ──
+        "learning_rate":       {"low": 5e-5, "high": 5e-4, "log": True},   # v4 [1e-4,1e-3]
+        "l2_reg":              {"low": 1e-7, "high": 1e-3, "log": True},
+        "dropout_seq":         {"low": 0.05, "high": 0.25, "step": 0.05},
+        "dropout_lstm":        {"low": 0.10, "high": 0.40, "step": 0.05},
+        "dropout_dense":       {"low": 0.10, "high": 0.35, "step": 0.05},
+        "focal_alpha_long":    {"low": 0.20, "high": 0.50, "step": 0.05},
+        "focal_alpha_short":   {"low": 0.20, "high": 0.40, "step": 0.05},  # v4 [0.20,0.55]
+        "focal_gamma":         {"low": 0.5, "high": 3.0, "step": 0.5},
+        "loss_weight_long":    {"low": 0.0, "high": 1.5, "step": 0.25},    # v4 [0.0,2.5]
+        "loss_weight_short":   {"low": 0.5, "high": 3.0, "step": 0.25},    # v4 [0.0,2.5]
+        "ranking_loss_weight": {"low": 0.0, "high": 0.10, "step": 0.05},   # v4 [0.0,0.20]
+    },
 }
 
 
