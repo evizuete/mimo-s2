@@ -92,6 +92,22 @@ class ModelConfig:
     # ignoran este campo y usan 'gelu' hardcoded para mantener compat.
     activation: str = 'gelu'
 
+    # ── HPs estructurales v4 (CNN-LSTM build_model_v3 v4) ──
+    # Reales fields del dataclass (no setattr) para que ModelConfig(**vars(mc))
+    # —patrón usado en optuna_oof_trainer y probs_calibration— no rompa.
+    # Semántica:
+    #   · valores > 0 → se usan tal cual.
+    #   · 0           → "auto / derivar" (legacy v3 default).
+    #   build_model_v3 v4 honra la sentinel 0 explícitamente.
+    # Backward-compat: si la release no toca estos campos en su grid_space,
+    # los defaults producen exactamente el modelo v3 legacy.
+    kernel_size_short: int = 3      # Conv1D rama corta (legacy 3)
+    kernel_size_long:  int = 5      # Conv1D rama larga (legacy 5)
+    gru_units:         int = 0      # 0 → lstm_units // 2 (legacy derivado)
+    attn_num_heads:    int = 4      # MultiHeadAttention heads (legacy 4)
+    attn_key_dim:      int = 0      # 0 → max(8, ch_short // 4) (legacy)
+
+
 class TradingModel:
     """Modelo de deep learning con arquitectura multi-scale"""
 
@@ -478,13 +494,15 @@ class TradingModel:
         """
         config = self.model_config
 
-        # HPs estructurales (todos via getattr → defaults idénticos al v3 legacy
-        # si la release no los suministra → cero impacto en estudios antiguos).
+        # HPs estructurales (campos reales del dataclass + getattr para
+        # retrocompat con tests/llamadas que pasan model_configs sintéticos sin
+        # estos campos). Sentinel 0 → "auto / derivar" (defaults legacy v3).
         act        = str(getattr(config, 'activation', 'relu')).lower()
-        ksize_s    = int(getattr(config, 'kernel_size_short', 3))
-        ksize_l    = int(getattr(config, 'kernel_size_long', 5))
-        gru_units  = int(getattr(config, 'gru_units', config.lstm_units // 2))
-        attn_heads = int(getattr(config, 'attn_num_heads', 4))
+        ksize_s    = int(getattr(config, 'kernel_size_short', 3) or 3)
+        ksize_l    = int(getattr(config, 'kernel_size_long', 5) or 5)
+        gru_units_raw = int(getattr(config, 'gru_units', 0) or 0)
+        gru_units  = gru_units_raw if gru_units_raw > 0 else (config.lstm_units // 2)
+        attn_heads = int(getattr(config, 'attn_num_heads', 4) or 4)
 
         # === INPUTS (idénticos a v2) ===
         input_short   = Input(shape=shape_short, name='seq_short')
@@ -504,8 +522,12 @@ class TradingModel:
         x_short = layers.Dropout(config.dropout_seq)(x_short)
 
         if config.use_attention:
-            attn_key_dim = int(getattr(
-                config, 'attn_key_dim', max(8, int(x_short.shape[-1]) // 4)))
+            # attn_key_dim: 0 → auto-derivar de la dimensión de canal (legacy).
+            attn_key_dim_raw = int(getattr(config, 'attn_key_dim', 0) or 0)
+            attn_key_dim = (
+                attn_key_dim_raw if attn_key_dim_raw > 0
+                else max(8, int(x_short.shape[-1]) // 4)
+            )
             att = layers.MultiHeadAttention(
                 num_heads=attn_heads,
                 key_dim=attn_key_dim,
