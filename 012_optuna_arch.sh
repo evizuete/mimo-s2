@@ -22,8 +22,8 @@
 #   1. SIDE=long  bash 012_optuna_arch.sh tcn 40   # ~5-6h
 #   2. SIDE=short bash 012_optuna_arch.sh tcn 40   # ~5-6h
 #   3. Walkforward 2-study combinando ambos:
-#      CNN_STUDY_LONG=oof_study_202500_tcn_v4_long_only \
-#      CNN_STUDY_SHORT=oof_study_202500_tcn_v4_short_only \
+#      CNN_STUDY_LONG=oof_study_202500_tcn_long_only_v4 \
+#      CNN_STUDY_SHORT=oof_study_202500_tcn_short_only_v4 \
 #      SPLIT_MODELS=1 SPLIT_ZERO_OTHER_LOSS=1 ARCH=tcn \
 #      bash 010_walkforward_cnn.sh
 #
@@ -87,18 +87,22 @@ export EV_MIN_SIGNALS=${EV_MIN_SIGNALS:-30}
 
 # STUDY_NAME override permite separar espacios HP incompatibles (p.ej. tcn v3
 # vs v4 donde se amplían y reducen rangos en distintos HPs). Default por arch:
-#   · tcn  → sufijo v4 (espacio HP redefinido en main_oof_arch_tuning._suggest_hp).
+#   · tcn  → sufijo v4 AL FINAL (espacio HP redefinido en
+#            main_oof_arch_tuning._suggest_hp).
 #   · otros → sufijo canónico sin versión.
 # Sub-sufijo según SIDE: _multitask para both, _<side>_only para single-side.
+# El sufijo de versión va SIEMPRE al final del nombre del study (convención
+# fijada para coincidir con los studies ya creados en MySQL — ej:
+# oof_study_202500_tcn_long_only_v4, no oof_study_202500_tcn_v4_long_only).
 if [ "${ARCH}" = "tcn" ]; then
   ARCH_VER_SUFFIX="_v4"
 else
   ARCH_VER_SUFFIX=""
 fi
 if [ "${SIDE}" = "both" ]; then
-  STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}${ARCH_VER_SUFFIX}_multitask"}
+  STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}_multitask${ARCH_VER_SUFFIX}"}
 else
-  STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}${ARCH_VER_SUFFIX}_${SIDE}_only"}
+  STUDY_NAME=${STUDY_NAME:-"oof_study_${RELEASE}_${ARCH}_${SIDE}_only${ARCH_VER_SUFFIX}"}
 fi
 
 log_section() { echo ""; echo "═══════════════════════════════════════════════════════════════"; echo "  $1"; echo "═══════════════════════════════════════════════════════════════"; }
@@ -177,8 +181,8 @@ if [ "${SIDE}" = "both" ]; then
   fi
 else
   echo "🚀 Ahora lanza el walkforward 2-study combinando este side con el opuesto:"
-  echo "   CNN_STUDY_LONG=oof_study_${RELEASE}_${ARCH}${ARCH_VER_SUFFIX}_long_only \\"
-  echo "   CNN_STUDY_SHORT=oof_study_${RELEASE}_${ARCH}${ARCH_VER_SUFFIX}_short_only \\"
+  echo "   CNN_STUDY_LONG=oof_study_${RELEASE}_${ARCH}_long_only${ARCH_VER_SUFFIX} \\"
+  echo "   CNN_STUDY_SHORT=oof_study_${RELEASE}_${ARCH}_short_only${ARCH_VER_SUFFIX} \\"
   echo "   SPLIT_MODELS=1 SPLIT_ZERO_OTHER_LOSS=1 ARCH=${ARCH} \\"
   echo "   bash 010_walkforward_cnn.sh"
 fi
