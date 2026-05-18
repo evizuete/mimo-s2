@@ -852,21 +852,109 @@ def main() -> None:
                             oof_epochs=int(args.epochs), save_oof_artifacts=False)
     regime_config = StateConfig(adx_trend_threshold=25.0)
 
-    # 6) prepare_data UNA vez sobre todo el rango (más eficiente)
-    print("⚙️  prepare_data global (esto puede tardar)...")
+    # 6) prepare_data
+    # ─────────────────────────────────────────────────────────────────────
+    # STRICT_NO_LEAK=1 (default 0):
+    #   · 0 = MODO LEGACY (look-ahead conocido): prepare_data UNA vez sobre el
+    #         df completo (train + test + lockbox). Las quantiles que usa
+    #         StateDetector (vol_low/high, bb_p20/35/70, rexp_p80) se calculan
+    #         con TODAS las filas, incluyendo test futuros → state assignment
+    #         y por tanto regime_barriers / labels triple-barrier / sample_weight
+    #         por estado tienen leak ~mild (típico 1-5% de filas cambian de
+    #         estado). Es el modo más rápido (~30s prepare único).
+    #   · 1 = SIN LEAK (recomendado para evaluación honesta): prepare_data PER
+    #         WINDOW. Fitea StateDetector solo sobre train slice (padding+train),
+    #         extrae thresholds, los inyecta, y luego prepara test slice con
+    #         thresholds train-fitted. Coste ~+10-15min (15 ventanas × 2 prepares).
+    # ─────────────────────────────────────────────────────────────────────
+    strict_no_leak = os.environ.get("STRICT_NO_LEAK", "0") == "1"
     pipeline_master = DataPipeline(
         general_config=general_config, feature_config=feature_config,
         model_config=model_config, regime_config=regime_config,
     )
-    df_prepared = pipeline_master.prepare_data(
-        df_rates, labels=True, side="both",
-        set_market_condition=False, ensure_regime=True,
-    )
-    print(f"   {len(df_prepared):,} filas tras prepare_data")
+    if not strict_no_leak:
+        print("⚙️  prepare_data global (esto puede tardar)...")
+        df_prepared = pipeline_master.prepare_data(
+            df_rates, labels=True, side="both",
+            set_market_condition=False, ensure_regime=True,
+        )
+        print(f"   {len(df_prepared):,} filas tras prepare_data")
+    else:
+        print("🔬 STRICT_NO_LEAK=1: prepare_data se hará per-window "
+              "(sin leak de quantiles StateDetector; ~+10-15min)")
+        df_prepared = None
 
     horizon = int(feature_config.label_horizon)
     tp_mult = float(feature_config.tp_barrier)
     sl_mult = float(feature_config.sl_barrier)
+
+    def _reset_state_detector() -> None:
+        """Devuelve StateDetector a un estado limpio antes del prepare de cada
+        ventana — limpia fixed_* (inyectados de la ventana anterior) y la
+        caché dinámica. Necesario para que el path dinámico de _get_thresholds
+        refitee con los datos de la ventana actual."""
+        sd = pipeline_master.state_detector
+        cfg = sd.config
+        cfg.fixed_vol_low             = None
+        cfg.fixed_vol_high            = None
+        cfg.fixed_bb_width_p20        = None
+        cfg.fixed_bb_width_p35        = None
+        cfg.fixed_bb_width_p70        = None
+        cfg.fixed_range_expansion_p80 = None
+        sd._cache_key         = None
+        sd._cached_thresholds = None
+        # Re-armar el warning una vez por ventana (informativo, no error):
+        # se silencia tras la primera ventana porque ya se entiende el patrón.
+        sd._dynamic_warned = True
+
+    def _prepare_window_strict(
+        ts: datetime, te: datetime, vs: datetime, ve: datetime,
+        padding_months: int = 2,
+    ) -> pd.DataFrame:
+        """Prepara datos para una ventana sin leak temporal.
+
+        Flujo:
+          1) Slice [ts - padding, te) → prepare_data → fit thresholds en train.
+          2) Extraer thresholds del state_detector y inject_thresholds (fija).
+          3) Slice [ts - padding, ve) → prepare_data con thresholds inyectados.
+             Esto asegura que las features rodantes del test tengan lookback
+             válido en train PERO las quantiles de estado son las del train.
+          4) Concatenar train_prep [ts,te) + test_prep [vs,ve).
+        """
+        ts_padded = pd.Timestamp(ts) - relativedelta(months=padding_months)
+        # Paso 1: padding + train, StateDetector libre para fitear
+        _reset_state_detector()
+        mask_train = (
+            (df_rates["time"] >= ts_padded) &
+            (df_rates["time"] <  pd.Timestamp(te))
+        )
+        train_rates = df_rates.loc[mask_train].reset_index(drop=True)
+        df_train_full = pipeline_master.prepare_data(
+            train_rates, labels=True, side="both",
+            set_market_condition=False, ensure_regime=True,
+        )
+        df_train_prep = df_train_full.loc[
+            df_train_full["time"] >= pd.Timestamp(ts)
+        ].reset_index(drop=True).copy()
+        # Paso 2: extraer + inyectar thresholds
+        thresholds = pipeline_master.state_detector.compute_thresholds(df_train_full)
+        pipeline_master.state_detector.inject_thresholds(thresholds)
+        # Paso 3: padding + train + test, StateDetector con thresholds fijos
+        mask_full = (
+            (df_rates["time"] >= ts_padded) &
+            (df_rates["time"] <  pd.Timestamp(ve))
+        )
+        full_rates = df_rates.loc[mask_full].reset_index(drop=True)
+        df_full_prep = pipeline_master.prepare_data(
+            full_rates, labels=True, side="both",
+            set_market_condition=False, ensure_regime=True,
+        )
+        df_test_prep = df_full_prep.loc[
+            df_full_prep["time"] >= pd.Timestamp(vs)
+        ].reset_index(drop=True).copy()
+        # Paso 4: concat para downstream (las slice de _train_and_predict_window
+        # son por tiempo, así que da igual el orden de concat).
+        return pd.concat([df_train_prep, df_test_prep], ignore_index=True)
 
     # 7) Walk-forward loop
     print(f"\n🔄 Walkforward CNN refit por ventana | epochs={args.epochs} "
@@ -892,7 +980,7 @@ def main() -> None:
             print(f"   🎯 SPLIT_ZERO_OTHER_LOSS=1: cada modelo entrena single-side "
                   f"(loss_weight=0 en la head opuesta)")
 
-    def _train_one(side_label: str, vthm: int) -> Dict[str, Any]:
+    def _train_one(side_label: str, vthm: int, df_w: pd.DataFrame) -> Dict[str, Any]:
         prev = os.environ.get("VAL_THR_MONTHS")
         os.environ["VAL_THR_MONTHS"] = str(vthm)
         # Selecciona model_config específico del side (Camino B: studies
@@ -909,7 +997,7 @@ def main() -> None:
                 mc_active.loss_weight_short = prev_lw_short if prev_lw_short > 0 else 1.0
         try:
             out = _train_and_predict_window(
-                df_prepared=df_prepared,
+                df_prepared=df_w,
                 train_start=ts, train_end=te, test_start=vs, test_end=ve,
                 general_config=general_config, model_config=mc_active,
                 feature_config=feature_config, regime_config=regime_config,
@@ -932,18 +1020,27 @@ def main() -> None:
               f"test={vs.date()}→{ve.date()}")
         tr_out_long = tr_out_short = None
         try:
+            # Selecciona df de la ventana: global slice (modo legacy) o
+            # prepare per-window con threshold injection (STRICT_NO_LEAK=1).
+            if strict_no_leak:
+                t_prep = time.time()
+                df_w = _prepare_window_strict(ts, te, vs, ve)
+                print(f"   🔬 prepare per-window: {len(df_w):,} filas "
+                      f"({time.time()-t_prep:.0f}s)")
+            else:
+                df_w = df_prepared
             if split_models:
                 print(f"   ⚙️  modelo LONG (val={val_thr_m_long}m)...")
-                tr_out_long = _train_one("long", val_thr_m_long)
+                tr_out_long = _train_one("long", val_thr_m_long, df_w)
                 if not tr_out_long.get("skipped"):
                     print(f"   ⚙️  modelo SHORT (val={val_thr_m_short}m)...")
-                    tr_out_short = _train_one("short", val_thr_m_short)
+                    tr_out_short = _train_one("short", val_thr_m_short, df_w)
                 # Si LONG falló, usar SHORT como representante y viceversa
                 tr_out = tr_out_long if not tr_out_long.get("skipped") \
                     else (tr_out_short or tr_out_long)
             else:
                 tr_out = _train_and_predict_window(
-                    df_prepared=df_prepared,
+                    df_prepared=df_w,
                     train_start=ts, train_end=te, test_start=vs, test_end=ve,
                     general_config=general_config, model_config=model_config,
                     feature_config=feature_config, regime_config=regime_config,
