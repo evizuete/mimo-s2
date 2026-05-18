@@ -169,6 +169,60 @@ def _model_config_from_params(params: Dict[str, Any], *, target_type: str = "mul
     return mc
 
 
+def _average_ensemble_long(out_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Promedia la columna `p_long_raw` a través de N modelos LONG entrenados
+    con seeds distintos sobre la MISMA ventana (test, val_internal).
+
+    Solo se promedia LONG; `p_short_raw` se hereda del primer miembro porque
+    el ensemble se aplica únicamente al side problemático (LONG TCN v4 mostró
+    varianza por seed alta; SHORT fue estable en 3 runs).
+
+    Asume que todos los miembros producen df_eval/df_val_eval con MISMA
+    estructura (mismo test slice, misma alineación seq_len_long). Si las
+    longitudes difieren entre miembros (raro pero posible si algún predict
+    trunca filas), se trunca al mínimo común antes de promediar.
+    """
+    assert len(out_list) >= 1, "ensemble requires at least 1 member"
+
+    # ─── df_eval (test) ─────────────────────────────────────────────────
+    min_len = min(len(o["df_eval"]) for o in out_list)
+    members = [o for o in out_list]  # alias
+    base = members[0]
+    df_eval = base["df_eval"].iloc[:min_len].reset_index(drop=True).copy()
+    p_stack = np.column_stack([
+        o["df_eval"]["p_long_raw"].values[:min_len].astype(np.float64)
+        for o in members
+    ])
+    df_eval["p_long_raw"] = p_stack.mean(axis=1).astype(np.float32)
+
+    # ─── df_val_eval (val_internal, opcional cuando NO_LOOKAHEAD_SCANNER=1) ─
+    df_val_eval = None
+    val_evals = [o.get("df_val_eval") for o in members
+                 if o.get("df_val_eval") is not None]
+    if val_evals:
+        min_len_va = min(len(d) for d in val_evals)
+        df_val_eval = val_evals[0].iloc[:min_len_va].reset_index(drop=True).copy()
+        pv_stack = np.column_stack([
+            d["p_long_raw"].values[:min_len_va].astype(np.float64)
+            for d in val_evals
+        ])
+        df_val_eval["p_long_raw"] = pv_stack.mean(axis=1).astype(np.float32)
+
+    return {
+        "skipped": False,
+        "df_eval": df_eval,
+        "df_val_eval": df_val_eval,
+        "n_train": base.get("n_train"),
+        "n_test":  base.get("n_test"),
+        "n_val_thr": base.get("n_val_thr", 0),
+        "best_epoch": base.get("best_epoch"),
+        "n_features_seq_long": base.get("n_features_seq_long"),
+        "n_features_context": base.get("n_features_context"),
+        # Metadata del ensemble (informativa)
+        "ensemble_n_members": len(members),
+    }
+
+
 def _train_and_predict_window(
     *,
     df_prepared: pd.DataFrame,
@@ -979,6 +1033,12 @@ def main() -> None:
         if split_zero_other:
             print(f"   🎯 SPLIT_ZERO_OTHER_LOSS=1: cada modelo entrena single-side "
                   f"(loss_weight=0 en la head opuesta)")
+    _ens_seeds_env = os.environ.get("LONG_ENSEMBLE_SEEDS", "").strip()
+    if _ens_seeds_env:
+        print(f"   🎲 LONG_ENSEMBLE_SEEDS='{_ens_seeds_env}': "
+              f"se entrenarán N modelos LONG por ventana y se promediará "
+              f"p_long_raw (test + val_internal) antes del threshold scanner. "
+              f"SHORT se queda como modelo único (seed={args.seed}).")
 
     def _train_one(side_label: str, vthm: int, df_w: pd.DataFrame) -> Dict[str, Any]:
         prev = os.environ.get("VAL_THR_MONTHS")
@@ -995,14 +1055,57 @@ def main() -> None:
             elif side_label == "short":
                 mc_active.loss_weight_long  = 0.0
                 mc_active.loss_weight_short = prev_lw_short if prev_lw_short > 0 else 1.0
+
+        # Ensemble path para LONG: si LONG_ENSEMBLE_SEEDS está definido (lista
+        # CSV de seeds), entrenar N modelos LONG con seeds distintos y promediar
+        # p_long_raw en test + val_internal antes del threshold scanner.
+        # Motivo: TCN v4 LONG mostró varianza alta entre seeds (seed=47: +64R,
+        # seed=42: -17R con misma config) — promedio reduce la inestabilidad
+        # estructural por inicialización.
+        # SHORT no entra en ensemble (ya estable en 3 runs: +16, +22, +23R).
+        ens_seeds: List[int] = []
+        if side_label == "long":
+            raw_env = os.environ.get("LONG_ENSEMBLE_SEEDS", "").strip()
+            if raw_env:
+                try:
+                    ens_seeds = [int(s.strip()) for s in raw_env.split(",")
+                                 if s.strip()]
+                except ValueError:
+                    print(f"   ⚠️  LONG_ENSEMBLE_SEEDS inválido: '{raw_env}', "
+                          f"se ignora; fallback a single-seed {args.seed}")
+                    ens_seeds = []
+
         try:
-            out = _train_and_predict_window(
-                df_prepared=df_w,
-                train_start=ts, train_end=te, test_start=vs, test_end=ve,
-                general_config=general_config, model_config=mc_active,
-                feature_config=feature_config, regime_config=regime_config,
-                seed=int(args.seed),
-            )
+            if ens_seeds:
+                members: List[Dict[str, Any]] = []
+                for sd in ens_seeds:
+                    m_out = _train_and_predict_window(
+                        df_prepared=df_w,
+                        train_start=ts, train_end=te, test_start=vs, test_end=ve,
+                        general_config=general_config, model_config=mc_active,
+                        feature_config=feature_config, regime_config=regime_config,
+                        seed=int(sd),
+                    )
+                    if m_out.get("skipped"):
+                        print(f"      ⚠️  ensemble member seed={sd} skipped: "
+                              f"{m_out.get('reason')}")
+                        continue
+                    members.append(m_out)
+                if not members:
+                    out = {"skipped": True,
+                           "reason": "all_ensemble_members_skipped"}
+                else:
+                    out = _average_ensemble_long(members)
+                    print(f"   🎯 LONG ensemble: {len(members)}/{len(ens_seeds)} "
+                          f"miembros promediados (seeds={ens_seeds})")
+            else:
+                out = _train_and_predict_window(
+                    df_prepared=df_w,
+                    train_start=ts, train_end=te, test_start=vs, test_end=ve,
+                    general_config=general_config, model_config=mc_active,
+                    feature_config=feature_config, regime_config=regime_config,
+                    seed=int(args.seed),
+                )
         finally:
             if prev is None:
                 os.environ.pop("VAL_THR_MONTHS", None)
