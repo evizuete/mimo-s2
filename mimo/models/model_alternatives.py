@@ -431,8 +431,18 @@ def build_tcn_mlp(
         w = layers.Softmax(axis=1, name=f'{name_prefix}_attn_sm')(scores)
         w = layers.Reshape((-1, 1), name=f'{name_prefix}_attn_rs')(w)
         weighted = layers.Multiply(name=f'{name_prefix}_attn_mul')([seq, w])
-        return layers.Lambda(lambda t: tf.reduce_sum(t, axis=1),
-                             name=f'{name_prefix}_attn_sum')(weighted)
+        # output_shape EXPLÍCITO obligatorio para que la deserialización
+        # (tf.keras.models.load_model) infiera la shape del Lambda al
+        # cargar el .keras file. Sin esto Keras 3 falla con:
+        #   NotImplementedError: could not automatically infer the shape
+        # weighted shape = (batch, T, C) → reduce_sum(axis=1) → (batch, C)
+        # Usamos input_shape (sin batch dim) para output_shape.
+        _ch = int(weighted.shape[-1])
+        return layers.Lambda(
+            lambda t: tf.reduce_sum(t, axis=1),
+            output_shape=(_ch,),
+            name=f'{name_prefix}_attn_sum',
+        )(weighted)
 
     def _pool(seq, name_prefix: str):
         if pooling == 'gmp':
