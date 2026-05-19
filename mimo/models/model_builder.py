@@ -107,6 +107,22 @@ class ModelConfig:
     attn_num_heads:    int = 4      # MultiHeadAttention heads (legacy 4)
     attn_key_dim:      int = 0      # 0 → max(8, ch_short // 4) (legacy)
 
+    # ── HPs estructurales TCN (build_tcn_mlp en model_alternatives.py) ──
+    # Mismo patrón: fields reales para que ModelConfig(**vars(mc)) no rompa
+    # cuando viene de un trial TCN (commit a99ef61 hizo condicional el suggest,
+    # pero los attributes se persisten al ModelConfig y la reconstrucción
+    # vía **vars() en probs_calibration.py:292 fallaba con TypeError).
+    # Defaults: matchean los legacy de build_tcn_mlp (cero impacto si la
+    # release no los declara en grid_space).
+    kernel_size:              int   = 3       # TCN: kernel único (no split)
+    n_tcn_blocks_long:        int   = 5       # bloques rama larga (dilations 2^i)
+    n_tcn_blocks_short:       int   = 3       # bloques rama corta (legacy=3)
+    tcn_filters_short_ratio:  float = 0.5     # filters_short = filters_long * ratio
+    ctx_dense_units:          int   = 64      # ancho de la Dense(ctx+time)
+    tcn_pooling:              str   = "gap"   # gap | gmp | gap_gmp | attention
+    use_se:                   int   = 0       # 0=off, 1=Squeeze-and-Excite por bloque
+    se_ratio:                 int   = 8       # ratio reducción canal en SE
+
     # ── Arquitectura del modelo ──
     # 'original_v3' (default) → CNN-LSTM nativo (build_model_v2/v3 según
     # use_hierarchical_fusion). Otras opciones delegan en build_model_by_arch
