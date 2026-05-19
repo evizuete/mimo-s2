@@ -314,23 +314,43 @@ class ProbsCalibration:
                 pos_rate = float(np.clip(np.nanmean(y_train), 1e-4, 1 - 1e-4))
                 init_bias = float(np.log(pos_rate / (1 - pos_rate)))
 
-            # Seleccionar arquitectura según flag del ModelConfig
-            # use_hierarchical_fusion=True → v3 (fusión jerárquica market/entry)
-            # use_hierarchical_fusion=False → v2 (fusión plana, default)
-            _build_fn = (
-                tm.build_model_v3
-                if getattr(fold_model_config, 'use_hierarchical_fusion', False)
-                else tm.build_model_v2
+            # Seleccionar arquitectura del modelo del fold:
+            #   arch == 'original_v3' (default) → CNN-LSTM (v3/v2 según
+            #     use_hierarchical_fusion).
+            #   arch ∈ {'mlp','mlp_flatten','hybrid','transformer','tcn'} →
+            #     delega en build_model_by_arch (factory model_alternatives).
+            # Espejo del path en optuna_oof_trainer_v2.prepare_production_model
+            # para garantizar que folds OOF y modelo final usen la misma arch.
+            _arch = str(getattr(fold_model_config, 'arch', 'original_v3')).lower()
+            _shape_short = (
+                fold_model_config.seq_len_short,
+                len(pipeline_fold.feature_engineer.feature_columns["sequence_short"]),
             )
-            _build_fn(
-                shape_short=(fold_model_config.seq_len_short,
-                             len(pipeline_fold.feature_engineer.feature_columns["sequence_short"])),
-                shape_long=(fold_model_config.seq_len_long,
-                            len(pipeline_fold.feature_engineer.feature_columns["sequence_long"])),
-                n_context=len(pipeline_fold.feature_engineer.feature_columns["context"]),
-                n_time=len(pipeline_fold.feature_engineer.feature_columns["time"]),
-                init_bias=init_bias,
+            _shape_long = (
+                fold_model_config.seq_len_long,
+                len(pipeline_fold.feature_engineer.feature_columns["sequence_long"]),
             )
+            _n_context = len(pipeline_fold.feature_engineer.feature_columns["context"])
+            _n_time    = len(pipeline_fold.feature_engineer.feature_columns["time"])
+            if _arch == 'original_v3':
+                _build_fn = (
+                    tm.build_model_v3
+                    if getattr(fold_model_config, 'use_hierarchical_fusion', False)
+                    else tm.build_model_v2
+                )
+                _build_fn(
+                    shape_short=_shape_short, shape_long=_shape_long,
+                    n_context=_n_context, n_time=_n_time,
+                    init_bias=init_bias,
+                )
+            else:
+                from mimo.models.model_alternatives import build_model_by_arch
+                tm.model = build_model_by_arch(
+                    arch_name=_arch,
+                    shape_short=_shape_short, shape_long=_shape_long,
+                    n_context=_n_context, n_time=_n_time,
+                    model_config=fold_model_config, init_bias=init_bias,
+                )
             tm.compile_model()
 
             aug_cfg = ScaleAugmentConfig(

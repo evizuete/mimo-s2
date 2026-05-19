@@ -45,6 +45,7 @@ def _build_cmd(args, side_key: str) -> list[str]:
         "--base-tf", args.base_tf,
         "--target-type", args.target_type,
         "--side", "both",  # multitask sigue entrenando ambas heads, usamos solo la del side
+        "--arch", args.arch,
         "--variant-long", args.variant_long,
         "--variant-short", args.variant_short,
         "--label-horizon-long", str(args.label_horizon_long),
@@ -85,6 +86,17 @@ def main():
     ap.add_argument("--release", required=True)
     ap.add_argument("--base-tf", default="5min")
     ap.add_argument("--target-type", default="multitask")
+    ap.add_argument(
+        "--arch",
+        choices=["original_v3", "mlp", "mlp_flatten", "hybrid", "transformer", "tcn"],
+        default="original_v3",
+        help="Arquitectura del modelo a entrenar. 'original_v3' (default) = "
+             "CNN-LSTM nativo. 'tcn' = Temporal Convolutional Network desde "
+             "model_alternatives.build_model_by_arch. Debe coincidir con la "
+             "arch del study que produjo best_per_side.json — los HPs específicos "
+             "de cada arch (kernel_size, n_tcn_blocks_long, tcn_pooling, etc.) "
+             "se leen del JSON automáticamente vía locked-params.",
+    )
     ap.add_argument("--variant-long", default="vol_boost_td_down")
     ap.add_argument("--variant-short", default="vol_boost")
     ap.add_argument("--label-horizon-long", type=int, default=3)

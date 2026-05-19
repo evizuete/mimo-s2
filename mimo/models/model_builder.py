@@ -107,6 +107,15 @@ class ModelConfig:
     attn_num_heads:    int = 4      # MultiHeadAttention heads (legacy 4)
     attn_key_dim:      int = 0      # 0 → max(8, ch_short // 4) (legacy)
 
+    # ── Arquitectura del modelo ──
+    # 'original_v3' (default) → CNN-LSTM nativo (build_model_v2/v3 según
+    # use_hierarchical_fusion). Otras opciones delegan en build_model_by_arch
+    # (model_alternatives.py): 'mlp', 'mlp_flatten', 'hybrid', 'transformer',
+    # 'tcn'. Permite construir modelos no-CNN-LSTM desde el pipeline de deploy
+    # (Fase 2/3). El walkforward 010 sigue usando _walkforward_arch attribute
+    # como mecanismo paralelo legacy.
+    arch: str = "original_v3"
+
 
 class TradingModel:
     """Modelo de deep learning con arquitectura multi-scale"""

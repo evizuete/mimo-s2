@@ -1732,6 +1732,17 @@ def parse_args() -> argparse.Namespace:
              "un release base como 202500).",
     )
     ap.add_argument("--side", choices=["long", "short", "both"], default="both")
+    ap.add_argument(
+        "--arch",
+        choices=["original_v3", "mlp", "mlp_flatten", "hybrid", "transformer", "tcn"],
+        default="original_v3",
+        help="Arquitectura del modelo. 'original_v3' (default) = CNN-LSTM nativo "
+             "(v3 con fusión jerárquica o v2 plana según use_hierarchical_fusion). "
+             "Otras opciones delegan en build_model_by_arch (model_alternatives.py): "
+             "compatible con el mismo dict de inputs y outputs multitask. "
+             "Recomendado para deploy de TCN: --arch tcn con HPs específicos en "
+             "best_per_side.json (ej. trial winner de oof_study_*_tcn_*_only_v4).",
+    )
     ap.add_argument("--variant-long", choices=sorted(LONG_VARIANTS.keys()), default="moderate")
     ap.add_argument("--variant-short", choices=sorted(SHORT_VARIANTS.keys()), default="moderate")
     ap.add_argument("--label-horizon-long", type=int, default=None)
@@ -2376,6 +2387,15 @@ _REDUCED_FEATURES_RELEASES = {"202300", "202400", "202500", "202600", "202601"}
 _ULTRA_REDUCED_FEATURES_RELEASES = {"202400"}
 
 
+def _mc_with_arch(mc: ModelConfig, arch: str) -> ModelConfig:
+    """Marca el ModelConfig con la arch a usar al construir el modelo. `arch`
+    NO es un dataclass field (mantenemos retrocompat con ModelConfig legacy);
+    se inyecta como attribute. Las funciones de build en optuna_oof_trainer_v2
+    y probs_calibration leen este attribute con getattr(default='original_v3')."""
+    setattr(mc, "arch", str(arch).lower())
+    return mc
+
+
 def build_trainer(
     release: str,
     label_horizon_long: int,
@@ -2396,6 +2416,7 @@ def build_trainer(
     oof_patience: int = 12,
     study_prefix: str = "oof_study",
     seed: int = 42,
+    arch: str = "original_v3",
 ) -> OptunaOOFTrainer:
     general = Config(
         release=release,
@@ -2486,15 +2507,18 @@ def build_trainer(
             use_ultra_reduced_features=use_ultra,
         ),
         regime_config=StateConfig(adx_trend_threshold=25.0),
-        base_model_config=ModelConfig(
-            seq_len_short=tf_defaults["seq_len_short"],
-            seq_len_long=tf_defaults["seq_len_long"],
-            epochs=oof_epochs,
-            patience=oof_patience,
-            use_hierarchical_fusion=True,
-            ranking_loss_weight=ranking_loss,
-            target_type=model_target_type,
-            quantile_levels=tuple(quantile_levels),
+        base_model_config=_mc_with_arch(
+            ModelConfig(
+                seq_len_short=tf_defaults["seq_len_short"],
+                seq_len_long=tf_defaults["seq_len_long"],
+                epochs=oof_epochs,
+                patience=oof_patience,
+                use_hierarchical_fusion=True,
+                ranking_loss_weight=ranking_loss,
+                target_type=model_target_type,
+                quantile_levels=tuple(quantile_levels),
+            ),
+            arch=arch,
         ),
         out_dir=str(train_dir),
         optuna_db="mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db",
@@ -3163,7 +3187,13 @@ def main() -> None:
         oof_patience=args.oof_patience,
         study_prefix=study_prefix_override or "oof_study",
         seed=int(args.seed),
+        arch=str(args.arch),
     )
+    if args.arch != "original_v3":
+        print(f"🏗️  [ARCH] arch='{args.arch}' — folds OOF y modelo final usan "
+              f"build_model_by_arch (NO el CNN-LSTM legacy). HPs específicos del "
+              f"arch deben venir en --locked-params-json (p.ej. n_tcn_blocks_long, "
+              f"tcn_pooling, etc. para TCN).")
     if args.objective == "ev_net":
         print(
             f"💰 [EV OBJECTIVE] cost={args.cost_per_signal}R/sig | "

@@ -12,10 +12,16 @@
 set -euo pipefail
 
 # ─── Configuración ─────────────────────────────────────────────────
-export RELEASE=${RELEASE:-202600}
+export RELEASE=${RELEASE:-202601}
 export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202500}
 export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
 export SEED=${SEED:-47}
+# ARCH: arquitectura del modelo a entrenar. Por defecto 'original_v3' (CNN-LSTM
+# nativo, compat hacia atrás con todos los runs previos). Cambiar a 'tcn' para
+# entrenar specialists TCN con HPs cargados desde best_per_side.json. El JSON
+# debe contener los HPs específicos del arch (best trial de un study TCN, p.ej.
+# oof_study_202500_tcn_long_only_v4 Trial 38).
+export ARCH=${ARCH:-original_v3}
 export TRAIN_FROM=${TRAIN_FROM:-2024-01-01}
 export TRAIN_TO=${TRAIN_TO:-2025-10-30}
 export HOLDOUT_FROM=${HOLDOUT_FROM:-2025-11-01}
@@ -39,6 +45,7 @@ echo "  Release:           ${RELEASE}"
 echo "  Inherit from:      ${INHERIT_FROM_RELEASE}"
 echo "  Tag:               ${TAG}"
 echo "  Seed:              ${SEED}"
+echo "  Arch:              ${ARCH}"
 echo "  best_per_side:     ${BEST_JSON}"
 echo "  Train period:      ${TRAIN_FROM} → ${TRAIN_TO}"
 echo "  Holdout period:    ${HOLDOUT_FROM} → ${HOLDOUT_TO}"
@@ -114,6 +121,7 @@ python3 -m mimo.oof.train_specialist \
   --inherit-config-from ${INHERIT_FROM_RELEASE} \
   --base-tf 5min \
   --target-type multitask \
+  --arch ${ARCH} \
   --variant-long vol_boost_td_down --variant-short vol_boost \
   --label-horizon-long 3 --label-horizon-short 3 \
   --train-from ${TRAIN_FROM} --train-to ${TRAIN_TO} \

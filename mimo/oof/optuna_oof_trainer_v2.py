@@ -15,6 +15,7 @@ from mimo.data_managers.data_pipeline_v2 import DataPipeline
 from mimo.features.feature_builder import FeatureConfig
 from mimo.helpers.helper import Helper
 from mimo.helpers.scaler_loader import load_pipeline_scalers_for_side
+from mimo.models.model_alternatives import build_model_by_arch
 from mimo.models.model_builder import Config, ModelConfig, TradingModel
 from mimo.models.model_evaluator import ModelEvaluator
 from mimo.oof.probs_calibration import ProbsCalibration
@@ -1018,21 +1019,43 @@ class OptunaOOFTrainer:
             init_bias = np.clip(init_bias, -2.0, 2.0)
             print(f'[BIAS] pos_rate={pos_rate:.4f}, init_bias={init_bias:.4f}')
 
-        # Seleccionar arquitectura según flag del ModelConfig
-        # use_hierarchical_fusion=True → v3 (fusión jerárquica market/entry)
-        # use_hierarchical_fusion=False → v2 (fusión plana, default)
-        _build_fn = (
-            tm.build_model_v3
-            if getattr(model_config, 'use_hierarchical_fusion', False)
-            else tm.build_model_v2
-        )
-        _build_fn(
-            shape_short=(model_config.seq_len_short, X_all["seq_short"].shape[-1]),
-            shape_long=(model_config.seq_len_long, X_all["seq_long"].shape[-1]),
-            n_context=X_all["context"].shape[-1],
-            n_time=X_all["time"].shape[-1],
-            init_bias=init_bias,
-        )
+        # Seleccionar arquitectura del modelo de producción:
+        #   1) arch == 'original_v3' (default) → CNN-LSTM nativo:
+        #        - use_hierarchical_fusion=True  → build_model_v3 (fusión jerárquica)
+        #        - use_hierarchical_fusion=False → build_model_v2 (fusión plana)
+        #   2) arch ∈ {'mlp', 'mlp_flatten', 'hybrid', 'transformer', 'tcn'} →
+        #        delega en build_model_by_arch (factory de model_alternatives.py).
+        #        Soporta el mismo dict de inputs (seq_short/seq_long/context/time)
+        #        y mismos output names (signal_long/signal_short) que CNN-LSTM,
+        #        así que el resto del pipeline (predict, calibración, runtime) es
+        #        agnóstico a la arch elegida.
+        # arch se lee con getattr para retrocompat con flows que pasan ModelConfig
+        # sin el attribute (legacy → 'original_v3').
+        _arch = str(getattr(model_config, 'arch', 'original_v3')).lower()
+        _shape_short = (model_config.seq_len_short, X_all["seq_short"].shape[-1])
+        _shape_long  = (model_config.seq_len_long,  X_all["seq_long"].shape[-1])
+        _n_context   = X_all["context"].shape[-1]
+        _n_time      = X_all["time"].shape[-1]
+        if _arch == 'original_v3':
+            _build_fn = (
+                tm.build_model_v3
+                if getattr(model_config, 'use_hierarchical_fusion', False)
+                else tm.build_model_v2
+            )
+            _build_fn(
+                shape_short=_shape_short, shape_long=_shape_long,
+                n_context=_n_context, n_time=_n_time,
+                init_bias=init_bias,
+            )
+        else:
+            print(f"[ARCH] Construyendo modelo de producción con arch='{_arch}' "
+                  f"(via build_model_by_arch)")
+            tm.model = build_model_by_arch(
+                arch_name=_arch,
+                shape_short=_shape_short, shape_long=_shape_long,
+                n_context=_n_context, n_time=_n_time,
+                model_config=model_config, init_bias=init_bias,
+            )
         tm.compile_model()
 
         tm.train(
