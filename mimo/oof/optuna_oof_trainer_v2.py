@@ -267,24 +267,34 @@ class OptunaOOFTrainer:
     def _suggest_model_config(self, trial: optuna.Trial) -> ModelConfig:
         model_config = ModelConfig(**vars(self.base_model_config))
 
-        # Arquitectura
-        model_config.conv1d_filters = self._suggest(trial, 'conv1d_filters')
-        model_config.lstm_units = self._suggest(trial, 'lstm_units')
-        model_config.context_units = self._suggest(trial, 'context_units')
-        model_config.time_units = self._suggest(trial, 'time_units')
-        model_config.head_units = self._suggest(trial, 'head_units')
+        # Lista de HPs que el grid PUEDE traer. Si está en grid_space, se
+        # asigna desde el trial; si no, se mantiene el default heredado de
+        # base_model_config. Permite que distintos archs usen SUBSETS de HPs
+        # sin que este método falle (p.ej. TCN no tiene lstm_units; CNN-LSTM
+        # no tiene n_tcn_blocks_long).
+        #
+        # Antes este bloque leía conv1d_filters/lstm_units/context_units/
+        # time_units/head_units/dropout_seq/dropout_dense/dropout_lstm/l2_reg/
+        # learning_rate/batch_size/focal_gamma/use_attention/use_gate
+        # INCONDICIONALMENTE, asumiendo CNN-LSTM. Eso rompía deploy de TCN
+        # con error 'No grid space for lstm_units' (RuntimeError raised desde
+        # _choices). Fix: condicional a presencia en grid_space.
+        OPTIONAL_HPS = [
+            # Común CNN-LSTM y TCN
+            'conv1d_filters', 'head_units',
+            'dropout_seq', 'dropout_dense',
+            'l2_reg', 'learning_rate', 'batch_size',
+            'focal_gamma',
+            # CNN-LSTM only (TCN no los lee — build_model_by_arch ignora)
+            'lstm_units', 'context_units', 'time_units',
+            'dropout_lstm',
+            'use_attention', 'use_gate',
+        ]
+        for _k in OPTIONAL_HPS:
+            if self.grid_space and _k in self.grid_space:
+                setattr(model_config, _k, self._suggest(trial, _k))
 
-        # Regularización
-        model_config.dropout_seq = self._suggest(trial, 'dropout_seq')
-        model_config.dropout_dense = self._suggest(trial, 'dropout_dense')
-        model_config.dropout_lstm = self._suggest(trial, 'dropout_lstm')
-        model_config.l2_reg = self._suggest(trial, 'l2_reg')
-
-        # Entrenamiento
-        model_config.learning_rate = self._suggest(trial, 'learning_rate')
-        model_config.batch_size = self._suggest(trial, 'batch_size')
-
-        # Focal loss
+        # Focal loss — lógica especial (dict por side vs scalar binary).
         # Multitask: si el grid trae focal_alpha_long y focal_alpha_short, los
         # combinamos en dict {'long': ..., 'short': ...}. El model_builder
         # detecta dict vs float y asigna por cabeza. Si no, fallback al
@@ -295,9 +305,9 @@ class OptunaOOFTrainer:
             a_long = self._suggest(trial, 'focal_alpha_long')
             a_short = self._suggest(trial, 'focal_alpha_short')
             model_config.focal_alpha = {'long': float(a_long), 'short': float(a_short)}
-        else:
+        elif self.grid_space and 'focal_alpha' in self.grid_space:
             model_config.focal_alpha = self._suggest(trial, 'focal_alpha')
-        model_config.focal_gamma = self._suggest(trial, 'focal_gamma')
+        # else: usa ModelConfig.focal_alpha default (0.25)
 
         # Loss weights por cabeza (multitask). Si el grid no los trae, se
         # quedan en el default de ModelConfig (1.0/1.0).
@@ -305,10 +315,6 @@ class OptunaOOFTrainer:
             model_config.loss_weight_long = float(self._suggest(trial, 'loss_weight_long'))
         if self.grid_space and 'loss_weight_short' in self.grid_space:
             model_config.loss_weight_short = float(self._suggest(trial, 'loss_weight_short'))
-
-        # Flags
-        model_config.use_attention = self._suggest(trial, 'use_attention')
-        model_config.use_gate = self._suggest(trial, 'use_gate')
 
         # OOF epochs y patience: sólo se tunean si la release los declara
         # explícitamente en su grid. Si no aparecen, se mantiene el valor
@@ -331,14 +337,23 @@ class OptunaOOFTrainer:
         if self.grid_space and 'use_hierarchical_fusion' in self.grid_space:
             model_config.use_hierarchical_fusion = bool(self._suggest(trial, 'use_hierarchical_fusion'))
 
-        # HPs estructurales v4 para build_model_v3 (release 202500_v4+).
-        # Todos son backward-compat: si la release no los declara, build_model_v3
-        # cae a los defaults legacy (activation='relu', kernel_size_short=3,
-        # kernel_size_long=5, gru_units=lstm_units//2, attn_num_heads=4).
+        # HPs estructurales (CNN-LSTM v4 + TCN). Backward-compat: si la release
+        # no los declara, build_model_* cae a los defaults legacy de cada arch.
         # Se asignan vía setattr porque la mayoría NO son fields del dataclass
-        # ModelConfig (excepto 'activation', que ya existe desde release 202600).
-        for _k in ("activation", "kernel_size_short", "kernel_size_long",
-                   "gru_units", "attn_num_heads", "attn_key_dim"):
+        # ModelConfig (excepto 'activation' y los kernel/gru/attn añadidos a
+        # ModelConfig en commits f12d574 y 65813db).
+        for _k in (
+            # Comunes CNN-LSTM v4 + TCN
+            "activation",
+            # CNN-LSTM v4 only
+            "kernel_size_short", "kernel_size_long",
+            "gru_units", "attn_num_heads", "attn_key_dim",
+            # TCN only (de build_tcn_mlp en model_alternatives.py)
+            "kernel_size",              # TCN usa una única kernel_size, no split
+            "n_tcn_blocks_long", "n_tcn_blocks_short",
+            "tcn_filters_short_ratio", "ctx_dense_units",
+            "tcn_pooling", "use_se", "se_ratio",
+        ):
             if self.grid_space and _k in self.grid_space:
                 setattr(model_config, _k, self._suggest(trial, _k))
 
