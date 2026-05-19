@@ -94,18 +94,41 @@ def _generate_windows(
     return out
 
 
-def _load_best_params_from_study(study_name: str, storage: str) -> Tuple[Dict[str, Any], int]:
-    """Extrae los best params del CNN Optuna study. Devuelve (params, trial_number)."""
+def _load_best_params_from_study(
+    study_name: str, storage: str, trial_number: Optional[int] = None,
+) -> Tuple[Dict[str, Any], int]:
+    """Extrae params de un Optuna study. Devuelve (params, trial_number).
+
+    Si trial_number es None (default): toma el best por value (Optuna
+    direction=maximize). Si trial_number es int: carga ese trial específico
+    (útil para sanity-check de un trial concreto, p.ej. specialist Trial 38
+    LONG de un study multi-objetivo donde "best por value" elegiría otro).
+    """
     print(f"📂 Optuna study CNN: {study_name}")
     study = optuna.load_study(study_name=study_name, storage=storage)
     completed = [t for t in study.trials if t.state.name == "COMPLETE"]
     if not completed:
         raise SystemExit(f"❌ Study {study_name} sin trials COMPLETE")
-    # Best por value (Optuna direction=maximize)
-    best = max(completed, key=lambda t: (t.value if t.value is not None else float("-inf")))
-    print(f"   Best trial #{best.number}  value={best.value:+.4f}")
-    print(f"   Params: {best.params}")
-    return dict(best.params), int(best.number)
+    if trial_number is not None:
+        match = [t for t in completed if int(t.number) == int(trial_number)]
+        if not match:
+            available = sorted(int(t.number) for t in completed)
+            raise SystemExit(
+                f"❌ Trial #{trial_number} no existe (o no COMPLETE) en {study_name}. "
+                f"Trials COMPLETE disponibles: {available[:20]}"
+                f"{'...' if len(available) > 20 else ''}"
+            )
+        chosen = match[0]
+        print(f"   Trial #{chosen.number} (override explícito) value={chosen.value:+.4f}")
+    else:
+        # Best por value (Optuna direction=maximize)
+        chosen = max(
+            completed,
+            key=lambda t: (t.value if t.value is not None else float("-inf")),
+        )
+        print(f"   Best trial #{chosen.number}  value={chosen.value:+.4f}")
+    print(f"   Params: {chosen.params}")
+    return dict(chosen.params), int(chosen.number)
 
 
 def _model_config_from_params(params: Dict[str, Any], *, target_type: str = "multitask",
@@ -726,6 +749,16 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--cnn-study-name-short", default=None,
                     help="(Opcional) Study específico para el modelo SHORT cuando "
                          "SPLIT_MODELS=1. Si se omite, se usa --cnn-study-name.")
+    ap.add_argument("--cnn-trial-long", type=int, default=None,
+                    help="(Opcional) Número de trial específico para el modelo LONG "
+                         "dentro de --cnn-study-name-long (o --cnn-study-name si no "
+                         "se especifica). Si se omite, se usa el best por value. "
+                         "Útil para sanity-check de un specialist concreto (p.ej. "
+                         "Trial 38 LONG en un study multitask donde 'best por value' "
+                         "elegiría otro trial).")
+    ap.add_argument("--cnn-trial-short", type=int, default=None,
+                    help="(Opcional) Número de trial específico para el modelo SHORT. "
+                         "Análogo a --cnn-trial-long.")
     ap.add_argument("--base-tf", default="5min")
     ap.add_argument("--variant-long", choices=sorted(LONG_VARIANTS.keys()), default="moderate")
     ap.add_argument("--variant-short", choices=sorted(SHORT_VARIANTS.keys()), default="moderate")
@@ -793,9 +826,14 @@ def main() -> None:
     best_params_short = best_params
     best_trial_n_long  = best_trial_n
     best_trial_n_short = best_trial_n
-    if args.cnn_study_name_long:
+    # Selección de study + trial específico por side:
+    #   · Si --cnn-study-name-long no se pasa pero --cnn-trial-long sí, usar
+    #     --cnn-study-name como study base para LONG. Permite testear specialists
+    #     desde un único study multitask (caso B1 sanity check).
+    if args.cnn_study_name_long or args.cnn_trial_long is not None:
+        study_l = args.cnn_study_name_long or args.cnn_study_name
         bp_l, bt_l = _load_best_params_from_study(
-            args.cnn_study_name_long, args.optuna_storage)
+            study_l, args.optuna_storage, trial_number=args.cnn_trial_long)
         mc_l = _model_config_from_params(
             bp_l, target_type="multitask",
             epochs=int(args.epochs), patience=int(args.patience),
@@ -804,10 +842,12 @@ def main() -> None:
         model_config_long = mc_l
         best_params_long  = bp_l
         best_trial_n_long = bt_l
-        print(f"🎯 LONG study override: {args.cnn_study_name_long} (trial #{bt_l})")
-    if args.cnn_study_name_short:
+        _tag_l = f"(trial #{bt_l}{' explícito' if args.cnn_trial_long is not None else ''})"
+        print(f"🎯 LONG study override: {study_l} {_tag_l}")
+    if args.cnn_study_name_short or args.cnn_trial_short is not None:
+        study_s = args.cnn_study_name_short or args.cnn_study_name
         bp_s, bt_s = _load_best_params_from_study(
-            args.cnn_study_name_short, args.optuna_storage)
+            study_s, args.optuna_storage, trial_number=args.cnn_trial_short)
         mc_s = _model_config_from_params(
             bp_s, target_type="multitask",
             epochs=int(args.epochs), patience=int(args.patience),
@@ -816,7 +856,8 @@ def main() -> None:
         model_config_short = mc_s
         best_params_short  = bp_s
         best_trial_n_short = bt_s
-        print(f"🎯 SHORT study override: {args.cnn_study_name_short} (trial #{bt_s})")
+        _tag_s = f"(trial #{bt_s}{' explícito' if args.cnn_trial_short is not None else ''})"
+        print(f"🎯 SHORT study override: {study_s} {_tag_s}")
 
     # 2) Regime weights + barriers + features (mismo patrón que GBM)
     regime_weights_by_side = resolve_regime_weights(args)

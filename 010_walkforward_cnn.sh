@@ -68,6 +68,13 @@ export CNN_STUDY=${CNN_STUDY:-oof_study_${RELEASE}_multitask}
 # CNN_STUDY.
 export CNN_STUDY_LONG=${CNN_STUDY_LONG:-}
 export CNN_STUDY_SHORT=${CNN_STUDY_SHORT:-}
+# Overrides de trial específico por side (sanity check de specialists desde un
+# study multitask común). Si se setean, el walkforward usa ese trial concreto
+# del study correspondiente (CNN_STUDY_LONG si está, si no CNN_STUDY).
+# Ejemplo: CNN_TRIAL_LONG=38 CNN_TRIAL_SHORT=2 con CNN_STUDY=oof_study_v4_1_…
+# replica la config que entraría a Fase 2 (specialists separados).
+export CNN_TRIAL_LONG=${CNN_TRIAL_LONG:-}
+export CNN_TRIAL_SHORT=${CNN_TRIAL_SHORT:-}
 export TAG=${TAG:-deploy_2026_04_combined_specialists_seed47}
 export SEED=${SEED:-47}
 export NO_LOOKAHEAD_SCANNER=${NO_LOOKAHEAD_SCANNER:-0}
@@ -154,6 +161,12 @@ if [ -n "${CNN_STUDY_LONG}" ]; then
 fi
 if [ -n "${CNN_STUDY_SHORT}" ]; then
   EXTRA_STUDY_ARGS="${EXTRA_STUDY_ARGS} --cnn-study-name-short ${CNN_STUDY_SHORT}"
+fi
+if [ -n "${CNN_TRIAL_LONG}" ]; then
+  EXTRA_STUDY_ARGS="${EXTRA_STUDY_ARGS} --cnn-trial-long ${CNN_TRIAL_LONG}"
+fi
+if [ -n "${CNN_TRIAL_SHORT}" ]; then
+  EXTRA_STUDY_ARGS="${EXTRA_STUDY_ARGS} --cnn-trial-short ${CNN_TRIAL_SHORT}"
 fi
 
 python3 -m mimo.oof.main_oof_cnn_walkforward \
