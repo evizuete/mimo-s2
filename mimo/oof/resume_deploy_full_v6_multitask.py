@@ -317,7 +317,11 @@ def recalibrate_deploy_multitask(
       - data/deploy_calibration_tail_<release>_short.parquet
     """
     print("\n[RECAL] Recalibrando MULTITASK (long+short) sobre cola final reciente...")
-    model = tf.keras.models.load_model(artifacts.model_path)
+    # safe_mode=False: permite cargar Lambda layers usadas por el TCN
+    # (attention pooling vía layers.Lambda(tf.reduce_sum)). Sin esto la
+    # deserialización rechaza por defecto el .keras del TCN. Como el archivo
+    # lo genera nuestro propio pipeline, relajar el check es aceptable.
+    model = tf.keras.models.load_model(artifacts.model_path, safe_mode=False)
 
     pipeline = DataPipeline(general_config, feature_config, model_config, regime_config)
     scalers_used = _load_pipeline_scalers_for_side(pipeline, artifacts.model_path, "multitask")

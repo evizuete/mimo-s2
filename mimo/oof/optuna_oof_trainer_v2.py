@@ -1175,7 +1175,7 @@ class OptunaOOFTrainer:
             if target_type == 'triple_class':
                 y_true = (y_true == 2).astype(int)
 
-        keras_model = tf.keras.models.load_model(artifacts.model_path)
+        keras_model = tf.keras.models.load_model(artifacts.model_path, safe_mode=False)
 
         x_list = [X['seq_short'], X['seq_long'], X['context'], X['time']]
         if target_type == 'quantile':
@@ -1457,7 +1457,7 @@ class OptunaOOFTrainer:
                 f"Holdout insuficiente tras prepare_data(): {len(df_prep)} filas < min_rows={min_rows}"
             )
 
-        keras_model = tf.keras.models.load_model(artifacts.model_path)
+        keras_model = tf.keras.models.load_model(artifacts.model_path, safe_mode=False)
         calibrator = joblib.load(artifacts.calibrator_path)
 
         y_true_all = []
@@ -1956,7 +1956,7 @@ class OptunaOOFTrainer:
             train=True,
         )
 
-        keras_model = tf.keras.models.load_model(artifacts.model_path)
+        keras_model = tf.keras.models.load_model(artifacts.model_path, safe_mode=False)
         calibrator = joblib.load(artifacts.calibrator_path)
 
         y_true_all = []

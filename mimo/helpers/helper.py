@@ -44,7 +44,14 @@ class Helper:
         return raw.reshape(-1)
 
     def load_model(self, side: str):
-        model = load_model(f'{self.path}/model_{self.general_config.release}_{side}.keras')
+        # safe_mode=False permite cargar Lambda layers (usadas p.ej. en el
+        # attention pooling del TCN: tf.reduce_sum vía layers.Lambda). El
+        # .keras file lo genera nuestro propio pipeline (no untrusted input),
+        # así que es seguro relajar el check de deserialización.
+        model = load_model(
+            f'{self.path}/model_{self.general_config.release}_{side}.keras',
+            safe_mode=False,
+        )
         return model
 
     def load_everything(self, pipeline: DataPipeline):
@@ -57,7 +64,7 @@ class Helper:
         multitask_cal_path = Path(f'{self.path}/oof_calibrator_{release}_multitask.joblib')
 
         if multitask_model_path.exists() and multitask_cal_path.exists():
-            multi_model = load_model(str(multitask_model_path))
+            multi_model = load_model(str(multitask_model_path), safe_mode=False)
             cal_dict = joblib.load(str(multitask_cal_path))
             if not isinstance(cal_dict, dict) or 'long' not in cal_dict or 'short' not in cal_dict:
                 raise ValueError(

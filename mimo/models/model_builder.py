@@ -1005,7 +1005,10 @@ class TradingModel:
         else:
             path = f'{path}/{filename}'
 
-        self.model = load_model(path)
+        # safe_mode=False permite cargar Lambda layers usadas en arch alternativas
+        # (TCN attention pooling, p.ej.). El .keras file lo produce nuestro
+        # pipeline (no es untrusted input), así que aceptable.
+        self.model = load_model(path, safe_mode=False)
 
 class GeneralizationGapStopping(Callback):
     def __init__(self,

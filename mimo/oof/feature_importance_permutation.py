@@ -223,7 +223,7 @@ def main() -> None:
     X, y_true, feature_columns, artifacts, pipeline = load_holdout_inputs(args)
 
     print(f"\n🧠 Cargando modelo: {artifacts.model_path}")
-    model = tf.keras.models.load_model(artifacts.model_path)
+    model = tf.keras.models.load_model(artifacts.model_path, safe_mode=False)
 
     print(f"🎛️  Cargando calibradores: {artifacts.calibrator_path}")
     calibrator = joblib.load(artifacts.calibrator_path)
