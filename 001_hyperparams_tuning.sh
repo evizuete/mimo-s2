@@ -175,7 +175,7 @@ mkdir -p ${REPORTS_DIR}
 
 python3 -m mimo.oof.extract_best_per_side \
   --release ${RELEASE} \
-  --study-prefix oof_study \
+  --study-prefix ${CNN_LSTM_STUDY_PREFIX:-oof_study} \
   --out-json ${BEST_JSON}
 
 # ─── 5. Verificar best_per_side.json ───────────────────────────────
