@@ -35,8 +35,51 @@ import tensorflow as tf
 from tensorflow.keras import layers, regularizers
 from tensorflow.keras.models import Model
 
+# Para registrar custom layers serializables (ver WeightedSumPooling1D abajo).
+try:
+    from tensorflow.keras.saving import register_keras_serializable
+except Exception:
+    # Fallback para versiones de Keras donde el path es distinto.
+    from keras.saving import register_keras_serializable  # type: ignore
+
 
 # ─── helpers comunes ────────────────────────────────────────────────────
+
+
+@register_keras_serializable(package="MimoTCN")
+class WeightedSumPooling1D(layers.Layer):
+    """Suma sobre el axis temporal de un tensor (batch, T, C) → (batch, C).
+
+    Pensado para usarse al final de un attention pooling: tras
+    Multiply([seq, softmax_weights]) el resultado es una secuencia ponderada
+    de la que queremos extraer el "weighted sum" (axis=1).
+
+    Reemplaza el patrón anterior `layers.Lambda(lambda t: tf.reduce_sum(t,
+    axis=1))` que tenía DOS problemas en Keras 3 al cargar el .keras:
+      1) Sin output_shape explícito, la inferencia de shape fallaba.
+      2) Aún con output_shape, al EJECUTAR la lambda durante predict el
+         body `tf.reduce_sum(...)` lanzaba `NameError: name 'tf' is not
+         defined` porque Keras deserializa el lambda code en un namespace
+         que NO incluye el módulo `tf` capturado por closure.
+
+    Custom Layer registered se serializa por nombre+package en el .keras
+    config, se deserializa sin custom_objects, y no depende de variables
+    externas → bulletproof para load_model().
+    """
+
+    def call(self, inputs):
+        # tf.reduce_sum funciona dentro de Layer.call() porque tf SÍ está
+        # disponible cuando este módulo se importa (a diferencia del lambda
+        # body que se ejecuta tras serializar a string).
+        return tf.reduce_sum(inputs, axis=1)
+
+    def compute_output_shape(self, input_shape):
+        # (batch, T, C) → (batch, C)
+        return (input_shape[0], input_shape[-1])
+
+    def get_config(self):
+        # No state extra → solo nombre. super().get_config() devuelve {name, ...}.
+        return super().get_config()
 
 def _make_inputs(shape_short: Tuple[int, int], shape_long: Tuple[int, int],
                  n_context: int, n_time: int):
@@ -422,7 +465,13 @@ def build_tcn_mlp(
 
     def _attn_pool(seq, name_prefix: str):
         """Attention pooling aprendible: score por timestep → softmax → weighted sum.
-        Captura "qué momento de la ventana importa" en lugar de promediar todo."""
+        Captura "qué momento de la ventana importa" en lugar de promediar todo.
+
+        Implementación: Dense+softmax para los scores, Multiply para aplicar,
+        WeightedSumPooling1D (custom Layer registered) para reducir axis temporal.
+        El custom Layer reemplaza un Lambda que daba problemas de serialización
+        en Keras 3 (output_shape implícito + closure de `tf` no disponible).
+        """
         h = layers.Dense(attn_units, activation='tanh',
                          kernel_regularizer=regularizers.l2(l2),
                          name=f'{name_prefix}_attn_proj')(seq)
@@ -431,18 +480,7 @@ def build_tcn_mlp(
         w = layers.Softmax(axis=1, name=f'{name_prefix}_attn_sm')(scores)
         w = layers.Reshape((-1, 1), name=f'{name_prefix}_attn_rs')(w)
         weighted = layers.Multiply(name=f'{name_prefix}_attn_mul')([seq, w])
-        # output_shape EXPLÍCITO obligatorio para que la deserialización
-        # (tf.keras.models.load_model) infiera la shape del Lambda al
-        # cargar el .keras file. Sin esto Keras 3 falla con:
-        #   NotImplementedError: could not automatically infer the shape
-        # weighted shape = (batch, T, C) → reduce_sum(axis=1) → (batch, C)
-        # Usamos input_shape (sin batch dim) para output_shape.
-        _ch = int(weighted.shape[-1])
-        return layers.Lambda(
-            lambda t: tf.reduce_sum(t, axis=1),
-            output_shape=(_ch,),
-            name=f'{name_prefix}_attn_sum',
-        )(weighted)
+        return WeightedSumPooling1D(name=f'{name_prefix}_attn_sum')(weighted)
 
     def _pool(seq, name_prefix: str):
         if pooling == 'gmp':
