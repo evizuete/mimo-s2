@@ -151,9 +151,15 @@ def evaluate_method(name: str, p_cal: np.ndarray, y: np.ndarray) -> Dict:
 # ───────────────────────────── Loaders ─────────────────────────────
 
 def find_holdout_predictions(release: str, tag: str, side: str, seed: int) -> Path:
+    # Antes usaba `../artifacts/...` relativo, asumiendo CWD=scripts/. Cuando
+    # se invoca desde el root del repo (caso habitual con `python3 scripts/...`
+    # via 003_calibration_and_policy_tuning.sh) ese path apuntaba al directorio
+    # PADRE del proyecto y fallaba. Anclar a project root vía Path(__file__)
+    # hace el lookup robusto al CWD.
+    _PROJECT_ROOT = Path(__file__).resolve().parent.parent
     bases = [
-        Path(f"../artifacts/{release}/oof/{tag}_{side}_specialist_seed{seed}"),
-        Path(f"../artifacts/{release}/oof/{tag}_{side}_specialist_seed{seed}_cutoff_mar31"),
+        _PROJECT_ROOT / f"artifacts/{release}/oof/{tag}_{side}_specialist_seed{seed}",
+        _PROJECT_ROOT / f"artifacts/{release}/oof/{tag}_{side}_specialist_seed{seed}_cutoff_mar31",
     ]
     target = f"holdout_predictions_{release}_{side}.parquet"
     for base in bases:

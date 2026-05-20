@@ -47,9 +47,19 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-# Reuse build_simulator + load_ohlcv del replay
+# Reuse build_simulator + load_ohlcv del replay.
+# Necesitamos DOS paths en sys.path:
+#   1. scripts/ para encontrar replay_s2_202500.py por nombre no-namespaced.
+#   2. project root para que `from mimo...` (que replay_s2_202500 hace
+#      internamente) funcione cuando este script se invoca como
+#      `python3 scripts/ghost_predict.py` desde el root del repo. Sin esta
+#      línea el import de mimo falla con ModuleNotFoundError porque Python
+#      solo añade automáticamente el dir DEL script (scripts/) a sys.path,
+#      no el proyecto root.
 _THIS_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(_THIS_DIR))
+_PROJECT_ROOT = _THIS_DIR.parent
+sys.path.insert(0, str(_PROJECT_ROOT))  # para `from mimo.*` en replay_s2_202500
+sys.path.insert(0, str(_THIS_DIR))      # para `from replay_s2_202500`
 from replay_s2_202500 import build_simulator, load_ohlcv  # noqa: E402
 
 from mimo.oof.empirical_breakeven import simulate_outcomes, wilder_atr  # noqa: E402
@@ -286,4 +296,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main()
