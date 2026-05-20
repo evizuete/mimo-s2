@@ -211,34 +211,51 @@ class DecisionEvent(Base):
     def from_decision(cls, d, *, rate_id=None):
         debug = d.debug or {}
 
+        # Sanitize NaN → None: MySQL Float NOT accepts NaN literal.
+        # Caso típico: con policy v2 (gate=100 = NO_TRADE), sell_gate_val sale
+        # NaN al pedir el percentil 100 sobre una distribución vacía o sin
+        # rango. Sin esta sanitización el INSERT crashea con:
+        #   pymysql.err.ProgrammingError: nan can not be used with MySQL
+        import math
+        def _safe(v):
+            if v is None:
+                return None
+            try:
+                f = float(v)
+                if math.isnan(f) or math.isinf(f):
+                    return None
+                return f
+            except (TypeError, ValueError):
+                return None
+
         return cls(
             rate_id=rate_id,
             action=d.action,
             state=d.state,
             macro_regime=d.macro_regime,
-            p_buy_raw=float(d.p_buy_raw),
-            p_sell_raw=float(d.p_sell_raw),
-            p_buy_cal=float(d.p_buy_cal),
-            p_sell_cal=float(d.p_sell_cal),
-            score_buy=float(d.score_buy),
-            score_sell=float(d.score_sell),
-            chosen_score=float(d.chosen_score),
-            risk_pct=float(d.risk_pct),
+            p_buy_raw=_safe(d.p_buy_raw),
+            p_sell_raw=_safe(d.p_sell_raw),
+            p_buy_cal=_safe(d.p_buy_cal),
+            p_sell_cal=_safe(d.p_sell_cal),
+            score_buy=_safe(d.score_buy),
+            score_sell=_safe(d.score_sell),
+            chosen_score=_safe(d.chosen_score),
+            risk_pct=_safe(d.risk_pct),
 
             reason=debug.get('reason'),
             state_group=debug.get('state_group'),
-            delta_rel=debug.get('delta_rel'),
-            min_score=debug.get('min_score'),
+            delta_rel=_safe(debug.get('delta_rel')),
+            min_score=_safe(debug.get('min_score')),
             buy_gate=debug.get('buy_gate'),
             sell_gate=debug.get('sell_gate'),
-            buy_gate_val=debug.get('buy_gate_val'),
-            sell_gate_val=debug.get('sell_gate_val'),
-            score_cap=debug.get('score_cap'),
-            risk_mult=debug.get('risk_mult'),
-            penalty=debug.get('penalty'),
+            buy_gate_val=_safe(debug.get('buy_gate_val')),
+            sell_gate_val=_safe(debug.get('sell_gate_val')),
+            score_cap=_safe(debug.get('score_cap')),
+            risk_mult=_safe(debug.get('risk_mult')),
+            penalty=_safe(debug.get('penalty')),
             hard_spike=debug.get('hard_spike'),
             cooldown_left=debug.get('cooldown_left'),
-            anomaly_score=debug.get('anomaly_score')
+            anomaly_score=_safe(debug.get('anomaly_score')),
         )
 
 
