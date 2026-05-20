@@ -911,6 +911,14 @@ mv artifacts/<release>/oof/<deploy>/scalers_<X>/meta.json.before_recal_<TS> \
 
 ## Apéndice J — Validar umbrales del runtime tras cambio de calibrador
 
+> **Nota sobre la elección de calibrador**: la decisión actual de usar Platt
+> scaling (`_SigmoidCalibration`) en lugar de `IsotonicRegression` está
+> documentada en [DEC-2026-05-20](DESIGN/DEC-2026-05-20-calibrator-choice.md)
+> (alternativas evaluadas, criterios de elección por tamaño de OOF, cuándo
+> re-evaluar). Este apéndice cubre la **validación de los umbrales del
+> runtime** tras cualquier cambio del calibrador, sea cual sea el tipo
+> elegido.
+
 **Objetivo**: detectar automáticamente si algún umbral runtime que depende
 de `cal_probs` quedó inalcanzable o demasiado permisivo tras cualquier
 cambio del calibrador (iso ↔ Platt, refit, swap per-champion, retrain).

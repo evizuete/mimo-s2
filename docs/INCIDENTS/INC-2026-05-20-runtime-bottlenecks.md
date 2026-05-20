@@ -180,7 +180,7 @@ Patrón común: **defensa puesta sin medición empírica → bloqueo total cuand
 - [x] **Exponer `chop_block`/`chop_size_mult` en `s2_config.py`** en lugar de hardcoded. Permite ajustar sin tocar `trading_simulator_v3.py`. → `StrategyGateConfig` añadido (commit `835abb6`).
 - [x] **Test de regresión automático**: al swap calibrador, ejecutar tests que verifiquen que los umbrales aguas abajo siguen siendo alcanzables (P90 de cal_probs >= umbral). → `scripts/validate_calibrator_thresholds.py` con catálogo de 7 umbrales, exit code 0/1/2 para CI. Documentado en RUNBOOK Apéndice J.
 - [x] **Smoke test post-deploy**: verificar que el sistema emite >0 trades en las primeras horas tras restart. Si no, alertar. → `scripts/smoke_test_post_deploy.py` con veredicto PASS/WAITING/FAIL, exit codes para cron, sugerencias automáticas de causa raíz. Documentado en RUNBOOK Apéndice K.
-- [ ] **Documentar elección de calibrador como decisión de diseño**: ¿usamos isotónico (no-paramétrico) o Platt (sigmoid)? Con qué cantidad mínima de datos OOF?
+- [x] **Documentar elección de calibrador como decisión de diseño**: ¿usamos isotónico (no-paramétrico) o Platt (sigmoid)? Con qué cantidad mínima de datos OOF? → [DEC-2026-05-20](../DESIGN/DEC-2026-05-20-calibrator-choice.md) — ADR con alternativas evaluadas, rationale, criterios de elección por tamaño de OOF, y cuándo re-evaluar.
 
 ### Pendientes a medio plazo
 
