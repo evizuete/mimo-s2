@@ -340,7 +340,39 @@ python scripts/replay_s2_202500.py \
   --warmup-from 2026-03-25 \
   --from ${LOCKBOX_FROM} --to ${LOCKBOX_TO} \
   --out /tmp/replay_lockbox_baseline
-Decisión gate
+
+4.4 — ⚠️ OBLIGATORIO: post-filtro service para validación honesta
+**Lección aprendida 2026-05-20**: `replay_s2_202500.py` ejecuta `simulator.backtest()`
+directamente y NO pasa por la lógica de `S2Service.process_tick()`. Esto significa
+que ~8 filtros defensivos del service (TRANSITION_WEAK_SIGNAL, REVERSAL_GUARD_*,
+RSI guards, POST_CLOSE_COOLDOWN, SIGNAL_INTER_COOLDOWN, etc.) NO se aplican
+durante el replay. Resultado: el replay sobreestima n_trades 3-6× respecto a la
+producción real. **El veredicto del replay puro NO es accionable** para decision-gate.
+
+Solución: aplicar `post_filter_replay_trades.py` al output del replay. El script
+reconstruye el contexto tick a tick vía `simulator.predict()` y simula los filtros
+del service para cada trade.
+
+```bash
+python scripts/post_filter_replay_trades.py \
+  --release ${RELEASE} \
+  --deploy-subdir deploy_validation_combined_seed${SEED} \
+  --policy-config decision_policies_config_${RELEASE}_validation \
+  --replay-dir /tmp/replay_lockbox \
+  --from ${LOCKBOX_FROM} --to ${LOCKBOX_TO} \
+  --warmup-from 2026-03-25 \
+  --post-close-cooldown-secs 180 \
+  --signal-inter-cooldown-secs 120
+```
+
+Genera `trades_post_filtered.parquet` + `summary_post_filtered.json` con
+métricas recalculadas sobre el subset de trades que **realmente** habrían
+llegado a MT5 en producción.
+
+**El decision gate de abajo debe evaluarse sobre el `summary_post_filtered.json`,
+NO sobre `summary.json` del replay puro.**
+
+Decisión gate (aplicada al post-filtrado)
 Criterio	OK	Marginal	KO
 PnL% LOCKBOX	> 0%	> -5%	< -5%
 MDD% LOCKBOX	> -10%	> -15%	< -15%
