@@ -21,6 +21,7 @@
 10. [Fase 8 — Checklist pre-dinero real](#fase-8--checklist-pre-dinero-real)
 11. [Apéndice A — Rollback](#apéndice-a--rollback)
 12. [Apéndice B — Lecciones aprendidas](#apéndice-b--lecciones-aprendidas)
+13. [Apéndice C — Mantenimiento de thresholds del StateDetector](#apéndice-c--mantenimiento-de-thresholds-del-statedetector-en-producción)
 
 ---
 
@@ -829,6 +830,83 @@ Si quieres extender el runbook:
 Apéndice G — Procedimiento walk-forward (rolling cutoffs cada 2 semanas para validación más rigurosa)
 Apéndice H — Procedimiento de re-Optuna (cuándo, cómo, criterios de aceptación)
 Apéndice I — Plantilla de incident report (formato estándar para documentar problemas)
+
+
+## Apéndice C — Mantenimiento de thresholds del StateDetector en producción
+
+**Objetivo**: mantener calibrada la clasificación de régimen (TREND_*, RANGE, VOLATILE, LOW_VOL, etc.) frente al drift natural del mercado, sin tocar el modelo TCN ni los calibradores. Sin esto, periodos con volatilidad estructuralmente distinta al training period rompen la operativa porque TODO se etiqueta como VOLATILE (o LOW_VOL).
+
+### Incidente que motivó esta sección — 2026-05-20
+
+Tras promover TCN v4 a producción (oro a $4,691), el StateDetector clasificó el 68% del tiempo como VOLATILE. Causa: los thresholds vol_low/vol_high persistidos en `meta.json` eran p20/p80 del training period (2024-01 → 2025-10, oro ~$2,500). El oro hoy se mueve en dollar-amounts ~85% mayores → atr_norm efectivo +74%. Fix: recalibrar thresholds sobre últimos 90 días.
+
+### Tres niveles de mantenimiento
+
+| Cadencia | Acción | Toca modelo | Coste |
+|---|---|---|---|
+| **Diario** | `bash 008_recalibrate_thresholds.sh` (dry-run) — solo reporta drift | NO | 1 min |
+| **Mensual o tras drift >30%** | `APPLY=1 bash 008_recalibrate_thresholds.sh` — persiste meta.json + restart s2 | NO | 5 min |
+| **Trimestral o PnL degradado >10% sostenido** | Ciclo completo 001→006 (re-Optuna + retrain + lockbox + deploy) | SÍ | 8-15h |
+
+### Criterios para escalar de un nivel a otro
+
+| Síntoma | Nivel sugerido |
+|---|---|
+| Drift máximo absoluto < 15% en dry-run | (1) sigue diario |
+| Drift 15-30% sostenido durante 1-2 semanas | (2) recalibrar |
+| Drift > 30% O distribución de estados muy sesgada (>50% VOLATILE o LOW_VOL) | (2) recalibrar urgente |
+| Post-recalibración: PnL del deploy se degrada > 10% sostenido vs Lockbox | (3) re-Optuna — el problema es drift de FEATURES, no de thresholds |
+| AUC-PR del modelo en producción cae > 30% vs holdout | (3) re-Optuna |
+
+### Uso del script
+
+```bash
+# Dry-run (default — solo comparativa, no escribe):
+bash 008_recalibrate_thresholds.sh
+
+# Aplicar (con backup automático de los meta.json):
+APPLY=1 bash 008_recalibrate_thresholds.sh
+
+# Override deploy (auto-detect default desde main/s2_main.py):
+DEPLOY_SUBDIR=deploy_PROD_combined_seed47 APPLY=1 bash 008_recalibrate_thresholds.sh
+
+# Override lookback:
+LOOKBACK_DAYS=180 bash 008_recalibrate_thresholds.sh
+```
+
+### Qué hace internamente el script
+
+1. Auto-detecta el deploy activo leyendo `main/s2_main.py` (línea `artifacts_path`).
+2. Carga últimos N días de OHLCV (default 90) desde la BD.
+3. Ejecuta `prepare_data` para computar `atr_norm`, `bb_width`, `range_expansion`.
+4. Calcula los 6 thresholds vía `StateDetector.compute_thresholds`.
+5. Compara contra los thresholds actuales del `meta.json` del primer scaler.
+6. Reporta drift máximo absoluto + distribución esperada bajo nuevos thresholds.
+7. Si `--apply`: backup con timestamp + reescribe los 3 `meta.json` del deploy + añade entrada a `_history` para auditoría.
+
+### Restart post-apply
+
+```bash
+pkill -f s2_main
+sleep 3
+cd main && nohup /home/evizuete/boti/bin/python3 s2_main.py \
+  > ../logs/s2_recal_$(date +%Y%m%d_%H%M).log 2>&1 &
+
+# Verificar que los nuevos thresholds se inyectaron:
+sleep 30
+grep -i "Regime thresholds loaded" $(ls -t logs/s2_recal_*.log | head -1) | tail -1
+```
+
+### Rollback
+
+Cada `--apply` deja backups con timestamp en `scalers_*/meta.json.before_recal_<TS>`. Para revertir:
+
+```bash
+# Por cada meta.json afectado:
+mv artifacts/<release>/oof/<deploy>/scalers_<X>/meta.json.before_recal_<TS> \
+   artifacts/<release>/oof/<deploy>/scalers_<X>/meta.json
+# Restart s2
+```
 
 
 ## Apéndice G — Walk-forward validation
