@@ -37,6 +37,15 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+# Si este script se invoca como `python3 scripts/replay_s2_202500.py` desde
+# el root del repo (caso habitual en los bash 003/004 del pipeline), Python
+# añade automáticamente scripts/ a sys.path pero NO el project root → el
+# import `from mimo.*` falla con ModuleNotFoundError. Anclar el project root
+# vía Path(__file__) hace el script robusto al CWD.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from mimo.data_managers.databases import Database
 from mimo.data_managers.data_manager import DataManager
 from mimo.features.feature_builder import FeatureConfig
