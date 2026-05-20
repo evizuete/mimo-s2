@@ -1,15 +1,21 @@
-export RELEASE=202600
-export INHERIT_FROM_RELEASE=202500
-export TAG=rw_both_Lvol_boost_td_down_h3_Svol_boost_h3
-export SEED=47
-export TRAIN_FROM=2024-01-01
-export TRAIN_TO=2025-10-30
-export HOLDOUT_FROM=2025-11-01
-export HOLDOUT_TO=2026-04-10      # ← validación
-export PROD_HOLDOUT_TO=2026-05-10  # ← refit final
-export LOCKBOX_FROM=2026-04-11
-export LOCKBOX_TO=2026-05-10
-export TAIL_DAYS=21
+# Defaults overridables via env var del shell (ej. RELEASE=202500 bash 003_...).
+# Antes los export pisaban el valor del usuario; ahora respeta el env var.
+export RELEASE=${RELEASE:-202603}
+export INHERIT_FROM_RELEASE=${INHERIT_FROM_RELEASE:-202500}
+export TAG=${TAG:-rw_both_Lvol_boost_td_down_h3_Svol_boost_h3}
+export SEED=${SEED:-47}
+# ARCH: 'original_v3' (CNN-LSTM) por default, 'tcn' para deploy de TCN. Pasado
+# a resume_deploy_full_v6_multitask vía --arch para que la reconstrucción del
+# modelo de producción use la factoría correcta.
+export ARCH=${ARCH:-original_v3}
+export TRAIN_FROM=${TRAIN_FROM:-2024-01-01}
+export TRAIN_TO=${TRAIN_TO:-2025-10-30}
+export HOLDOUT_FROM=${HOLDOUT_FROM:-2025-11-01}
+export HOLDOUT_TO=${HOLDOUT_TO:-2026-04-10}      # ← validación
+export PROD_HOLDOUT_TO=${PROD_HOLDOUT_TO:-2026-05-10}  # ← refit final
+export LOCKBOX_FROM=${LOCKBOX_FROM:-2026-04-11}
+export LOCKBOX_TO=${LOCKBOX_TO:-2026-05-10}
+export TAIL_DAYS=${TAIL_DAYS:-21}
 
 BEST_JSON=artifacts/${RELEASE}/oof/${TAG}/reports/best_per_side.json
 if [ ! -f "${BEST_JSON}" ]; then
@@ -32,6 +38,7 @@ for SIDE in long short; do
     --release ${RELEASE} \
     --inherit-config-from ${INHERIT_FROM_RELEASE} \
     --target-type multitask \
+    --arch ${ARCH} \
     --base-tf 5min \
     --variant-long vol_boost_td_down --variant-short vol_boost \
     --label-horizon-long 3 --label-horizon-short 3 \

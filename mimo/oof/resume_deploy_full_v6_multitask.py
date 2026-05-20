@@ -553,6 +553,16 @@ def parse_args():
              "_REDUCED_FEATURES_RELEASES, _ULTRA_REDUCED_FEATURES_RELEASES, "
              "GRID_BY_RELEASE). Útil para walk-forward.",
     )
+    ap.add_argument(
+        "--arch",
+        choices=["original_v3", "mlp", "mlp_flatten", "hybrid", "transformer", "tcn"],
+        default="original_v3",
+        help="Arquitectura del modelo de producción a reentrenar en Fase 3. "
+             "'original_v3' (default) = CNN-LSTM nativo. 'tcn' = TCN via "
+             "build_model_by_arch. Debe coincidir con la arch usada en Fase 2 "
+             "(specialist training); de lo contrario los HPs del JSON locked "
+             "no encajarán con el builder.",
+    )
 
     return ap.parse_args()
 
@@ -668,6 +678,7 @@ def main():
         ev_thr_hi=args.ev_thr_hi,
         oof_epochs=args.oof_epochs,
         oof_patience=args.oof_patience,
+        arch=args.arch,
     )
     print("   ✅ trainer construido")
 
