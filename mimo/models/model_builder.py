@@ -1269,4 +1269,13 @@ class TripleClassTPAUC(tf.keras.metrics.AUC):
         y_true_int = tf.cast(tf.reshape(y_true, (-1,)), tf.int32)
         y_true_tp = tf.cast(tf.equal(y_true_int, 2), tf.float32)
         p_tp = y_pred[:, 2]
-        return super().update_state(y_true_tp, p_tp, sample_weight=sample_weight)
+        return super().update_state(y_true_tp, p_tp, sample_weight=sample_weight)
+
+
+# Side-effect import al final del módulo: forzar la carga de model_alternatives
+# para que el decorator @register_keras_serializable de sus custom layers
+# (WeightedSumPooling1D del TCN, etc.) ejecute y registre las clases.
+# Esto garantiza que TradingModel.load() pueda deserializar modelos TCN sin
+# pasar custom_objects manualmente. Se hace al final para evitar cualquier
+# orden de carga conflictivo dentro del propio model_builder.
+from mimo.models import model_alternatives as _register_custom_layers  # noqa: F401, E402

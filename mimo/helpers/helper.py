@@ -12,6 +12,16 @@ from mimo.data_managers.data_pipeline_v2 import DataPipeline
 from mimo.data_managers.databases import Database
 from mimo.models.model_builder import Config
 
+# Side-effect import: forzar la carga del módulo model_alternatives para que
+# el decorator @register_keras_serializable de WeightedSumPooling1D (y otras
+# custom layers que se añadan en el futuro) ejecute y registre las clases en
+# el registry global de Keras. Sin esto, load_model() de un .keras que use
+# una custom layer del TCN falla con:
+#   TypeError: Could not locate class 'WeightedSumPooling1D'.
+# El registro ocurre al importar, NO al usar el módulo, por eso basta con
+# importarlo en helper.py (que es el módulo central de carga de modelos).
+from mimo.models import model_alternatives as _register_custom_layers  # noqa: F401
+
 class Helper:
     def __init__(self, general_config: Config, path: str = None):
         self.general_config = general_config
