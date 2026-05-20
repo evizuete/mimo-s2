@@ -273,7 +273,12 @@ def main(release: str, mode: str = 'production'):
         compound=True,
         enable_live_scaler_updates=True,
         anomaly_block_threshold=1.5,
-        signal_cooldown_bars=1
+        signal_cooldown_bars=1,
+        # StrategyGate config (antes hardcoded en trading_simulator_v3.py).
+        # Expuesto tras INC-2026-05-20 — ver s2_config.StrategyGateConfig.
+        chop_block=config.strategy_gate.chop_block,
+        chop_size_mult=config.strategy_gate.chop_size_mult,
+        exhaustion_blocks_reentry=config.strategy_gate.exhaustion_blocks_reentry,
     )
 
     db = build_db()

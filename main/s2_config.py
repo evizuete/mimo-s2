@@ -155,6 +155,37 @@ class OpenGuardConfig:
 
 
 # ============================================================================
+# STRATEGY GATE (chop / exhaustion)
+# ============================================================================
+
+@dataclass
+class StrategyGateConfig:
+    """Configuración del StrategyGate (filtros chop/exhaustion sobre la decisión).
+
+    Antes hardcoded en `mimo/strategies/trading_simulator_v3.py:920-924`. Expuesto
+    aquí tras incident INC-2026-05-20 para poder ajustar sin tocar código del
+    simulator.
+
+    chop_block:        si True, bloquea entradas cuando is_chop=1 (NO_TRADE).
+                       Si False, permite entrada con tamaño chop_size_mult.
+    chop_size_mult:    multiplicador de tamaño cuando is_chop=1.
+                       0.0 = bloqueo total (equivalente a chop_block=True).
+                       0.5 = entrada con la mitad del tamaño (defensa parcial).
+                       1.0 = sin penalización.
+    exhaustion_blocks_reentry: si True, bloquea reentrada en el mismo trend
+                       cuando is_exhaustion=1 (defensivo).
+
+    Nota: el detector `is_chop` (feature_builder.py:983-985) usa percentil 85
+    móvil, así que por construcción ~15% de las barras tienen is_chop=1.
+    Con chop_block=True + chop_size_mult=0.0 (config original), eso bloquea
+    ~15% de las entradas potenciales independientemente del régimen.
+    """
+    chop_block: bool = False
+    chop_size_mult: float = 0.5
+    exhaustion_blocks_reentry: bool = True
+
+
+# ============================================================================
 # S2 CONFIG (raíz)
 # ============================================================================
 
@@ -164,6 +195,7 @@ class S2Config:
     counter_trend: CounterTrendConfig = field(default_factory=CounterTrendConfig)
     reversal_guard: ReversalGuardConfig = field(default_factory=ReversalGuardConfig)
     open_guard: OpenGuardConfig = field(default_factory=OpenGuardConfig)
+    strategy_gate: StrategyGateConfig = field(default_factory=StrategyGateConfig)
 
     # ── Geometry / order builder ────────────────────────────────────────────
     min_vsl_points: int = 20

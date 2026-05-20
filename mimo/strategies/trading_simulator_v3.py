@@ -833,6 +833,14 @@ class TradingSimulator:
             # --- antinat / anomaly (v2) ---
             anomaly_block_threshold: float = 1.0,   # anomaly_score >= umbral → bloquea señal
             signal_cooldown_bars: int = 3,           # velas de silencio tras bloqueo por anomalía
+
+            # --- strategy gate (chop / exhaustion) ---
+            # Expuesto en kwargs tras incident INC-2026-05-20 (antes hardcoded
+            # en self.strategy_gate = StrategyGate(...) más abajo). Defaults
+            # = config tras fix #2 del incident (relajación del chop).
+            chop_block: bool = False,
+            chop_size_mult: float = 0.5,
+            exhaustion_blocks_reentry: bool = True,
     ):
 
         self._last_df_prepared = None
@@ -911,16 +919,19 @@ class TradingSimulator:
         )
 
         self.helper = Helper(general_config=general_config, path=artifacts_path)
-        # 2026-05-20: relajado anti-chop. Antes: chop_block=True, mult=0.0
-        # (NO_TRADE en cualquier barra con is_chop=1, ~15% del tiempo por
-        # construcción del detector via percentil 85 móvil). Tras restart con
-        # fix del threshold injection y apertura de gates en producción, se
-        # observó que BLOCK_CHOP era un blocker secundario importante. Ahora:
-        # entra con tamaño 0.5x en chop (defensa parcial) en vez de bloquear.
+        # StrategyGate ahora configurable vía kwargs (defaults = config tras
+        # incident INC-2026-05-20: chop_block=False, chop_size_mult=0.5,
+        # exhaustion_blocks_reentry=True). El operador pasa estos kwargs desde
+        # s2_main.py leyendo S2Config.strategy_gate.* — ver s2_config.py.
         self.strategy_gate = StrategyGate(
-            chop_block=False,
-            chop_size_mult=0.5,
-            exhaustion_blocks_reentry=True
+            chop_block=bool(chop_block),
+            chop_size_mult=float(chop_size_mult),
+            exhaustion_blocks_reentry=bool(exhaustion_blocks_reentry),
+        )
+        print(
+            f"[StrategyGate] chop_block={self.strategy_gate.chop_block} "
+            f"chop_size_mult={self.strategy_gate.chop_size_mult} "
+            f"exhaustion_blocks_reentry={self.strategy_gate.exhaustion_blocks_reentry}"
         )
 
         # Policy por defecto (si no pasas una)
