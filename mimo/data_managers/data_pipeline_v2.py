@@ -453,12 +453,30 @@ class DataPipeline:
         df = self.feature_engineer.generate_all_features(df)
 
         # 2. Detectar estado de mercado (StateDetector unificado)
-        state_cfg_overrides = getattr(self, '_state_config_overrides', {})
-        state_cfg = StateConfig(**state_cfg_overrides) if state_cfg_overrides else StateConfig()
-
+        # FIX runtime drift 2026-05-20: usar `self.state_detector.config`
+        # directamente en lugar de reconstruir un StateConfig desde el dict
+        # `_state_config_overrides`. El attribute path indirecto fallaba:
+        # cuando load_scalers invocaba _inject_regime_thresholds, los
+        # `fixed_*` se seteaban en `self.state_detector.config` pero
+        # `_state_config_overrides` no siempre llegaba a ser leído en
+        # add_mimo_state (timing/instance issues). Resultado: cada prepare_data
+        # creaba un StateDetector NUEVO sin thresholds inyectados y caía al
+        # path DINÁMICO, recomputando vol_high/low sobre el buffer corto del
+        # runtime (~1,128 barras) en lugar de usar los persistidos en meta.json.
+        #
+        # Síntoma: 68% del tiempo etiquetado VOLATILE incluso tras recalibrar
+        # thresholds en meta.json. Confirmado por el warning `[StateDetector]
+        # Computing thresholds DYNAMICALLY from the current df` apareciendo en
+        # cada tick. Ver docs/RUNBOOK.md → Apéndice C.
+        #
+        # Pasando `self.state_detector.config` garantizamos que el StateDetector
+        # interno de add_mimo_state hereda EXACTAMENTE el cfg cuyos `fixed_*`
+        # fueron poblados por inject_thresholds. Retrocompat: cuando no se ha
+        # inyectado nada (training/Optuna), config.fixed_* son None y el path
+        # dinámico se mantiene — mismo comportamiento que antes.
         df = add_mimo_state(
             df,
-            cfg=state_cfg,
+            cfg=self.state_detector.config,
             set_market_condition=set_market_condition,
         )
 
