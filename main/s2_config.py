@@ -122,7 +122,15 @@ class ReversalGuardConfig:
     long_min_rsi: float = 46.0
     short_max_rsi: float = 54.0
     require_macd_flip: bool = True
-    min_proba_edge: float = 0.02
+    # 2026-05-20: bajado de 0.02 a 0.015 tras swap calibrador iso→Platt.
+    # Análisis OOF (n=3251) con el calibrador nuevo:
+    #   · LONG_in_TREND_DOWN edge=|cal_long-cal_short|>=0.02 pasaba 13.1% (era 27.7% con iso)
+    #   · LONG_in_TREND_DOWN edge>=0.015 pasa 21% (recupera proximidad al rate iso)
+    #   · SHORT_in_TREND_UP edge>=0.015 pasa 55% (apenas cambia)
+    # El rango cal_probs con Platt está comprimido (LONG max 0.35 vs iso 1.0),
+    # así que el edge típico también es menor. 0.015 mantiene el espíritu del
+    # filtro (rechazar reversals tibios) sin estrangular el flow.
+    min_proba_edge: float = 0.015
     require_indicators_present: bool = True
 
 
