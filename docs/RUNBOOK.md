@@ -909,7 +909,7 @@ mv artifacts/<release>/oof/<deploy>/scalers_<X>/meta.json.before_recal_<TS> \
 ```
 
 
-## Apéndice F — Validar umbrales del runtime tras cambio de calibrador
+## Apéndice J — Validar umbrales del runtime tras cambio de calibrador
 
 **Objetivo**: detectar automáticamente si algún umbral runtime que depende
 de `cal_probs` quedó inalcanzable o demasiado permisivo tras cualquier
@@ -971,6 +971,75 @@ Para cada umbral del catálogo (`scripts/validate_calibrator_thresholds.py::THRE
 
 Cuando añadas un nuevo filtro defensivo basado en cal_probs en runtime,
 **añádelo también al catálogo** del script para que la validación lo cubra.
+
+
+## Apéndice K — Smoke test post-deploy
+
+**Objetivo**: detectar automáticamente si tras un restart de s2 el sistema
+queda sin emitir trades (regresión silenciosa) dentro de un periodo
+configurable (default: 6h). Diseñado para correr en cron post-deploy.
+
+**Motivación**: el incident INC-2026-05-20 mantuvo el sistema 7 días sin
+trades. Los logs individuales parecían normales (heartbeats, NO_SIGNAL
+con razones técnicas), pero **nadie miró cuántos SIGNAL_SENT se emitían**.
+Este smoke test integra los tres síntomas:
+
+  · Eventos procesados
+  · Distribución de estados clasificados por StateDetector
+  · Tasa de SIGNAL_SENT vs NO_SIGNAL
+  · Breakdown de razones de bloqueo (block_reason)
+
+Y emite veredicto PASS / WAITING / FAIL con sugerencias de diagnóstico.
+
+### Comando
+
+```bash
+# Snapshot interactivo (output completo)
+python scripts/smoke_test_post_deploy.py
+
+# Modo cron-friendly: silencioso si PASS o WAITING, output solo si FAIL
+python scripts/smoke_test_post_deploy.py --quiet
+echo $?  # 0=PASS | 1=FAIL | 2=WAITING | 3=error
+
+# Ajustar tolerancia (ej: alerta tras 2h en vez de 6h)
+python scripts/smoke_test_post_deploy.py --fail-after-hours 2
+
+# Evaluar día específico (default: hoy)
+python scripts/smoke_test_post_deploy.py --date 20260520
+```
+
+### Veredictos
+
+| Veredicto | Condición | Exit |
+|---|---|---|
+| **PASS** | SIGNAL_SENT ≥ 1 y uptime ≥ 5 min | 0 |
+| **WAITING** | SIGNAL_SENT = 0 y uptime < 6h | 2 |
+| **FAIL** | SIGNAL_SENT = 0 y uptime ≥ 6h | 1 |
+
+WAITING es estado normal post-restart (mercado puede no haber dado
+señales en los primeros minutos). Solo FAIL produce output con `--quiet`.
+
+### Sugerencias automáticas tras FAIL
+
+El script analiza el breakdown de bloqueos e informa de posibles causas:
+
+  · `TRANSITION_WEAK_SIGNAL` dominante → revisar `transition_min_proba_delta`
+  · `BLOCK_CHOP` dominante → revisar StrategyGate config
+  · `REVERSAL_GUARD_*` dominante → revisar `min_proba_edge`
+  · `DECISION_ENGINE_NONE` dominante → revisar scores/calibrador
+  · >40% del tiempo en `VOLATILE` → revisar threshold injection del StateDetector
+
+### Integración recomendada con cron
+
+```bash
+# /etc/cron.d/s2_smoke_test
+# Cada hora, alerta solo si FAIL
+0 * * * * evizuete cd /mnt/c/Users/Usuario/Documents/Proyectos/TradingCo_s2 && \
+    /home/evizuete/boti/bin/python3 scripts/smoke_test_post_deploy.py --quiet \
+    || /usr/bin/logger -t s2-smoke-test "Smoke test FAILED — system not trading"
+```
+
+(Adaptable a Slack/email según tu setup.)
 
 
 ## Apéndice G — Walk-forward validation
