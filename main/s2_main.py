@@ -7,7 +7,7 @@ import pandas as pd
 import zmq
 import logging
 
-from config.decision_policies_config_202500_2026_04_seed47 import gate_by_action_and_state, score_cap_by_state, risk_mult_by_state
+from config.decision_policies_config_202500_validation_v2 import gate_by_action_and_state, score_cap_by_state, risk_mult_by_state
 from s2_config import S2Config
 from s2_service_v2 import S2Service
 
@@ -234,7 +234,7 @@ def main(release: str, mode: str = 'production'):
 
     base_dir = Path(__file__).resolve().parent
     #artifacts_path = str((base_dir / ".." / "artifacts" / release / "oof" / "deploy_full").resolve())
-    artifacts_path = str((base_dir / ".." / "artifacts" / release / "oof" / "deploy_2026_04_combined_specialists_seed47").resolve())
+    artifacts_path = str((base_dir / ".." / "artifacts" / release / "oof" / "deploy_validation_combined_seed47").resolve())
 
     policy_path = str((base_dir / ".." / "artifacts" / release / "rl" / "final" / f"rl_policy_gate_{release}.npz").resolve())
     rl_config = {
@@ -263,7 +263,7 @@ def main(release: str, mode: str = 'production'):
         rl_train=False,
         rl_eval_deterministic=True,
         rl_take_threshold=rl_config['rl_take_threshold'],
-        rl_policy_path=policy_path,
+        rl_policy_path=None,  # RL desactivado para TCN v4 deploy
         spread_price=0.07,
         mtm_use_bid_ask=True,
         mtm_price_col='close',

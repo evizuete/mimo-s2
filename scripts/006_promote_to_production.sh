@@ -106,8 +106,15 @@ import re
 c = open("${PATCHED}").read()
 c, n1 = re.subn(r'from\s+config\.decision_policies_config[a-zA-Z0-9_]*\s+import\s+([^\n]+)',
                 r'from config.${NEW_POLICY} import \1', c, count=1)
-c, n2 = re.subn(r'("artifacts"\s*/\s*release\s*/\s*"oof"\s*/\s*)"[^"]+"(\s*\)\.resolve\(\)\))',
-                r'\g<1>"${NEW_DEPLOY}"\g<2>', c, count=1)
+# FIX: el regex anterior matcheaba TANTO la línea comentada como la activa, y
+# count=1 cogía la primera (la comentada) → el deploy real NUNCA se cambiaba.
+# Forzamos que la línea NO empiece con '#' (sin comentar) usando lookbehind
+# de inicio-de-línea + non-greedy hasta el primer match no comentado.
+# Concretamente: el patrón ahora exige que la asignación esté al inicio de
+# línea (módulo whitespace) y NO precedida por '#'.
+c, n2 = re.subn(
+    r'^(\s*artifacts_path\s*=\s*str\(\(base_dir\s*/\s*"\.\."\s*/\s*"artifacts"\s*/\s*release\s*/\s*"oof"\s*/\s*)"[^"]+"(\s*\)\.resolve\(\)\))',
+    r'\g<1>"${NEW_DEPLOY}"\g<2>', c, count=1, flags=re.MULTILINE)
 new_fm = '''${FM_PY}'''
 c, n3 = re.subn(
     r'feature_masks\s*=\s*\{[^}]*"long"[^}]*\{[^}]*\}[^}]*,[^}]*"short"[^}]*\{[^}]*\}[^}]*,?\s*\}\s*,',
