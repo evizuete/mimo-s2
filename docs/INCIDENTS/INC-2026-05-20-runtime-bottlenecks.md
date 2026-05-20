@@ -184,9 +184,9 @@ Patrón común: **defensa puesta sin medición empírica → bloqueo total cuand
 
 ### Pendientes a medio plazo
 
-- [ ] **Auditar las lógicas adaptive_sl/adaptive_tp**: 4 thresholds inalcanzables sugieren que esas lógicas nunca se ejecutaron. Decidir: (a) corregir thresholds para activarlas, (b) eliminar el código muerto.
+- [x] **Auditar las lógicas adaptive_sl/adaptive_tp**: 4 thresholds inalcanzables sugieren que esas lógicas nunca se ejecutaron. Decidir: (a) corregir thresholds para activarlas, (b) eliminar el código muerto. → Opción (a): thresholds bajados a P95/P99 empíricos (commit `3d4d537`).
 - [ ] **Unificar fuente de verdad de StateDetector config**: eliminar `_state_config_overrides` y dejar `self.state_detector.config` como única fuente.
-- [ ] **Dashboard de "filtros bloqueadores"**: monitor que cuente cuántos eventos bloquea cada filtro (TRANSITION_WEAK_SIGNAL, BLOCK_CHOP, REVERSAL_GUARD_*, etc.) y alerte si alguno bloquea > 95% sostenido.
+- [x] **Dashboard de "filtros bloqueadores"**: monitor que cuente cuántos eventos bloquea cada filtro (TRANSITION_WEAK_SIGNAL, BLOCK_CHOP, REVERSAL_GUARD_*, etc.) y alerte si alguno bloquea > N% sostenido. → `scripts/monitor_blocker_filters.py` con ventana móvil, threshold configurable, catálogo de 13 filtros con sugerencias automáticas, exit codes para cron. Documentado en RUNBOOK Apéndice L.
 
 ---
 
@@ -264,6 +264,11 @@ python scripts/validate_calibrator_thresholds.py --quiet    # CI mode, exit 1 si
 python scripts/smoke_test_post_deploy.py                    # snapshot interactivo
 python scripts/smoke_test_post_deploy.py --quiet            # cron mode, exit 1 si FAIL
 python scripts/smoke_test_post_deploy.py --fail-after-hours 2   # alerta tras 2h
+
+# Monitor de filtros bloqueadores (acción preventiva #3)
+python scripts/monitor_blocker_filters.py                   # snapshot 6h
+python scripts/monitor_blocker_filters.py --quiet           # cron mode, exit 1 si ALERT
+python scripts/monitor_blocker_filters.py --alert-threshold-pct 80  # más estricto
 ```
 
 ### C. Referencias

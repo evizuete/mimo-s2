@@ -981,6 +981,79 @@ Cuando añadas un nuevo filtro defensivo basado en cal_probs en runtime,
 **añádelo también al catálogo** del script para que la validación lo cubra.
 
 
+## Apéndice L — Monitor de filtros bloqueadores
+
+**Objetivo**: detectar proactivamente si un único filtro defensivo
+(TRANSITION_WEAK_SIGNAL, BLOCK_CHOP, REVERSAL_GUARD_*, etc.) empieza a
+dominar el bloqueo de señales, lo cual suele indicar un threshold mal
+calibrado o un drift del modelo.
+
+**Motivación**: el incident INC-2026-05-20 mostró que un único filtro
+(`transition_min_proba_delta=0.10`) bloqueaba el 100% de señales en
+TRANSITION sin que nadie se diera cuenta. Este monitor está diseñado
+para que ese tipo de patrón sea detectable en horas, no en días.
+
+### Comando
+
+```bash
+# Snapshot interactivo (últimas 6h, alerta si filtro individual > 50%)
+python scripts/monitor_blocker_filters.py
+
+# Modo cron: silencioso si OK, output completo si ALERT
+python scripts/monitor_blocker_filters.py --quiet
+echo $?  # 0=OK | 1=ALERT | 2=EMPTY | 3=error
+
+# Ventana 24h, threshold más estricto (80%)
+python scripts/monitor_blocker_filters.py --window-hours 24 --alert-threshold-pct 80
+```
+
+### Interpretación
+
+El monitor distingue **3 categorías** de eventos:
+
+1. **Sin razón loggeada**: ticks donde el engine no evaluó (mercado parado,
+   startup grace, datos insuficientes). NO se cuentan como bloqueos —
+   son ruido contextual.
+2. **Evaluados → SIGNAL_SENT**: trades emitidos.
+3. **Evaluados → bloqueados con razón explícita**: aquí se reparte el %
+   sobre los distintos filtros defensivos.
+
+El % de cada filtro se calcula sobre el total de **evaluados** (2+3), no
+sobre el total bruto. Así el ruido del mercado parado no distorsiona.
+
+### Filtros catalogados
+
+El script tiene un diccionario `FILTER_SUGGESTIONS` con causas raíz y
+acciones correctivas para cada filtro conocido. Si un filtro nuevo
+aparece sin estar catalogado, el output emite "investigar en código
+fuente" — añadirlo al diccionario para futuras alertas.
+
+Filtros actuales:
+
+  · TRANSITION_WEAK_SIGNAL, BLOCK_CHOP, BLOCK_EXHAUSTION_REENTRY
+  · REVERSAL_GUARD_LONG_TREND_DOWN, REVERSAL_GUARD_SHORT_TREND_UP
+  · DECISION_ENGINE_NONE
+  · COUNTER_TREND_BLOCKED
+  · RSI_OVERBOUGHT, RSI_OVERSOLD
+  · POST_CLOSE_COOLDOWN, SIGNAL_INTER_COOLDOWN
+  · ENTRY_GAP_TOO_LARGE
+  · ANOMALY_BLOCK
+
+### Nota sobre DECISION_ENGINE_NONE
+
+A diferencia de los otros filtros, `DECISION_ENGINE_NONE` no es un filtro
+defensivo — significa "el modelo no produjo decisión (probas bajas o
+empatadas)". Es esperable que sea alto en periodos de baja convicción
+del modelo.
+
+**Si DECISION_ENGINE_NONE es alto pero hay SIGNAL_SENT > 0** → comportamiento
+normal de modelo cauto.
+
+**Si DECISION_ENGINE_NONE es alto y SIGNAL_SENT = 0 sostenido** → el modelo
+no está produciendo señales útiles. Investigar calibrador (script
+`validate_calibrator_thresholds.py`).
+
+
 ## Apéndice K — Smoke test post-deploy
 
 **Objetivo**: detectar automáticamente si tras un restart de s2 el sistema
