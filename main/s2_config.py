@@ -166,6 +166,19 @@ class S2Config:
     rsi_oversold_threshold: float = 25.0
 
     # ── Transition weak-signal filter (FIX 17/04/2026 BUG-3) ───────────────
-    transition_min_proba_delta: float = 0.10
+    # 2026-05-20: bajado de 0.10 a 0.04 tras análisis empírico.
+    # En datos OOF (n=72 muestras en TRANSITION):
+    #   · P50=0.021  P85=0.036  P90=0.040  P95=0.050  P99=0.056 (Platt actual)
+    #   · P50=0.029  P90=0.055  P99=0.090 (isotónico antiguo)
+    # El valor original 0.10 estaba por ENCIMA del P99 de ambos calibradores
+    # → bloqueo del 100% de señales en TRANSITION (confirmado en runtime
+    # 20/05/2026: 3 SELL consecutivos en TRANSITION_DOWN con deltas 0.017,
+    # 0.030, 0.037 todos bloqueados pese a tener scores 0.54-0.65).
+    # El caso histórico del 17/04/2026 (3 SELL con delta≈0.088 que perdieron
+    # -675pts) era P99 del isotónico — un outlier raro, no la masa de la
+    # distribución. Con threshold=0.04 (P90 Platt) bloqueamos 89% del ruido
+    # y dejamos pasar señales realmente fuertes para el rango natural del
+    # calibrador Platt.
+    transition_min_proba_delta: float = 0.04
 
     startup_grace_bars: int = 1
