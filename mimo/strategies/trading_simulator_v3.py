@@ -911,9 +911,15 @@ class TradingSimulator:
         )
 
         self.helper = Helper(general_config=general_config, path=artifacts_path)
+        # 2026-05-20: relajado anti-chop. Antes: chop_block=True, mult=0.0
+        # (NO_TRADE en cualquier barra con is_chop=1, ~15% del tiempo por
+        # construcción del detector via percentil 85 móvil). Tras restart con
+        # fix del threshold injection y apertura de gates en producción, se
+        # observó que BLOCK_CHOP era un blocker secundario importante. Ahora:
+        # entra con tamaño 0.5x en chop (defensa parcial) en vez de bloquear.
         self.strategy_gate = StrategyGate(
-            chop_block=True,
-            chop_size_mult=0.0,
+            chop_block=False,
+            chop_size_mult=0.5,
             exhaustion_blocks_reentry=True
         )
 
