@@ -99,7 +99,13 @@ class AdaptiveSLConfig:
     expansion_min_signals: int = 2
 
     # Umbral mínimo de proba_reversal del modelo para contar como señal
-    expansion_proba_threshold: float = 0.45
+    # 2026-05-20: bajado de 0.45 a 0.15 (P95 LONG con calibrador Platt).
+    # El valor original 0.45 era inalcanzable (cal_max LONG con Platt=0.35,
+    # con iso=1.00 sólo por outlier overfit que daba 0.06% paso). La rama
+    # proba_ok nunca contribuía a SL Expansion. Ver INC-2026-05-20 anexo A
+    # para distribución empírica. P95 → ~5% activación, equilibrado para
+    # "señal fuerte" sin abrir el grifo.
+    expansion_proba_threshold: float = 0.15
 
     # RSI: zonas extremas para considerar señal de reversión
     expansion_rsi_oversold: float  = 35.0   # para BUY (precio bajó mucho)
@@ -112,7 +118,13 @@ class AdaptiveSLConfig:
     compression_enabled: bool = True
 
     # El modelo debe tener proba de reversión >= este umbral para comprimir
-    compression_proba_threshold: float = 0.60
+    # 2026-05-20: bajado de 0.60 a 0.20 (P99 LONG con calibrador Platt).
+    # El valor original 0.60 era inalcanzable (cal_max LONG con Platt=0.35).
+    # Compression es defensivo (cierra SL ANTES de tocar el stop), por eso
+    # mantenemos P99 (~1% activación) en vez de P95 — sólo activar la rama
+    # proba cuando el modelo emite señal de inversión muy fuerte. Ver
+    # INC-2026-05-20 anexo A para distribución empírica.
+    compression_proba_threshold: float = 0.20
 
     # Offset desde el precio actual donde se pone el nuevo SL comprimido
     # (en puntos, en dirección favorable a la posición)

@@ -95,7 +95,10 @@ class AdaptiveTPConfig:
 
     # El modelo debe tener proba del lado OPUESTO >= este umbral (convicción
     # de que el movimiento se va a girar) para contar como señal.
-    compression_proba_threshold: float = 0.45
+    # 2026-05-20: bajado de 0.45 a 0.15 (P95 LONG con calibrador Platt).
+    # El valor original 0.45 era inalcanzable (cal_max LONG con Platt=0.35,
+    # SHORT=0.23). Ver INC-2026-05-20 anexo A.
+    compression_proba_threshold: float = 0.15
 
     # RSI en zona extrema para el lado de la posición (agotamiento)
     compression_rsi_overbought: float = 70.0   # para BUY (subida agotada)
@@ -128,7 +131,12 @@ class AdaptiveTPConfig:
     extension_min_signals: int = 2
 
     # El modelo debe tener proba del lado de la posición >= este umbral
-    extension_proba_threshold: float = 0.60
+    # 2026-05-20: bajado de 0.60 a 0.20 (P99 LONG con calibrador Platt).
+    # El valor original 0.60 era inalcanzable. Extensión es "dejar correr"
+    # cuando el momentum persiste — mantenemos P99 (~1% activación) en vez
+    # de P95 porque extender TP es decisión de mayor compromiso (más
+    # exposición). Ver INC-2026-05-20 anexo A.
+    extension_proba_threshold: float = 0.20
 
     # RSI: zona "caliente" que confirma que el movimiento tiene fuerza
     extension_rsi_hot_buy:  float = 55.0   # RSI > umbral para BUY (fuerza alcista)
