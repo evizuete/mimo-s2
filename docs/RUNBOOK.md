@@ -909,6 +909,70 @@ mv artifacts/<release>/oof/<deploy>/scalers_<X>/meta.json.before_recal_<TS> \
 ```
 
 
+## Apéndice F — Validar umbrales del runtime tras cambio de calibrador
+
+**Objetivo**: detectar automáticamente si algún umbral runtime que depende
+de `cal_probs` quedó inalcanzable o demasiado permisivo tras cualquier
+cambio del calibrador (iso ↔ Platt, refit, swap per-champion, retrain).
+
+**Motivación**: el incident INC-2026-05-20 reveló que múltiples umbrales
+defensivos del sistema (`transition_min_proba_delta`, `min_proba_edge`,
+`expansion_proba_threshold`, `compression_proba_threshold`,
+`extension_proba_threshold`) estaban calibrados sobre un rango de cal_probs
+que cambió al swap del calibrador. Resultado: bloqueo del 100% de señales
+sin alerta visible.
+
+### Cuándo ejecutar
+
+- **Obligatorio** tras swap o regeneración de calibradores (
+  `oof_calibrator_*.joblib`).
+- **Tras refit de producción** (Fase 5 del runbook).
+- **Tras retrain del modelo** (Fase 2).
+- **Periódico** (mensual) — detecta drift silencioso.
+
+### Comando
+
+```bash
+# Modo interactivo: imprime tabla detallada con métricas y rangos
+python scripts/validate_calibrator_thresholds.py
+
+# Modo CI/script: silencioso si OK, output + exit 1 si hay alertas
+python scripts/validate_calibrator_thresholds.py --quiet
+echo $?  # 0 = OK | 1 = alertas | 2 = error de carga
+
+# Sobre otro deploy:
+python scripts/validate_calibrator_thresholds.py \
+  --deploy artifacts/202500/oof/deploy_PROD_combined_seed47
+```
+
+### Qué valida
+
+Para cada umbral del catálogo (`scripts/validate_calibrator_thresholds.py::THRESHOLD_SPECS`):
+
+1. Carga los datos OOF de calibración (`deploy_calibration_tail_*.parquet`).
+2. Aplica el calibrador actual del deploy.
+3. Calcula la métrica empírica (delta, edge, max_side) sobre los datos.
+4. Comprueba la tasa de paso (% de eventos que cumplen el umbral) contra
+   el rango razonable definido por umbral.
+5. Si el % de paso está fuera del rango → ALERTA con sugerencia (P50 o P90
+   empírico para ajustar el umbral).
+
+### Catálogo actual de umbrales validados
+
+| Umbral | Archivo | Rango razonable |
+|---|---|---|
+| `transition_min_proba_delta` | `main/s2_config.py` | 5%–40% paso |
+| `min_proba_edge (LONG_in_TREND_DOWN)` | `main/s2_config.py` | 5%–50% paso |
+| `min_proba_edge (SHORT_in_TREND_UP)` | `main/s2_config.py` | 5%–70% paso |
+| `expansion_proba_threshold` | `main/adaptive_sl_manager.py` | 1%–20% paso |
+| `compression_proba_threshold` (sl) | `main/adaptive_sl_manager.py` | 0.5%–10% paso |
+| `compression_proba_threshold` (tp) | `main/adaptive_tp_manager.py` | 1%–20% paso |
+| `extension_proba_threshold` | `main/adaptive_tp_manager.py` | 0.5%–10% paso |
+
+Cuando añadas un nuevo filtro defensivo basado en cal_probs en runtime,
+**añádelo también al catálogo** del script para que la validación lo cubra.
+
+
 ## Apéndice G — Walk-forward validation
 
 **Objetivo**: validar la robustez temporal del sistema más allá de un único LOCKBOX. Walk-forward genera múltiples cutoffs históricos rolling y evalúa cada uno sobre el periodo inmediatamente posterior.

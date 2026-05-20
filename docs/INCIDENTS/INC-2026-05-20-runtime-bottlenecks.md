@@ -177,8 +177,8 @@ Patrón común: **defensa puesta sin medición empírica → bloqueo total cuand
 
 ### Pendientes a corto plazo
 
-- [ ] **Exponer `chop_block`/`chop_size_mult` en `s2_config.py`** en lugar de hardcoded. Permite ajustar sin tocar `trading_simulator_v3.py`.
-- [ ] **Test de regresión automático**: al swap calibrador, ejecutar tests que verifiquen que los umbrales aguas abajo siguen siendo alcanzables (P90 de cal_probs >= umbral).
+- [x] **Exponer `chop_block`/`chop_size_mult` en `s2_config.py`** en lugar de hardcoded. Permite ajustar sin tocar `trading_simulator_v3.py`. → `StrategyGateConfig` añadido (commit `835abb6`).
+- [x] **Test de regresión automático**: al swap calibrador, ejecutar tests que verifiquen que los umbrales aguas abajo siguen siendo alcanzables (P90 de cal_probs >= umbral). → `scripts/validate_calibrator_thresholds.py` con catálogo de 7 umbrales, exit code 0/1/2 para CI (este commit). Documentado en RUNBOOK Apéndice F.
 - [ ] **Smoke test post-deploy**: verificar que el sistema emite >0 trades en las primeras 24h. Si no, alertar (no esperar al operador).
 - [ ] **Documentar elección de calibrador como decisión de diseño**: ¿usamos isotónico (no-paramétrico) o Platt (sigmoid)? Con qué cantidad mínima de datos OOF?
 
@@ -255,6 +255,10 @@ for k,v in counts.most_common(): print(f'{v:5d}  {k}')
 
 # Verificación calibradores cargados correctamente
 python -c "import joblib; c=joblib.load('artifacts/.../oof_calibrator_*_long.joblib'); print(type(c).__name__)"
+
+# Validar umbrales runtime que dependen del calibrador (acción preventiva #4)
+python scripts/validate_calibrator_thresholds.py            # tabla detallada
+python scripts/validate_calibrator_thresholds.py --quiet    # CI mode, exit 1 si alertas
 ```
 
 ### C. Referencias
