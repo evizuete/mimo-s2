@@ -95,6 +95,46 @@ FILTER_SUGGESTIONS = {
         "gap precio→entry excesivo. Revisar config.open_guard.max_entry_gap_pts.",
     "ANOMALY_BLOCK":
         "anomaly_score por encima del umbral. Revisar anomaly_block_threshold.",
+    "ANOMALY_BLOCKED":
+        "anomaly_score >= anomaly_block_threshold (default 1.5). Mercado en "
+        "spike/condiciones anormales. Si frecuente, revisar parámetros de "
+        "anomaly del engine (z_range_hi, z_body_hi, k_body_atr) o subir el "
+        "anomaly_block_threshold.",
+    "ANOMALY_PENALTY_ZEROED":
+        "anomaly_score ∈ [0.5, 1.5] penalizó score a 0 (no llega a bloqueo "
+        "absoluto pero penalty=exp(-1.25·anomaly) lo mata). Tierra de nadie. "
+        "Si frecuente sin razón aparente: bajar penalty_lambda (1.25→0.8) o "
+        "ajustar el cálculo del anomaly_score.",
+    "ZERO_SCORE_NO_ORDER":
+        "Decision válida (buy/sell) pero score quedó en 0. Probable: cal_prob "
+        "apenas pasa gate, score residual aniquilado por cap/mult. Revisar "
+        "score_cap_by_state y risk_mult_by_state del policy.",
+    "ZERO_QTY_NO_ORDER":
+        "Decision con score>0 pero qty=0 al construir order. Error de sizing: "
+        "sl_dist=0, ATR insuficiente, o lot_min mayor que el riesgo asignado.",
+    "NO_GATE_PASS":
+        "cal_prob NO supera el gate p80/p90/p99 del estado. Si frecuente: "
+        "modelo no genera convicción suficiente, o gates demasiado altos para "
+        "el rango natural del calibrador Platt.",
+    "HARD_SPIKE":
+        "Barra detectada como spike anormal (body+range muy por encima de la "
+        "norma reciente). Comportamiento defensivo correcto.",
+    "COOLDOWN":
+        "Cooldown post-anomalía activo. Esperar siguiente vela.",
+    "SIGNAL_COOLDOWN":
+        "Cooldown de señal armado tras ANOMALY_BLOCKED previo. Activo "
+        "signal_cooldown_bars velas (default 3).",
+    "LOW_VOL_BLOCKED":
+        "Estado low_vol bloqueado por el engine (decision_engine.py:413). "
+        "Comportamiento intencional — no operar en baja volatilidad.",
+    "VOLATILE_BLOCKED":
+        "Estado volatile bloqueado por el engine. Comportamiento intencional.",
+    "STRATEGY_GATE_BLOCK_CHOP":
+        "Chop detectado por feature is_chop=1 y chop_block=True. Revisar "
+        "config.strategy_gate.chop_block / chop_size_mult.",
+    "STRATEGY_GATE_BLOCK_EXHAUSTION_REENTRY":
+        "Exhaustion bloqueó reentrada. Revisar config.strategy_gate."
+        "exhaustion_blocks_reentry.",
 }
 
 

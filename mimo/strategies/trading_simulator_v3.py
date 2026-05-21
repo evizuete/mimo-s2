@@ -2271,15 +2271,55 @@ class TradingSimulator:
             session.commit()
 
         if order is None:
-            # La acción del decision engine fue 'none': score bajo, régimen filtrado,
-            # delta_rel insuficiente, strategy_gate bloqueó, etc.
-            # El motivo específico está en dec.debug['strategy_gate_reason'] si existe.
-            gate_reason = ""
-            debug = getattr(dec, "debug", None)
-            if isinstance(debug, dict):
+            # Determinar la causa REAL del no-order para diagnóstico claro.
+            # Antes (genérico): "DECISION_ENGINE_NONE" sin pista de la causa.
+            # Ahora: extraer la causa específica del dec.debug y combinaciones de
+            # estado (action válida pero qty=0 tras penalty es el caso más sutil
+            # — el modelo decidió operar pero anomaly_score penalizó el score
+            # hasta 0). Ver INC-2026-05-20 lección 5.
+            debug = getattr(dec, "debug", None) or {}
+            dec_action = str(getattr(dec, "action", "none"))
+
+            if dec_action == "none":
+                # El engine rechazó. Usar el reason interno del engine.
+                engine_reason = str(debug.get("reason", "ENGINE_NONE"))
                 gate_reason = str(debug.get("strategy_gate_reason", ""))
-            _reject(f'DECISION_ENGINE_NONE{(":" + gate_reason) if gate_reason else ""}',
-                    row=row, dec=dec)
+                # Si el reason es "trade" pero strategy_gate bloqueó, usar gate_reason
+                if engine_reason == "trade" and gate_reason and gate_reason not in ("OK", "ALLOW_MIN_IN_CHOP"):
+                    final_reason = f"STRATEGY_GATE_{gate_reason}"
+                else:
+                    # Mapear los reasons internos del engine a etiquetas operativas
+                    final_reason = {
+                        "trade": "DECISION_ENGINE_NONE",       # fallback no informativo
+                        "no_gate_pass": "NO_GATE_PASS",         # cal < gate threshold
+                        "HARD_SPIKE": "HARD_SPIKE",             # spike anormal de barra
+                        "COOLDOWN": "COOLDOWN",                 # cooldown post-anomaly
+                        "ANOMALY_BLOCKED": "ANOMALY_BLOCKED",   # anomaly >= block_threshold
+                        "SIGNAL_COOLDOWN": "SIGNAL_COOLDOWN",   # post-anomaly cooldown
+                        "low_vol_blocked": "LOW_VOL_BLOCKED",
+                        "volatile_blocked": "VOLATILE_BLOCKED",
+                    }.get(engine_reason, f"ENGINE_{engine_reason}")
+            else:
+                # action es "buy" o "sell" pero el order quedó en None.
+                # Caso típico: chosen_score=0 → risk_pct=0 → qty=0 → build_order=None
+                anomaly_score = float(debug.get("anomaly_score", 0.0) or 0.0)
+                penalty = float(debug.get("penalty", 1.0) or 1.0)
+                chosen_score = float(getattr(dec, "chosen_score", 0.0) or 0.0)
+
+                if anomaly_score >= 0.5 and penalty < 0.5:
+                    # La causa probable: penalty exp(-λ·anomaly) redujo el score a ~0
+                    final_reason = (
+                        f"ANOMALY_PENALTY_ZEROED(action={dec_action},"
+                        f"anomaly={anomaly_score:.2f},penalty={penalty:.3f})"
+                    )
+                elif chosen_score <= 1e-6:
+                    # Score quedó en 0 sin penalty alto — probablemente cal apenas pasó gate
+                    final_reason = f"ZERO_SCORE_NO_ORDER(action={dec_action})"
+                else:
+                    # Score > 0 pero qty=0 — error en sizing (sl_dist 0, etc.)
+                    final_reason = f"ZERO_QTY_NO_ORDER(action={dec_action},score={chosen_score:.4f})"
+
+            _reject(final_reason, row=row, dec=dec)
             return None
 
         # --- RL gate-only (live): decide TAKE / SKIP sobre señal base ---
