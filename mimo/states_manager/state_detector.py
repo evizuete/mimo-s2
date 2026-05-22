@@ -104,6 +104,23 @@ class StateConfig:
     fixed_bb_width_p35: Optional[float] = None
     fixed_bb_width_p70: Optional[float] = None
     fixed_range_expansion_p80: Optional[float] = None
+    # 2026-05-22 (M1): ADX como percentil persistido (no hardcoded).
+    # Análisis empírico Marzo 2026 reveló que ADX p50≈24 → adx_trend=25
+    # convertía 47% del tiempo en "trend", inflando TREND_* (problema:
+    # hit_dir TREND_UP=45%, peor que random). Persistir adx_trend en
+    # ~p75-p80 hace que TREND signifique "tendencia genuinamente fuerte".
+    # Si NO se inyectan, _classify cae a adx_trend_threshold/adx_range_max
+    # (defaults 25/18) por compatibilidad con código antiguo.
+    fixed_adx_trend: Optional[float] = None
+    fixed_adx_range: Optional[float] = None
+
+    # ── M2 (2026-05-22): Smoothing / hysteresis ────────────────────────
+    # Reduce flapping del state classificator. Antes (sin smoothing): cada
+    # barra se clasifica independientemente; con ADX/ATR cerca de umbrales,
+    # estados pueden cambiar barra a barra (A→B→A) generando inestabilidad
+    # en features que dependen del state. Con K=3, solo cambia de estado
+    # si las K barras consecutivas confirman el nuevo. K=1 desactiva.
+    state_smooth_k: int = 3
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -235,6 +252,9 @@ class StateDetector:
         cfg.fixed_bb_width_p35       = thresholds.get("bb_p35")
         cfg.fixed_bb_width_p70       = thresholds.get("bb_p70")
         cfg.fixed_range_expansion_p80 = thresholds.get("rexp_p80")
+        # M1 — ADX persistido (opcional, retrocompat: si no se pasa, cae a defaults)
+        cfg.fixed_adx_trend          = thresholds.get("adx_trend")
+        cfg.fixed_adx_range          = thresholds.get("adx_range")
         # Invalidar caché
         self._cache_key = None
         self._cached_thresholds = None
@@ -266,6 +286,18 @@ class StateDetector:
             for key, q in zip(keys, qs):
                 thresholds[key] = float(np.nanquantile(vals, q))
 
+        # M1 — ADX por percentil (si la columna está). Si no, NO se incluyen
+        # en el dict y el StateDetector cae a los defaults hardcoded (25/18)
+        # por compatibilidad con código antiguo / pipelines sin ADX en features.
+        if "adx" in df_prepared.columns:
+            adx_vals = df_prepared["adx"].dropna()
+            if len(adx_vals) > 0:
+                # P25 para range (≈ adx_range_max actual de 18) y P80 para trend.
+                # P80 elegido tras análisis empírico Marzo 2026 (ADX p82≈35) que
+                # mostró que el hardcoded 25 (≈p50) infla TREND_* al 47% del tiempo.
+                thresholds["adx_range"] = float(np.nanquantile(adx_vals, 0.25))
+                thresholds["adx_trend"] = float(np.nanquantile(adx_vals, 0.80))
+
         print(f"\t[StateDetector] Thresholds computed from {len(df_prepared):,} rows: {thresholds}")
         return thresholds
 
@@ -291,6 +323,10 @@ class StateDetector:
                 "bb_p35":         cfg.fixed_bb_width_p35,
                 "bb_p70":         cfg.fixed_bb_width_p70,
                 "rexp_p80":       cfg.fixed_range_expansion_p80,
+                # M1 — ADX persistido si está, si no fallback a hardcoded.
+                # Esto permite retrocompat con meta.json que no incluyan ADX.
+                "adx_trend":      cfg.fixed_adx_trend if cfg.fixed_adx_trend is not None else cfg.adx_trend_threshold,
+                "adx_range":      cfg.fixed_adx_range if cfg.fixed_adx_range is not None else cfg.adx_range_max,
             }
 
         # ⚠️ Caída en el path dinámico: ocurre cuando NO se ha llamado a
@@ -323,6 +359,9 @@ class StateDetector:
             "bb_p35":   float(np.nanquantile(bb_width,  0.35)) if np.isfinite(bb_width).any() else cfg.bb_width_p35,
             "bb_p70":   float(np.nanquantile(bb_width,  0.70)) if np.isfinite(bb_width).any() else cfg.bb_width_p70,
             "rexp_p80": float(np.nanquantile(range_exp, 0.80)) if np.isfinite(range_exp).any() else cfg.range_expansion_p80,
+            # M1 — ADX dinámico (path de fallback cuando no se inyectaron persistidos)
+            "adx_trend": float(np.nanquantile(_safe(df, "adx"), 0.80)) if "adx" in df.columns and np.isfinite(_safe(df, "adx")).any() else cfg.adx_trend_threshold,
+            "adx_range": float(np.nanquantile(_safe(df, "adx"), 0.25)) if "adx" in df.columns and np.isfinite(_safe(df, "adx")).any() else cfg.adx_range_max,
         }
 
         self._cache_key = cache_key
@@ -351,8 +390,12 @@ class StateDetector:
         atr_mid  = ~atr_high & ~atr_low
 
         # ── Máscaras ADX ───────────────────────────────────────────────
-        adx_trend  = adx >= cfg.adx_trend_threshold
-        adx_low    = adx < cfg.adx_range_max
+        # M1: usar thresholds del dict (persistidos o dinámicos), no los
+        # defaults hardcoded del config. Esto auto-adapta al mercado.
+        adx_trend_thr = thr.get("adx_trend", cfg.adx_trend_threshold)
+        adx_range_thr = thr.get("adx_range", cfg.adx_range_max)
+        adx_trend  = adx >= adx_trend_thr
+        adx_low    = adx < adx_range_thr
         adx_mid    = ~adx_trend & ~adx_low   # zona de transición
 
         # ── Dirección ──────────────────────────────────────────────────
@@ -428,7 +471,41 @@ class StateDetector:
         strong_range = adx_low & atr_mid & ~volatile_local & ~in_breakout_wait
         state[strong_range] = "RANGE"
 
+        # M2 — Smoothing causal: cambiar de estado solo si K barras consecutivas
+        # confirman el nuevo. Reduce flapping (medido: 216 → ~50 con K=3 en
+        # Marzo 2026). Causal: solo usa estado pasado, no futuro.
+        K = max(1, int(getattr(cfg, "state_smooth_k", 1)))
+        if K > 1 and len(state) > K:
+            state = self._smooth_state(state, k=K)
+
         return state
+
+    @staticmethod
+    def _smooth_state(state: pd.Series, k: int) -> pd.Series:
+        """Hysteresis causal: requiere k barras consecutivas para cambiar."""
+        out = state.copy().to_numpy()
+        n = len(out)
+        if n <= 1 or k <= 1:
+            return pd.Series(out, index=state.index, dtype=object)
+        current = out[0]
+        pending = out[0]
+        pending_count = 0
+        for i in range(1, n):
+            proposed = out[i]
+            if proposed == current:
+                pending = proposed
+                pending_count = 0
+            else:
+                if proposed == pending:
+                    pending_count += 1
+                else:
+                    pending = proposed
+                    pending_count = 1
+                if pending_count >= (k - 1):
+                    current = proposed
+                    pending_count = 0
+            out[i] = current
+        return pd.Series(out, index=state.index, dtype=object)
 
 
 # ═══════════════════════════════════════════════════════════════════════

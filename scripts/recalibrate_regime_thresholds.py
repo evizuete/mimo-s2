@@ -79,7 +79,10 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 
 # Threshold keys que persiste el StateDetector en meta.json bajo "regime_thresholds".
-THRESHOLD_KEYS = ("vol_low", "vol_high", "bb_p20", "bb_p35", "bb_p70", "rexp_p80")
+THRESHOLD_KEYS = ("vol_low", "vol_high", "bb_p20", "bb_p35", "bb_p70", "rexp_p80",
+                  # M1 — ADX persistido (2026-05-22). Si compute_thresholds()
+                  # no los devuelve, se omiten — StateDetector cae a defaults.
+                  "adx_trend", "adx_range")
 
 
 def auto_detect_deploy(release: str) -> str:
