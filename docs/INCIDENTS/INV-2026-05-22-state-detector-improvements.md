@@ -192,7 +192,34 @@ Uso futuro:
   o flapping degradan → considerar M3 (recalibrar).
 - Tras cambio de modelo: ejecutar para verificar coherencia state ↔ outcome.
 
-## 9. Referencias
+## 9. Observación pendiente — Filtro COUNTER_TREND_LOW_SCORE
+
+Durante validación post-restart, observado un trade bloqueado por filtro
+`COUNTER_TREND_LOW_SCORE` (en `s2_service_v2.py:944-950`):
+
+```
+[08:41] state=TREND_DOWN, side=long, score=0.023
+        threshold = min_score_to_trade(0) + counter_trend.score_penalty(0.25) = 0.25
+        BLOQUEADO: score=0.023 << 0.25
+```
+
+**Posible inconsistencia con datos empíricos del LOCKBOX 30d**:
+- Trades contra-tendencia: wr=35.5%, **+506$** sobre 369 trades
+- Trades alineados con tendencia: wr=30.2%, **-770$** sobre 1447 trades
+
+El filtro bloquea precisamente los trades contra-tendencia con baja
+convicción — pero según LOCKBOX, contra-tendencia gana en agregado.
+
+**No tocar ahora**: la calibración de scores cambiará con el re-entrenamiento.
+Mejor reevaluar el filtro contra el nuevo deploy. Si tras re-deploy se sigue
+observando este patrón:
+- Analizar trades contra-tendencia por bucket de score (0-0.05, 0.05-0.15, etc.)
+- Decidir si bajar `counter_trend.score_penalty` (0.25 → ej. 0.05) o eliminar
+
+**Acción pendiente**: añadir esto a la lista de validaciones del próximo
+ciclo de monitorización post-deploy.
+
+## 10. Referencias
 
 - Commits: `995ba4f` (M1+M2 código) + APPLY de recalibrate (meta.json)
 - Análisis: `/tmp/replay_oos_mar` (replay marzo usado para validar)
