@@ -55,9 +55,9 @@ gate_by_action_and_state = {
         "range":              80,   # mantener; 80/90/95 casi no cambia
         "breakout_wait_up":   90,   # antes 85
         "breakout_wait_down": 95,   # mantener
-        "volatile":           75,   # sin efecto operativo real
+        "volatile":           99,   # sin efecto operativo real
         "low_vol":            99,   # sin operativa
-        "_global":            80,   # antes 75
+        "_global":            97,   # antes 75
         },
         "short": {
             "trend_down":         90,   # antes 85
@@ -67,9 +67,9 @@ gate_by_action_and_state = {
             "range":              95,   # antes 90
             "breakout_wait_down": 90,   # antes 85
             "breakout_wait_up":   95,   # antes 90
-            "volatile":           90,   # sin efecto operativo real
+            "volatile":           99,   # sin efecto operativo real
             "low_vol":            99,   # sin operativa
-            "_global":            90,   # antes 85
+            "_global":            99,   # antes 85
         }
     }
 }

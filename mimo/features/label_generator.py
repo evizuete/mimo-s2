@@ -4,6 +4,7 @@ import pandas as pd
 from mimo.features.feature_builder import FeatureConfig
 from mimo.models.numba_utils import (
     triple_barrier_fixed_numba,
+    triple_barrier_3class_numba,
     triple_barrier_adaptive_numba,
     fast_rolling_max,
     fast_rolling_quantile, fast_rolling_min,
@@ -59,6 +60,17 @@ class LabelGenerator:
             df = self._fixed_labels(df, side)
         elif self.config.label_method == 'triple_barrier':
             df = self._triple_barrier_labels(df, side)
+        elif self.config.label_method == 'quantile_return':
+            df = self._quantile_return_labels(df, side)
+        elif self.config.label_method == 'magnitude_binary':
+            df = self._magnitude_binary_labels(df, side)
+        elif self.config.label_method == 'triple_class':
+            df = self._triple_class_labels(df, side)
+        elif self.config.label_method == 'triple_barrier_dual':
+            # Multi-task: genera signal_long Y signal_short en una sola llamada.
+            # 'side' se ignora; downstream (data_pipeline + model_builder) detecta
+            # ambas columnas y construye el target (N, 2).
+            df = self._dual_triple_barrier_labels(df)
         else:
             raise ValueError(f"Método {self.config.label_method} no reconocido")
 
@@ -241,7 +253,22 @@ class LabelGenerator:
 
     def _fixed_labels(self, df: pd.DataFrame, side: str) -> pd.DataFrame:
         """
-        Etiquetado con umbrales en ATRs.
+        ⚠️  DEPRECATED — usar `_triple_barrier_labels` en su lugar.
+
+        Etiquetado con umbrales fijos a tp×ATR (return) y sl×ATR (adverse).
+        Diferencia conceptual con triple_barrier:
+          - triple_barrier: signal=1 si TP se toca *en cualquier momento*
+            antes que SL dentro de [t+1, t+h].
+          - fixed (este): signal=1 si AL CIERRE de t+h, return >= tp×ATR Y
+            adverse < sl×ATR durante toda la ventana.
+
+        Más restrictivo y path-dependiente. El pipeline actual no lo usa.
+
+        ⚠️  Bugs conocidos sin arreglar (no impactan porque la función no se
+        invoca en el flujo actual con label_method='triple_barrier'):
+          - Cascada de np.roll en future_low/high es ambigua.
+          - No valida atr_norm > 0 antes de usar como denominador.
+        Si vas a reactivar esta función, audítala primero.
 
         Con regime_barriers: tp y sl varían fila a fila según el régimen.
         Sin ellos: comportamiento original con escalares fijos.
@@ -342,6 +369,136 @@ class LabelGenerator:
         out['signal'] = signal
         return out
 
+    def _triple_class_labels(self, df: pd.DataFrame, side: str) -> pd.DataFrame:
+        """
+        Triple barrier labeling 3-class. Devuelve clases {0=SL, 1=TIMEOUT, 2=TP}.
+
+        Mismo recorrido temporal que _triple_barrier_labels (binario) pero
+        distingue los tres outcomes. La cabeza del modelo correspondiente es
+        softmax(3) y la loss SparseCategoricalCrossentropy. Downstream:
+        P(TP) = softmax[..., 2] se usa como "signal" para calibración y
+        umbrales (compatible con el flujo binario).
+
+        Soporta regime_barriers igual que el binario.
+        """
+        horizon      = int(self.config.label_horizon)
+        out          = df.copy()
+        close        = out['close'].values
+        high         = out['high'].values
+        low          = out['low'].values
+        atr          = out['atr'].values
+        side_is_long = (side == 'long')
+
+        rb = self.config.regime_barriers or {}
+
+        if not rb:
+            tp_mult = float(self.config.tp_barrier)
+            sl_mult = float(self.config.sl_barrier)
+            signal  = triple_barrier_3class_numba(
+                close, high, low, atr, horizon, tp_mult, sl_mult, side_is_long
+            )
+        else:
+            tp_arr, sl_arr = self._get_barrier_arrays(out)
+            print(f"[DEBUG TB-3CLASS] side={side} rb={self.config.regime_barriers} "
+                  f"tp_unique={np.unique(tp_arr)}")
+
+            pairs = np.stack([tp_arr, sl_arr], axis=1)
+            unique_pairs = np.unique(pairs, axis=0)
+
+            signal = np.ones(len(out), dtype=np.int32)  # default TIMEOUT (1)
+
+            for tp_val, sl_val in unique_pairs:
+                group_mask = (tp_arr == tp_val) & (sl_arr == sl_val)
+                idx        = np.where(group_mask)[0]
+                if len(idx) == 0:
+                    continue
+                partial = triple_barrier_3class_numba(
+                    close, high, low, atr, horizon,
+                    float(tp_val), float(sl_val), side_is_long
+                )
+                signal[idx] = partial[idx]
+
+        out['signal'] = signal.astype(np.int32)
+        return out
+
+    def _dual_triple_barrier_labels(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Genera AMBAS etiquetas (signal_long y signal_short) en una sola pasada.
+        Pensado para target_type='multitask': el modelo predice las dos cabezas
+        simultáneamente, así que necesitamos los dos labels alineados por fila.
+
+        Usa regime_barriers_long para LONG y regime_barriers_short para SHORT
+        (mismo patrón que _triple_barrier_labels original).
+
+        Devuelve:
+          out['signal_long'], out['signal_short'] ∈ {0, 1}
+          out['signal'] = signal_long como alias por compatibilidad con
+                          downstream que aún lee 'signal' (placeholder).
+        """
+        horizon = int(self.config.label_horizon)
+        out = df.copy()
+        close = out['close'].values
+        high = out['high'].values
+        low = out['low'].values
+        atr = out['atr'].values
+
+        rb_long = self.config.regime_barriers_long
+        rb_short = self.config.regime_barriers_short
+
+        def _compute_one_side(side_is_long: bool, rb: dict) -> np.ndarray:
+            if not rb:
+                tp_mult = float(self.config.tp_barrier)
+                sl_mult = float(
+                    self.config.sl_barrier_short if (not side_is_long and self.config.sl_barrier_short is not None)
+                    else self.config.sl_barrier
+                )
+                return triple_barrier_fixed_numba(
+                    close, high, low, atr, horizon, tp_mult, sl_mult, side_is_long
+                )
+            # Camino con regime_barriers — agrupamos por (tp, sl) único.
+            # _get_barrier_arrays usa self.config.regime_barriers, así que
+            # lo seteamos temporalmente al diccionario del lado correcto.
+            saved_rb = self.config.regime_barriers
+            self.config.regime_barriers = rb
+            try:
+                tp_arr, sl_arr = self._get_barrier_arrays(out)
+            finally:
+                self.config.regime_barriers = saved_rb
+
+            pairs = np.stack([tp_arr, sl_arr], axis=1)
+            unique_pairs = np.unique(pairs, axis=0)
+            sig = np.zeros(len(out), dtype=np.int32)
+            for tp_val, sl_val in unique_pairs:
+                group_mask = (tp_arr == tp_val) & (sl_arr == sl_val)
+                idx = np.where(group_mask)[0]
+                if len(idx) == 0:
+                    continue
+                partial = triple_barrier_fixed_numba(
+                    close, high, low, atr, horizon,
+                    float(tp_val), float(sl_val), side_is_long
+                )
+                sig[idx] = partial[idx]
+            return sig
+
+        signal_long = _compute_one_side(side_is_long=True, rb=rb_long or {})
+        signal_short = _compute_one_side(side_is_long=False, rb=rb_short or {})
+
+        out['signal_long'] = signal_long.astype(np.int32)
+        out['signal_short'] = signal_short.astype(np.int32)
+        # Placeholder: downstream que aún lee 'signal' verá el LONG.
+        # El pipeline multitask lo ignora y usa signal_long/signal_short.
+        out['signal'] = out['signal_long']
+
+        n_long = int((out['signal_long'] == 1).sum())
+        n_short = int((out['signal_short'] == 1).sum())
+        n_both = int(((out['signal_long'] == 1) & (out['signal_short'] == 1)).sum())
+        n_neither = int(((out['signal_long'] == 0) & (out['signal_short'] == 0)).sum())
+        print(f"[DUAL TB] n_long_TP={n_long:,} ({n_long / len(out):.4f}) "
+              f"n_short_TP={n_short:,} ({n_short / len(out):.4f}) "
+              f"n_both={n_both:,} n_neither={n_neither:,}")
+
+        return out
+
     def _triple_barrier_labels_debug(self, df: pd.DataFrame, side: str) -> pd.DataFrame:
         """
         Triple barrier labeling (binario).
@@ -426,4 +583,90 @@ class LabelGenerator:
                 signal[idx] = partial[idx]
 
         out['signal'] = signal
+        return out
+
+    def _quantile_return_labels(self, df: pd.DataFrame, side: str) -> pd.DataFrame:
+        """
+        Target continuo: forward return normalizado por ATR.
+
+            target = (close[t+h] - close[t]) / atr[t]   (LONG)
+            target = (close[t] - close[t+h]) / atr[t]   (SHORT)
+
+        A diferencia de triple_barrier (binario), 'signal' aquí es float32
+        en unidades de ATR (típicamente -3..+3). El modelo se entrena con
+        pinball loss y predice múltiples cuantiles en lugar de una probabilidad.
+
+        Las últimas `quantile_horizon` filas no tienen futuro suficiente y se
+        marcan con NaN; el pipeline downstream filtra NaN antes de entrenar.
+        """
+        h = int(self.config.quantile_horizon)
+        out = df.copy()
+        close = out['close'].values.astype(np.float64)
+        atr = out['atr'].values.astype(np.float64)
+
+        fwd_close = np.roll(close, -h).astype(np.float64)
+        # Las últimas h filas no tienen futuro: marcar NaN
+        fwd_close[-h:] = np.nan
+
+        atr_safe = np.maximum(atr, 1e-10)
+        if side == 'long':
+            ret = (fwd_close - close) / atr_safe
+        else:
+            ret = (close - fwd_close) / atr_safe
+
+        out['signal'] = ret.astype(np.float32)
+        return out
+
+    def _magnitude_binary_labels(self, df: pd.DataFrame, side: str) -> pd.DataFrame:
+        """
+        Magnitude binary labeling (direction-agnostic).
+
+            label[t] = 1 si max(|high[t+k]-close[t]|, |close[t]-low[t+k]|) / atr[t]
+                          >= magnitude_threshold  para algún k en 1..h
+                       0 en caso contrario.
+
+        El mismo label se devuelve para LONG y SHORT — la idea es predecir
+        si va a haber un movimiento significativo en cualquier dirección
+        (intensidad), no la dirección. Diseñado para usarse como gate del
+        modelo direccional existente, no como modelo de trading directo.
+
+        Las últimas `label_horizon` filas no tienen futuro suficiente y se
+        marcan con label=0 (descartables vía dropna del fwd_close en pipeline).
+        """
+        from numpy.lib.stride_tricks import sliding_window_view
+
+        h = int(self.config.label_horizon)
+        m_thr = float(self.config.magnitude_threshold)
+        out = df.copy()
+        n = len(out)
+        close = out['close'].values.astype(np.float64)
+        high = out['high'].values.astype(np.float64)
+        low = out['low'].values.astype(np.float64)
+        atr = np.maximum(out['atr'].values.astype(np.float64), 1e-10)
+
+        if n <= h:
+            out['signal'] = np.zeros(n, dtype=np.int32)
+            return out
+
+        # Sliding windows: row i = high[i:i+h]. Para cada t, queremos
+        # max(high[t+1:t+1+h]) → row (t+1). t válido: 0..n-h-1.
+        high_windows = sliding_window_view(high, h)
+        low_windows = sliding_window_view(low, h)
+
+        fwd_high = np.full(n, np.nan)
+        fwd_low = np.full(n, np.nan)
+        fwd_high[:n - h] = high_windows[1:].max(axis=1)
+        fwd_low[:n - h] = low_windows[1:].min(axis=1)
+
+        excursion_up = (fwd_high - close) / atr
+        excursion_down = (close - fwd_low) / atr
+        abs_move = np.maximum(excursion_up, excursion_down)
+
+        # NaN >= m_thr → False, así que las últimas h filas quedan label=0.
+        label = (abs_move >= m_thr).astype(np.int32)
+        out['signal'] = label
+
+        pos_rate = float(label[:n - h].mean()) if n > h else 0.0
+        print(f"[MAGNITUDE] h={h} M={m_thr:.2f} ATR | "
+              f"pos_rate={pos_rate:.4f} ({label.sum():,}/{n - h:,})")
         return out

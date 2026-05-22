@@ -12,12 +12,16 @@ Cambios respecto a versión anterior:
   - Los percentiles globales (_global) se calculan EXCLUYENDO LOW_VOL.
 """
 
-from typing import Dict, Any, Iterable, Tuple
+import ctypes
+import gc
+from typing import Dict, Any, Iterable, Tuple, Optional, Callable
 
 import numpy as np
 import pandas as pd
+import tensorflow as tf
 from pandas import DataFrame
 from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import average_precision_score
 from sklearn.model_selection import TimeSeriesSplit
 from scipy.special import expit, logit
 
@@ -117,6 +121,45 @@ class ProbsCalibration:
         return expit(logit(p_clipped) * temperature).astype(np.float32)
 
     @staticmethod
+    def _partial_oof_metric(
+        oof_raw: np.ndarray,
+        oof_y: np.ndarray,
+        *,
+        is_multitask: bool,
+    ) -> float:
+        """AUC-PR sobre las muestras OOF acumuladas (sin labels NaN/-1).
+
+        Para multitask, devuelve la media de AUC-PR por cabeza (long, short).
+        Si no hay suficientes muestras o sólo hay una clase representada,
+        devuelve NaN — el caller debe omitir el report en ese caso.
+        """
+        try:
+            if is_multitask:
+                # oof_raw shape (N, 2); oof_y shape (N, 2), -1 = no asignado
+                aps = []
+                for h in (0, 1):
+                    mask = (oof_y[:, h] >= 0) & np.isfinite(oof_raw[:, h])
+                    if int(mask.sum()) < 200:
+                        return float('nan')
+                    y_h = oof_y[mask, h].astype(np.int32)
+                    p_h = oof_raw[mask, h].astype(np.float32)
+                    if len(np.unique(y_h)) < 2:
+                        return float('nan')
+                    aps.append(average_precision_score(y_h, p_h))
+                return float(np.mean(aps))
+            else:
+                mask = (oof_y >= 0) & np.isfinite(oof_raw)
+                if int(mask.sum()) < 200:
+                    return float('nan')
+                y_b = oof_y[mask].astype(np.int32)
+                p_b = oof_raw[mask].astype(np.float32)
+                if len(np.unique(y_b)) < 2:
+                    return float('nan')
+                return float(average_precision_score(y_b, p_b))
+        except Exception:
+            return float('nan')
+
+    @staticmethod
     def _compute_sample_row_index(seq_len_long: int, n_rows: int) -> np.ndarray:
         context_offset = seq_len_long - 1
         n_samples = n_rows - seq_len_long + 1
@@ -132,6 +175,7 @@ class ProbsCalibration:
             n_splits: int = 5,
             epochs_per_fold: int = 25,
             verbose: int = 1,
+            fold_callback: Optional[Callable[[int, float, int], None]] = None,
     ) -> Tuple[DataFrame, IsotonicRegression, Dict[int, Any]]:
         """
         Genera predicciones OOF y calibración isotónica sin leakage.
@@ -139,6 +183,15 @@ class ProbsCalibration:
         Devuelve df con columnas:
           - oof_proba_raw : predicción sigmoide sin calibrar (OOF)
           - oof_proba_cal : probabilidad calibrada (isotónica) entrenada SOLO con OOF
+
+        Parámetros:
+          fold_callback: opcional. Se llama tras cada fold con
+            (fold_idx_0based, partial_metric, n_splits). partial_metric es
+            AUC-PR sobre las muestras OOF acumuladas hasta ese fold (mean
+            de las dos cabezas en multitask). En modo quantile no se invoca.
+            Si la callback lanza una excepción (p.ej. optuna TrialPruned),
+            se propaga y aborta el resto de folds. Sirve para integrar
+            pruners de Optuna (Hyperband, Median, etc.).
         """
         if "oof_proba_raw" in df_prepared.columns or "oof_proba_cal" in df_prepared.columns:
             df = df_prepared.reset_index(drop=True)
@@ -151,8 +204,25 @@ class ProbsCalibration:
             raise ValueError("No hay suficientes filas para crear secuencias con seq_len_long.")
 
         n_samples = row_index.size
-        oof_raw = np.full(len(df), np.nan, dtype=np.float32)
-        oof_y   = np.full(len(df), -1,    dtype=np.int8)
+
+        # ── Detección de modo (quantile / triple_class / multitask / binary) ──
+        target_type = getattr(self.model_config, 'target_type', 'binary')
+        is_quantile = (target_type == 'quantile')
+        is_triple_class = (target_type == 'triple_class')
+        is_multitask = (target_type == 'multitask')
+        if is_quantile:
+            quantile_levels = tuple(self.model_config.quantile_levels)
+            n_q = len(quantile_levels)
+            oof_raw = np.full((len(df), n_q), np.nan, dtype=np.float32)
+            oof_y = np.full(len(df), np.nan, dtype=np.float32)
+        elif is_multitask:
+            # Dos columnas: [P_long_oof, P_short_oof] y [is_long_TP, is_short_TP].
+            oof_raw = np.full((len(df), 2), np.nan, dtype=np.float32)
+            oof_y = np.full((len(df), 2), -1, dtype=np.int8)
+        else:
+            # binary y triple_class comparten storage: oof_raw=P(TP), oof_y=is_TP.
+            oof_raw = np.full(len(df), np.nan, dtype=np.float32)
+            oof_y = np.full(len(df), -1, dtype=np.int8)
 
         best_epochs: Dict[int, Any] = {}
 
@@ -178,7 +248,11 @@ class ProbsCalibration:
             pipeline_fold.is_fitted = False
 
             if pipeline_fold.feature_config.feature_masks is not None:
-                _side = "long" if side == "long" else "short"
+                # Multitask usa 'both' como vista canónica para el pipeline:
+                # feature_engineer con side='both' devuelve la UNIÓN de
+                # columnas long+short, así el trunk multitask ve features
+                # direccionales de ambos lados a la vez.
+                _side = side if side in ("long", "short") else "both"
                 sequences = pipeline_fold.create_sequences_by_side(
                     df_train_rows, sides=(_side,), fit_scalers=True, train=True
                 )
@@ -192,11 +266,27 @@ class ProbsCalibration:
                 data_val   = pipeline_fold.create_sequences(df_val_rows,   fit_scalers=False, train=True)
 
             X_train = {k: v for k, v in data_train.items() if k not in ["labels", "weights"]}
-            y_train = data_train["labels"].astype(int)
+            X_val = {k: v for k, v in data_val.items() if k not in ["labels", "weights"]}
             w_train = data_train["weights"]
 
-            X_val = {k: v for k, v in data_val.items() if k not in ["labels", "weights"]}
-            y_val = data_val["labels"].astype(int)
+            if is_quantile:
+                # Target continuo (forward return / atr). NaN posibles en las
+                # últimas h filas; el dropna previo en generate_all_features +
+                # el filtro de mask_oof se encargan downstream.
+                y_train = data_train["labels"].astype(np.float32)
+                y_val = data_val["labels"].astype(np.float32)
+            elif is_multitask:
+                # Labels shape (N, 2) con [is_long_TP, is_short_TP] desde
+                # data_pipeline._extract_labels_weights. Se pasan tal cual a
+                # tm.train, que internamente los splittea a dict para Keras.
+                y_train = data_train["labels"].astype(np.float32)
+                y_val = data_val["labels"].astype(np.float32)
+            else:
+                # binary: labels son {0, 1}.
+                # triple_class: labels son {0=SL, 1=TIMEOUT, 2=TP}. Se pasan
+                # tal cual a SparseCategoricalCrossentropy en TradingModel.
+                y_train = data_train["labels"].astype(int)
+                y_val = data_val["labels"].astype(int)
 
             # ── Entrenar modelo del fold ───────────────────────────────
             fold_model_config = ModelConfig(**vars(self.model_config))
@@ -204,26 +294,63 @@ class ProbsCalibration:
 
             tm = TradingModel(self.general_config, fold_model_config, side=side)
 
-            pos_rate = float(np.clip(np.nanmean(y_train), 1e-4, 1 - 1e-4))
-            init_bias = float(np.log(pos_rate / (1 - pos_rate)))
+            if is_quantile:
+                # En quantile mode no hay prior-bias informativo (la cabeza es
+                # lineal y debe aprender la mediana del return desde los datos).
+                init_bias = 0.0
+            elif is_triple_class:
+                # Cabeza softmax(3); el bias en la última Dense es zero por
+                # diseño. El init_bias del flujo binario no aplica.
+                init_bias = 0.0
+            elif is_multitask:
+                # Dos cabezas binarias → init_bias por lado vía dict.
+                pr_long = float(np.clip(np.nanmean(y_train[:, 0]), 1e-4, 1 - 1e-4))
+                pr_short = float(np.clip(np.nanmean(y_train[:, 1]), 1e-4, 1 - 1e-4))
+                init_bias = {
+                    'long': float(np.log(pr_long / (1 - pr_long))),
+                    'short': float(np.log(pr_short / (1 - pr_short))),
+                }
+            else:
+                pos_rate = float(np.clip(np.nanmean(y_train), 1e-4, 1 - 1e-4))
+                init_bias = float(np.log(pos_rate / (1 - pos_rate)))
 
-            # Seleccionar arquitectura según flag del ModelConfig
-            # use_hierarchical_fusion=True → v3 (fusión jerárquica market/entry)
-            # use_hierarchical_fusion=False → v2 (fusión plana, default)
-            _build_fn = (
-                tm.build_model_v3
-                if getattr(fold_model_config, 'use_hierarchical_fusion', False)
-                else tm.build_model_v2
+            # Seleccionar arquitectura del modelo del fold:
+            #   arch == 'original_v3' (default) → CNN-LSTM (v3/v2 según
+            #     use_hierarchical_fusion).
+            #   arch ∈ {'mlp','mlp_flatten','hybrid','transformer','tcn'} →
+            #     delega en build_model_by_arch (factory model_alternatives).
+            # Espejo del path en optuna_oof_trainer_v2.prepare_production_model
+            # para garantizar que folds OOF y modelo final usen la misma arch.
+            _arch = str(getattr(fold_model_config, 'arch', 'original_v3')).lower()
+            _shape_short = (
+                fold_model_config.seq_len_short,
+                len(pipeline_fold.feature_engineer.feature_columns["sequence_short"]),
             )
-            _build_fn(
-                shape_short=(fold_model_config.seq_len_short,
-                             len(pipeline_fold.feature_engineer.feature_columns["sequence_short"])),
-                shape_long=(fold_model_config.seq_len_long,
-                            len(pipeline_fold.feature_engineer.feature_columns["sequence_long"])),
-                n_context=len(pipeline_fold.feature_engineer.feature_columns["context"]),
-                n_time=len(pipeline_fold.feature_engineer.feature_columns["time"]),
-                init_bias=init_bias,
+            _shape_long = (
+                fold_model_config.seq_len_long,
+                len(pipeline_fold.feature_engineer.feature_columns["sequence_long"]),
             )
+            _n_context = len(pipeline_fold.feature_engineer.feature_columns["context"])
+            _n_time    = len(pipeline_fold.feature_engineer.feature_columns["time"])
+            if _arch == 'original_v3':
+                _build_fn = (
+                    tm.build_model_v3
+                    if getattr(fold_model_config, 'use_hierarchical_fusion', False)
+                    else tm.build_model_v2
+                )
+                _build_fn(
+                    shape_short=_shape_short, shape_long=_shape_long,
+                    n_context=_n_context, n_time=_n_time,
+                    init_bias=init_bias,
+                )
+            else:
+                from mimo.models.model_alternatives import build_model_by_arch
+                tm.model = build_model_by_arch(
+                    arch_name=_arch,
+                    shape_short=_shape_short, shape_long=_shape_long,
+                    n_context=_n_context, n_time=_n_time,
+                    model_config=fold_model_config, init_bias=init_bias,
+                )
             tm.compile_model()
 
             aug_cfg = ScaleAugmentConfig(
@@ -236,7 +363,11 @@ class ProbsCalibration:
                 seed=42 + fold,
             )
 
-            skip_map = _build_aug_skip_map(pipeline_fold, side)
+            # Para multitask el aug_skip_map se construye con la vista
+            # 'both' (UNIÓN) — coherente con la unión de features que ve
+            # el modelo en multitask.
+            _aug_side = side if side in ("long", "short") else "both"
+            skip_map = _build_aug_skip_map(pipeline_fold, _aug_side)
             X_train_aug = augment_train_batch(
                 X_train,
                 cfg=aug_cfg,
@@ -251,9 +382,33 @@ class ProbsCalibration:
                 for_production=False,
             )
 
-            vals = history["val_auc_pr"]
-            best_epoch = int(np.argmax(vals)) + 1
-            best_val   = float(np.max(vals))
+            if is_quantile:
+                # En quantile mode la métrica que se reporta es val_loss
+                # (pinball, a minimizar). Guardamos su negativo en 'val' para
+                # mantener la convención "más alto = mejor" del best_epochs dict.
+                vals_loss = history["val_loss"]
+                best_epoch = int(np.argmin(vals_loss)) + 1
+                best_val = -float(np.min(vals_loss))
+            elif is_multitask:
+                # Métricas Keras multi-output: '<output>_<metric>'.
+                # Tomamos la media de val_auc_pr_long y val_auc_pr_short por época.
+                vals_long = np.asarray(history.get("val_signal_long_auc_pr", []))
+                vals_short = np.asarray(history.get("val_signal_short_auc_pr", []))
+                if len(vals_long) == 0 or len(vals_short) == 0:
+                    raise RuntimeError(
+                        f"multitask fold {fold + 1}: no se encontraron las métricas "
+                        f"val_signal_long_auc_pr / val_signal_short_auc_pr en history. "
+                        f"Claves disponibles: {list(history.keys())}"
+                    )
+                vals_mean = 0.5 * (vals_long + vals_short)
+                best_epoch = int(np.argmax(vals_mean)) + 1
+                best_val = float(np.max(vals_mean))
+            else:
+                # binary → val_auc_pr; triple_class → val_auc_pr_tp (P(TP) vs is_TP).
+                auc_key = "val_auc_pr_tp" if is_triple_class else "val_auc_pr"
+                vals = history[auc_key]
+                best_epoch = int(np.argmax(vals)) + 1
+                best_val = float(np.max(vals))
             best_epochs[fold] = {"epoch": best_epoch, "val": best_val}
 
             if verbose:
@@ -270,22 +425,218 @@ class ProbsCalibration:
             if _keras_model is not None and hasattr(_keras_model, 'predict'):
                 _x_list = [X_val['seq_short'], X_val['seq_long'],
                            X_val['context'], X_val['time']]
-                y_pred_val = _keras_model.predict(
-                    _x_list, batch_size=4096, verbose=0
-                ).astype(np.float32).reshape(-1)
+                _raw = _keras_model.predict(_x_list, batch_size=4096, verbose=0)
+                # Multitask: predict devuelve list/dict (named outputs).
+                if is_multitask:
+                    if isinstance(_raw, dict):
+                        p_long = np.asarray(_raw['signal_long']).reshape(-1)
+                        p_short = np.asarray(_raw['signal_short']).reshape(-1)
+                    elif isinstance(_raw, (list, tuple)):
+                        p_long = np.asarray(_raw[0]).reshape(-1)
+                        p_short = np.asarray(_raw[1]).reshape(-1)
+                    else:
+                        raise RuntimeError(
+                            f"multitask predict shape inesperado: "
+                            f"type={type(_raw)}"
+                        )
+                    y_pred_val = np.stack([p_long, p_short], axis=-1).astype(np.float32)
+                else:
+                    y_pred_val = np.asarray(_raw).astype(np.float32)
             else:
-                y_pred_val = tm.predict(X_val).astype(np.float32).reshape(-1)
+                y_pred_val = tm.predict(X_val).astype(np.float32)
 
-            if len(y_pred_val) != val_count:
-                raise RuntimeError(
-                    f"Desalineación fold {fold + 1}: val_count={val_count} != len(pred)={len(y_pred_val)}"
-                )
+            if is_quantile:
+                # Shape esperado: (val_count, n_q). Mantener 2D.
+                if y_pred_val.ndim == 1:
+                    y_pred_val = y_pred_val.reshape(-1, 1)
+                if y_pred_val.shape[0] != val_count:
+                    raise RuntimeError(
+                        f"Desalineación fold {fold + 1}: val_count={val_count} "
+                        f"!= pred.shape[0]={y_pred_val.shape[0]}"
+                    )
+            elif is_multitask:
+                if y_pred_val.ndim != 2 or y_pred_val.shape[-1] != 2:
+                    raise RuntimeError(
+                        f"multitask fold {fold + 1}: pred shape {y_pred_val.shape} "
+                        f"inesperado (se esperaba (N, 2))."
+                    )
+                if y_pred_val.shape[0] != val_count:
+                    raise RuntimeError(
+                        f"Desalineación fold {fold + 1}: val_count={val_count} "
+                        f"!= pred.shape[0]={y_pred_val.shape[0]}"
+                    )
+            elif is_triple_class:
+                # Shape esperado: (val_count, 3) softmax. Extraemos P(TP)=col 2.
+                if y_pred_val.ndim != 2 or y_pred_val.shape[-1] != 3:
+                    raise RuntimeError(
+                        f"triple_class fold {fold + 1}: pred shape {y_pred_val.shape} "
+                        f"inesperado (se esperaba (N, 3))."
+                    )
+                y_pred_val = y_pred_val[:, 2].astype(np.float32)
+                if len(y_pred_val) != val_count:
+                    raise RuntimeError(
+                        f"Desalineación fold {fold + 1}: val_count={val_count} != len(pred)={len(y_pred_val)}"
+                    )
+            else:
+                y_pred_val = y_pred_val.reshape(-1)
+                if len(y_pred_val) != val_count:
+                    raise RuntimeError(
+                        f"Desalineación fold {fold + 1}: val_count={val_count} != len(pred)={len(y_pred_val)}"
+                    )
 
             val_row_positions = (L - 1) + np.arange(val_start, val_end, dtype=np.int32)
             oof_raw[val_row_positions] = y_pred_val
-            oof_y[val_row_positions]   = y_val
+            if is_triple_class:
+                # Binarizamos label para el calibrador y métricas binarias
+                # downstream: 1=TP (clase 2), 0=no-TP (clases 0 y 1).
+                oof_y[val_row_positions] = (np.asarray(y_val) == 2).astype(np.int8)
+            elif is_multitask:
+                # y_val shape (N, 2) ya. Guardamos como int.
+                oof_y[val_row_positions] = np.asarray(y_val).astype(np.int8)
+            else:
+                oof_y[val_row_positions]   = y_val
 
-        # ── Calibración isotónica ──────────────────────────────────────
+            # ── Reporting per-fold para pruners de Optuna ──
+            # Sólo aplica a modos binary / triple_class / multitask. En
+            # quantile no hay AUC-PR natural; se omite. Si la callback
+            # raisea (p.ej. TrialPruned), se propaga y aborta el bucle.
+            if fold_callback is not None and not is_quantile:
+                partial = self._partial_oof_metric(
+                    oof_raw, oof_y,
+                    is_multitask=is_multitask,
+                )
+                if np.isfinite(partial):
+                    fold_callback(fold, float(partial), n_splits)
+
+            # Liberar memoria entre folds: el modelo + tensores del fold
+            # anterior + buffers del scaler suman varios GB y disparaban
+            # OOM (exit 137) en folds tardíos con datasets más grandes.
+            del tm, history
+            del data_train, data_val
+            del X_train, X_val, X_train_aug
+            del y_train, y_val, w_train, y_pred_val
+            del pipeline_fold
+            tf.keras.backend.clear_session()
+            gc.collect()
+            try:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
+
+        if is_quantile:
+            # ── Calibración conformal por cuantil ──────────────────────────
+            # Para cada cuantil predicho q, calculamos el residuo (y - q_pred)
+            # y aplicamos un shift constante igual al q-cuantil de los residuos
+            # para que la cobertura empírica iguale q.
+            mask = np.isfinite(oof_raw).all(axis=1) & np.isfinite(oof_y)
+            if mask.sum() < 1000:
+                raise ValueError(
+                    f"No hay suficientes muestras OOF para calibrar. mask.sum()={mask.sum()}"
+                )
+
+            y_true = oof_y[mask].astype(np.float32)
+            q_raw = oof_raw[mask].astype(np.float32)  # (M, n_q)
+            quantile_levels = list(self.model_config.quantile_levels)
+
+            print(f"OOF mask.sum()={int(mask.sum())}")
+            print(f"y_true (returns/atr) min/mean/median/std/max = "
+                  f"{float(y_true.min()):.4f} / {float(y_true.mean()):.4f} / "
+                  f"{float(np.median(y_true)):.4f} / {float(y_true.std()):.4f} / "
+                  f"{float(y_true.max()):.4f}")
+
+            shifts = []
+            q_cal = q_raw.copy()
+            for i, q in enumerate(quantile_levels):
+                residuals = y_true - q_raw[:, i]
+                shift = float(np.quantile(residuals, q))
+                q_cal[:, i] = q_raw[:, i] + shift
+                shifts.append(shift)
+                pre_cov = float(np.mean(y_true <= q_raw[:, i]))
+                post_cov = float(np.mean(y_true <= q_cal[:, i]))
+                print(f"[Conformal] q={q:.2f} shift={shift:+.4f} "
+                      f"coverage pre={pre_cov:.3f} post={post_cov:.3f}")
+
+            # Calibrator es un dict con shifts (no un IsotonicRegression).
+            cal = {
+                "type": "conformal_quantile_shifts",
+                "quantiles": quantile_levels,
+                "shifts": shifts,
+            }
+
+            # Persistir TODAS las columnas (raw y calibradas) en el df.
+            # Para compat downstream, oof_proba_raw/cal apuntan al cuantil más
+            # bajo (q25 por defecto): es la salida de decisión natural — opera
+            # cuando el q25 supera el umbral económico/percentil.
+            oof_raw_all = np.full((len(df), len(quantile_levels)), np.nan, dtype=np.float32)
+            oof_cal_all = np.full((len(df), len(quantile_levels)), np.nan, dtype=np.float32)
+            oof_raw_all[mask] = q_raw
+            oof_cal_all[mask] = q_cal
+
+            for i, q in enumerate(quantile_levels):
+                qi = int(round(q * 100))
+                df[f"oof_q{qi}_raw"] = oof_raw_all[:, i]
+                df[f"oof_q{qi}_cal"] = oof_cal_all[:, i]
+
+            # Aliases para que el resto del pipeline (compute_percentiles_by_regime,
+            # holdout eval, decision engine) siga funcionando sin cambios. La
+            # decisión se toma sobre el cuantil inferior (q25) calibrado.
+            df["oof_proba_raw"] = oof_raw_all[:, 0]
+            df["oof_proba_cal"] = oof_cal_all[:, 0]
+
+            return df, cal, best_epochs
+
+        if is_multitask:
+            # ── Calibración isotónica DUAL (multitask) ─────────────────────
+            # oof_raw shape (N, 2) [P_long, P_short], oof_y shape (N, 2).
+            # Entrenamos UN calibrador isotónico por lado y los devolvemos
+            # como dict {'long': cal_long, 'short': cal_short}.
+            mask = (
+                np.isfinite(oof_raw).all(axis=1)
+                & (oof_y[:, 0] >= 0) & (oof_y[:, 1] >= 0)
+            )
+            if mask.sum() < 1000:
+                raise ValueError(
+                    f"multitask: muestras OOF insuficientes mask.sum()={int(mask.sum())}"
+                )
+
+            print(f"OOF mask.sum()={int(mask.sum())} (multitask)")
+            print(f"  P_long  min/mean/max = "
+                  f"{float(oof_raw[mask, 0].min()):.4f} / "
+                  f"{float(oof_raw[mask, 0].mean()):.4f} / "
+                  f"{float(oof_raw[mask, 0].max()):.4f}")
+            print(f"  P_short min/mean/max = "
+                  f"{float(oof_raw[mask, 1].min()):.4f} / "
+                  f"{float(oof_raw[mask, 1].mean()):.4f} / "
+                  f"{float(oof_raw[mask, 1].max()):.4f}")
+
+            cal_dict = {}
+            oof_cal = np.full((len(df), 2), np.nan, dtype=np.float32)
+            for k, name in enumerate(['long', 'short']):
+                p_raw_k = np.clip(oof_raw[mask, k].astype(float), 1e-4, 1.0 - 1e-4)
+                y_true_k = oof_y[mask, k].astype(int)
+                pos_k = int(y_true_k.sum())
+                print(f"  [cal-{name}] Pos={pos_k:,}  Neg={len(y_true_k) - pos_k:,}")
+                cal_k = IsotonicRegression(out_of_bounds="clip")
+                cal_k.fit(p_raw_k, y_true_k)
+                p_cal_k = cal_k.predict(p_raw_k).astype(np.float32)
+                if abs(self.temperature - 1.0) > 1e-6:
+                    p_cal_k = self._apply_temperature(p_cal_k, self.temperature)
+                oof_cal[mask, k] = p_cal_k
+                cal_dict[name] = cal_k
+
+            # Guardar en df: dos columnas cada (raw, cal). Aliases:
+            #   oof_proba_raw / oof_proba_cal apuntan al LADO LONG
+            #   (downstream que aún espera columna única).
+            df["oof_proba_long_raw"] = oof_raw[:, 0]
+            df["oof_proba_long_cal"] = oof_cal[:, 0]
+            df["oof_proba_short_raw"] = oof_raw[:, 1]
+            df["oof_proba_short_cal"] = oof_cal[:, 1]
+            df["oof_proba_raw"] = oof_raw[:, 0]
+            df["oof_proba_cal"] = oof_cal[:, 0]
+
+            return df, {"type": "multitask_isotonic", **cal_dict}, best_epochs
+
+        # ── Calibración isotónica (binary, comportamiento original) ────────
         mask = np.isfinite(oof_raw) & np.isfinite(oof_y) & (oof_y >= 0)
         if mask.sum() < 1000:
             raise ValueError(f"No hay suficientes muestras OOF para calibrar. mask.sum()={mask.sum()}")

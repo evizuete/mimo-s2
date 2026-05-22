@@ -4,6 +4,7 @@ from typing import List, Optional, Dict
 import numpy as np
 import pandas as pd
 import pandas_ta_classic as ta
+from numba import jit
 from numpy import clip
 
 from mimo.models.numba_utils import (
@@ -16,6 +17,70 @@ from mimo.models.numba_utils import (
     rsi_numba,
     atr_numba
 )
+
+
+@jit(nopython=True, cache=True)
+def _volume_profile_numba(high, low, close, vol, window, n_bins, top_k):
+    """
+    Rolling volume profile sobre window barras.
+
+    Para cada t devuelve (poc_price[t], concentration[t]):
+      - poc_price: precio centro del bin con más volumen (Point of Control)
+      - concentration: suma de los top_k bins / total volumen ∈ [0, 1]
+    """
+    n = len(high)
+    poc_price = np.full(n, np.nan)
+    concentration = np.full(n, np.nan)
+    hist = np.empty(n_bins, dtype=np.float64)
+
+    for i in range(window - 1, n):
+        s = i - window + 1
+        rng_min = low[s]
+        rng_max = high[s]
+        for j in range(s + 1, i + 1):
+            if low[j] < rng_min:
+                rng_min = low[j]
+            if high[j] > rng_max:
+                rng_max = high[j]
+
+        if rng_max <= rng_min:
+            continue
+
+        for k in range(n_bins):
+            hist[k] = 0.0
+
+        inv_width = n_bins / (rng_max - rng_min)
+        for j in range(s, i + 1):
+            tp = (high[j] + low[j] + close[j]) / 3.0
+            idx = int((tp - rng_min) * inv_width)
+            if idx >= n_bins:
+                idx = n_bins - 1
+            elif idx < 0:
+                idx = 0
+            hist[idx] += vol[j]
+
+        total = 0.0
+        max_idx = 0
+        max_val = hist[0]
+        for k in range(n_bins):
+            total += hist[k]
+            if hist[k] > max_val:
+                max_val = hist[k]
+                max_idx = k
+
+        if total <= 0.0:
+            continue
+
+        bin_width = (rng_max - rng_min) / n_bins
+        poc_price[i] = rng_min + (max_idx + 0.5) * bin_width
+
+        sorted_hist = np.sort(hist)
+        top_sum = 0.0
+        for k in range(n_bins - top_k, n_bins):
+            top_sum += sorted_hist[k]
+        concentration[i] = top_sum / total
+
+    return poc_price, concentration
 
 @dataclass
 class FeatureConfig:
@@ -38,13 +103,48 @@ class FeatureConfig:
     # Normalización
     price_norm_window: int = 200
 
+    # Vol-invariant features: si True, usa variantes ATR-normalizadas de
+    # retornos y EMA dist/slope en lugar de las _bps. Recomendado cuando el
+    # holdout tiene una distribucion de volatilidad distinta a train (ver
+    # mimo/oof/shift_analyzer/distribution_shift_analyzer.py — si las
+    # features _bps salen con PSI > 0.1 y sigma_ratio > 1.5).
+    use_vol_invariant_features: bool = False
+
+    # Reduced features: si True, elimina del input del modelo el set de
+    # features identificadas como ruido por permutation importance sobre
+    # 202200 (drop_max < 0.0005 en AUC-PR). Reduce 97 -> 72 features (25%
+    # menos parametros en el LSTM, menos overfitting). Ver
+    # mimo/oof/feature_importance_permutation.py.
+    use_reduced_features: bool = False
+
+    # Ultra-reduced features: aplica un segundo recorte sobre el subset ya
+    # reducido, identificado por permutation importance sobre 202300 (drop_max
+    # < 0.001 — threshold mas conservador en segunda iteracion). Reduce de
+    # 71 a ~33 features (>50% menos del baseline 97). Solo se debe activar
+    # con use_reduced_features=True (es un superset de eliminaciones).
+    use_ultra_reduced_features: bool = False
+
     # Labeling
     label_horizon: int = 10  # Horizonte de predicción (5 mins para 1-min data)
-    label_method: str = 'triple_barrier'  # 'adaptive', 'fixed', 'triple_barrier'
+    label_method: str = 'triple_barrier'  # 'adaptive', 'fixed', 'triple_barrier', 'quantile_return'
     label_method_long: str = 'triple_barrier'
     label_method_short: str = 'adaptive'
     tp_barrier: float = 2.5
     sl_barrier: float = 1.5
+
+    # Quantile regression labeling.
+    # Si label_method == 'quantile_return', el target es el forward return
+    # normalizado por ATR (continuo, no binario) y el modelo se entrena con
+    # pinball loss para predecir múltiples cuantiles simultáneamente.
+    quantile_horizon: int = 5  # h en barras para el forward return
+    quantile_levels: tuple = (0.25, 0.50, 0.75)
+
+    # Magnitude binary labeling (direction-agnostic).
+    # Si label_method == 'magnitude_binary', el label vale 1 si la mayor
+    # excursión |precio - close[t]| / ATR[t] sobre las próximas label_horizon
+    # barras supera magnitude_threshold (en unidades de ATR), 0 si no.
+    # Diseñado como gate del modelo direccional, no como trade per se.
+    magnitude_threshold: float = 1.5
 
     feature_masks: Optional[Dict[str, Dict[str, bool]]] = None
 
@@ -145,6 +245,15 @@ class FeatureEngineer:
         # 3. Microestructura (sin volumen)
         df = self._add_microstructure(df)
 
+        # 3b. Volumen (ticks_volume → z, pct, spike, trend)
+        df = self._add_volume_features(df)
+
+        # 3c. VWAP (rolling 1h y 4h) — magnet de volumen y desviaciones
+        df = self._add_vwap_features(df)
+
+        # 3d. Volume profile (POC y concentración sobre 4h)
+        df = self._add_volume_profile_features(df)
+
         # 4. Patrones de velas
         df = self._add_candle_patterns(df)
 
@@ -157,7 +266,13 @@ class FeatureEngineer:
         # 7. Adding chop and exhaustion scoring
         df = self._add_chop_and_exhaustion_features(df)
 
-        df = self.add_price_invariant_features(df, window=200)
+        df = self.add_price_invariant_features(df, window=self.config.price_norm_window)
+
+        # 8. Multi-timeframe features (5m / 15m / 1h)
+        df = self._add_multi_timeframe_features(df)
+
+        # 9. Calendar / session features extendidas
+        df = self._add_extended_calendar_features(df)
 
         # Definir qué features van en cada input del modelo
         self._assign_features_to_inputs()
@@ -256,10 +371,12 @@ class FeatureEngineer:
         df['atr_norm'] = df['atr'] / df['close']
         df['atr_norm_bps'] = df['atr_norm'] * 10_000.0
 
+        _w = int(self.config.price_norm_window)
+        _mp = max(10, _w // 4)
         df['atr_norm_bps_z'] = (
             df['atr_norm_bps']
-            .transform(lambda x: (x - x.rolling(200, min_periods=50).mean())
-                                 / (x.rolling(200, min_periods=50).std() + 1e-8))
+            .transform(lambda x: (x - x.rolling(_w, min_periods=_mp).mean())
+                                 / (x.rolling(_w, min_periods=_mp).std() + 1e-8))
             .clip(-3, 3)
         )
 
@@ -328,14 +445,17 @@ class FeatureEngineer:
         df['bb_middle'] = bb[f'BBM_{self.config.bb_period}_{self.config.bb_std}']
         df['bb_lower'] = bb[f'BBL_{self.config.bb_period}_{self.config.bb_std}']
 
-        # Ancho de banda (volatilidad)
-        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+        # Ancho de banda (volatilidad). Epsilon para evitar /0 si bb_middle ~ 0
+        # (caso teórico en activos con precios cercanos a cero).
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / (df['bb_middle'] + 1e-10)
         df['bb_width_bps'] = df['bb_width'] * 10_000.0
 
+        _w = int(self.config.price_norm_window)
+        _mp = max(10, _w // 4)
         df['bb_width_bps_z'] = (
             df['bb_width_bps']
-            .transform(lambda x: (x - x.rolling(200, min_periods=50).mean())
-                                 / (x.rolling(200, min_periods=50).std() + 1e-8))
+            .transform(lambda x: (x - x.rolling(_w, min_periods=_mp).mean())
+                                 / (x.rolling(_w, min_periods=_mp).std() + 1e-8))
             .clip(-3, 3)
         )
 
@@ -361,6 +481,18 @@ class FeatureEngineer:
             df[f'{ema_col}_dist_bps'] = df[f'{ema_col}_dist'] * BPS
             df[f'{ema_col}_slope_bps'] = df[f'{ema_col}_slope'] * BPS
 
+            # Variantes ATR-normalizadas: invariantes al regimen de volatilidad.
+            # PSI bajo en holdout cuando la vol cambia (vs _bps que escalan con
+            # la dispersion natural de los retornos). Construir SIEMPRE; el
+            # uso depende de _assign_features_to_inputs y use_vol_invariant_features.
+            atr_safe = df['atr'].replace(0, np.nan).ffill().fillna(1e-8)
+            df[f'{ema_col}_dist_atr'] = clip(
+                (df.close - df[ema_col]) / (atr_safe + 1e-10), -8, 8
+            )
+            df[f'{ema_col}_slope_atr'] = clip(
+                df[ema_col].diff(3) / (atr_safe + 1e-10), -8, 8
+            )
+
         # Relaciones entre EMAs
         if len(self.config.ema_periods) >= 2:
             fast, slow = self.config.ema_periods[0], self.config.ema_periods[1]
@@ -383,9 +515,16 @@ class FeatureEngineer:
 
         # Retornos múltiples horizontes
         BPS = 10_000.0
+        atr_safe = df['atr'].replace(0, np.nan).ffill().fillna(1e-8)
         for lag in self.config.return_lags:
             df[f'ret_{lag}'] = df.close.pct_change(lag)
             df[f'ret_{lag}_bps'] = clip(df[f'ret_{lag}'] * BPS, -150, 150)
+            # Variante ATR-normalizada: cuantos ATRs se movio el precio en
+            # 'lag' barras. Invariante al regimen de volatilidad — clave para
+            # transferibilidad train -> holdout cuando la vol cambia.
+            df[f'ret_{lag}_atr'] = clip(
+                df.close.diff(lag) / (atr_safe + 1e-10), -10, 10
+            )
 
         # Velocidad y aceleración del precio
         df['price_velocity'] = df.close.diff() / (df['atr'] + 1e-10)
@@ -399,9 +538,15 @@ class FeatureEngineer:
     EPS = 1e-12
 
     def _rolling_autocorr_lag1(self, r: pd.Series, w: int) -> pd.Series:
-        # Corr( r[t-w+1:t], r[t-w+2:t+1] ) usando sumas rodantes
+        """Autocorrelación causal con lag-1.
+
+        Calcula Corr(r[t-w+1 : t], r[t-w : t-1]) — la serie y su versión
+        retrasada un paso. Causal: solo usa información hasta t.
+
+        Antes (buggy): y = r.shift(-1) tomaba r[t+1] (lookahead).
+        """
         x = r
-        y = r.shift(-1)
+        y = r.shift(1)  # lag-1 retrasado, NO adelantado
 
         Sx = x.rolling(w).sum()
         Sy = y.rolling(w).sum()
@@ -416,9 +561,7 @@ class FeatureEngineer:
 
         out = cov / (np.sqrt(varx * vary) + self.EPS)
         out = out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-        # por el shift(-1), el último queda mal alineado
-        out.iloc[-1] = 0.0
+        # Las primeras w filas tienen NaN propagado por el shift inicial
         return out
 
     def _consecutive_runs(self, cond: np.ndarray) -> np.ndarray:
@@ -448,10 +591,12 @@ class FeatureEngineer:
             df[f"realized_vol_{w}"] = ret_1.rolling(w).std()
             df[f'realized_vol_{w}_bps'] = df[f'realized_vol_{w}'] * 10_000.0
 
+            _w = int(self.config.price_norm_window)
+            _mp = max(10, _w // 4)
             df[f'realized_vol_{w}_bps_z'] = (
                 df[f'realized_vol_{w}_bps']
-                .transform(lambda x: (x - x.rolling(200, min_periods=50).mean())
-                                     / (x.rolling(200, min_periods=50).std() + 1e-8))
+                .transform(lambda x: (x - x.rolling(_w, min_periods=_mp).mean())
+                                     / (x.rolling(_w, min_periods=_mp).std() + 1e-8))
                 .clip(-3, 3)
             )
 
@@ -468,6 +613,162 @@ class FeatureEngineer:
         df["consecutive_downs"] = self._consecutive_runs(down.to_numpy(dtype=bool))
 
 
+
+        return df
+
+    def _add_volume_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Volume-derived context features. Solo se computan si existe la columna
+        'ticks_volume' (presente en histórico y MT5 live tras DataManager).
+
+        Cuatro features escala-invariantes, todas sobre log(1+volume):
+          vol_z_1h      z-score rolling 1h
+          vol_pct_1h    percentile rank rolling 1h (robusto a colas)
+          vol_spike     desviación de la EMA local (aceleración)
+          vol_trend_1h  pendiente normalizada en 1h
+
+        n_per_h se detecta del propio df.time (mediana del Δt) para que la
+        semántica "1h" se mantenga independientemente del base_tf (1m / 5m / etc).
+
+        Si la columna no existe, se rellenan con valores neutros para
+        retro-compatibilidad con datasets sin volumen.
+        """
+        if "ticks_volume" not in df.columns:
+            df["vol_z_1h"] = 0.0
+            df["vol_pct_1h"] = 0.5
+            df["vol_spike"] = 0.0
+            df["vol_trend_1h"] = 0.0
+            return df
+
+        # Detecta resolución del df: mediana del Δt en segundos → barras/hora.
+        if "time" in df.columns and len(df) > 1:
+            dt_med = (
+                pd.to_datetime(df["time"]).diff().dropna().dt.total_seconds().median()
+            )
+            n_per_h = int(round(3600.0 / max(dt_med, 1.0))) if dt_med and dt_med > 0 else 12
+        else:
+            n_per_h = 12
+        n_per_h = max(4, n_per_h)
+        ema_span = max(6, n_per_h)  # EMA local: ~1h (en lugar de 12 fijo)
+
+        v = df["ticks_volume"].astype(float).clip(lower=0)
+        log_v = np.log1p(v)
+
+        mp = max(8, n_per_h // 2)
+        mu_1h = log_v.rolling(n_per_h, min_periods=mp).mean()
+        sd_1h = log_v.rolling(n_per_h, min_periods=mp).std()
+        df["vol_z_1h"] = ((log_v - mu_1h) / sd_1h.replace(0, np.nan)).clip(-3, 3)
+
+        df["vol_pct_1h"] = (
+            log_v.rolling(n_per_h, min_periods=mp).rank(pct=True)
+        )
+
+        df["vol_spike"] = (log_v - log_v.ewm(span=ema_span, adjust=False).mean()).clip(-3, 3)
+
+        df["vol_trend_1h"] = (log_v - log_v.shift(n_per_h)) / float(n_per_h)
+
+        return df
+
+    def _detect_n_per_h(self, df: pd.DataFrame, default: int = 12) -> int:
+        """Detecta barras/hora del df según mediana del Δt en 'time'."""
+        if "time" in df.columns and len(df) > 1:
+            dt_med = (
+                pd.to_datetime(df["time"]).diff().dropna().dt.total_seconds().median()
+            )
+            if dt_med and dt_med > 0:
+                return max(4, int(round(3600.0 / dt_med)))
+        return default
+
+    def _add_vwap_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Features derivadas de VWAP (rolling, no anclado a sesión).
+
+        Cuatro features escala-invariantes:
+          vwap_dist_atr      (close - vwap_1h) / atr  — desviación local
+          vwap_dist_4h_atr   (close - vwap_4h) / atr  — desviación a contexto largo
+          vwap_band_pos      (close - vwap_1h) / vwap_std_1h  — z-score VWAP-relative
+          vwap_slope_atr     pendiente VWAP_1h / atr / n_per_h
+
+        VWAP rolling = sum(typical_price * vol) / sum(vol) sobre window.
+        Si no hay 'ticks_volume' se usa el bar count (≈ TWAP) para preservar
+        retro-compatibilidad con datasets sin volumen.
+        """
+        n_per_h = self._detect_n_per_h(df)
+        w_short = max(6, n_per_h)
+        w_long = max(24, n_per_h * 4)
+
+        tp = (df["high"] + df["low"] + df["close"]) / 3.0
+        atr = df["atr"].replace(0, np.nan)
+
+        if "ticks_volume" in df.columns:
+            v = df["ticks_volume"].astype(float).clip(lower=0).replace(0, np.nan)
+        else:
+            v = pd.Series(1.0, index=df.index)
+
+        tp_v = tp * v.fillna(0)
+        v_filled = v.fillna(0)
+
+        mp_s = max(4, w_short // 2)
+        mp_l = max(8, w_long // 4)
+
+        num_s = tp_v.rolling(w_short, min_periods=mp_s).sum()
+        den_s = v_filled.rolling(w_short, min_periods=mp_s).sum().replace(0, np.nan)
+        vwap_s = num_s / den_s
+
+        num_l = tp_v.rolling(w_long, min_periods=mp_l).sum()
+        den_l = v_filled.rolling(w_long, min_periods=mp_l).sum().replace(0, np.nan)
+        vwap_l = num_l / den_l
+
+        df["vwap_dist_atr"] = ((df["close"] - vwap_s) / atr).clip(-5, 5)
+        df["vwap_dist_4h_atr"] = ((df["close"] - vwap_l) / atr).clip(-5, 5)
+
+        # Banda VWAP: std del precio típico ponderada uniformemente sobre window
+        # (proxy estable y rápida de la dispersión vs VWAP).
+        tp_std_s = tp.rolling(w_short, min_periods=mp_s).std().replace(0, np.nan)
+        df["vwap_band_pos"] = ((df["close"] - vwap_s) / tp_std_s).clip(-3, 3)
+
+        df["vwap_slope_atr"] = (
+            (vwap_s - vwap_s.shift(n_per_h)) / atr / float(n_per_h)
+        ).clip(-1, 1)
+
+        return df
+
+    def _add_volume_profile_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Volume profile rolling sobre 4h: POC (Point of Control) y concentración.
+
+        Dos features:
+          poc_dist_atr       (close - POC_4h) / atr   — distancia al imán de volumen
+          vol_concentration  top 5 bins / total       — qué tan concentrado está
+                              el volumen (alto = nivel claro; bajo = disperso)
+
+        Implementación numba: rolling histograma de 20 bins sobre 4h × n_per_h.
+        Si no hay 'ticks_volume' devuelve neutros.
+        """
+        if "ticks_volume" not in df.columns:
+            df["poc_dist_atr"] = 0.0
+            df["vol_concentration"] = 0.25  # 5/20 = uniforme
+            return df
+
+        n_per_h = self._detect_n_per_h(df)
+        window = max(24, n_per_h * 4)
+        n_bins = 20
+        top_k = 5
+
+        high = df["high"].to_numpy(np.float64)
+        low = df["low"].to_numpy(np.float64)
+        close = df["close"].to_numpy(np.float64)
+        vol = df["ticks_volume"].astype(float).clip(lower=0).to_numpy(np.float64)
+        atr = df["atr"].to_numpy(np.float64)
+
+        poc_price, concentration = _volume_profile_numba(
+            high, low, close, vol, window, n_bins, top_k
+        )
+
+        atr_safe = np.where(atr > 0, atr, np.nan)
+        poc_dist = (close - poc_price) / atr_safe
+        df["poc_dist_atr"] = pd.Series(poc_dist, index=df.index).clip(-5, 5)
+        df["vol_concentration"] = pd.Series(concentration, index=df.index).clip(0, 1)
 
         return df
 
@@ -513,30 +814,38 @@ class FeatureEngineer:
 
     def _add_temporal_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Features temporales y de sesión"""
-        if 'time' in df.columns:
-            df['time'] = pd.to_datetime(df['time'])
-            df['hour'] = df['time'].dt.hour
-            df['minute'] = df['time'].dt.minute
-            df['dayofweek'] = df['time'].dt.dayofweek
+        if 'time' not in df.columns:
+            return df
 
-            # Codificación cíclica
-            df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-            df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-            df['minute_sin'] = np.sin(2 * np.pi * df['minute'] / 60)
-            df['minute_cos'] = np.cos(2 * np.pi * df['minute'] / 60)
-            df['dow_sin'] = np.sin(2 * np.pi * df['dayofweek'] / 5)
-            df['dow_cos'] = np.cos(2 * np.pi * df['dayofweek'] / 5)
+        time_dt = pd.to_datetime(df['time'])
+        hour = time_dt.dt.hour
+        minute = time_dt.dt.minute
+        dayofweek = time_dt.dt.dayofweek
 
-            # Sesiones de trading
-            df['is_asia'] = ((df['hour'] >= 0) & (df['hour'] < 8)).astype(int)
-            df['is_london'] = ((df['hour'] >= 8) & (df['hour'] < 16)).astype(int)
-            df['is_ny'] = ((df['hour'] >= 13) & (df['hour'] < 21)).astype(int)
-            df['is_overlap'] = ((df['is_london'] == 1) & (df['is_ny'] == 1)).astype(int)
+        is_london = ((hour >= 8) & (hour < 16)).astype(int)
+        is_ny = ((hour >= 13) & (hour < 21)).astype(int)
 
-            # Apertura/cierre
-            df['is_open'] = ((df['hour'] == 9) & (df['minute'] < 30)).astype(int)
-            df['is_close'] = ((df['hour'] == 15) & (df['minute'] > 30)).astype(int)
+        new_cols = {
+            'time': time_dt,
+            'hour': hour,
+            'minute': minute,
+            'dayofweek': dayofweek,
+            'hour_sin': np.sin(2 * np.pi * hour / 24),
+            'hour_cos': np.cos(2 * np.pi * hour / 24),
+            'minute_sin': np.sin(2 * np.pi * minute / 60),
+            'minute_cos': np.cos(2 * np.pi * minute / 60),
+            'dow_sin': np.sin(2 * np.pi * dayofweek / 5),
+            'dow_cos': np.cos(2 * np.pi * dayofweek / 5),
+            'is_asia': ((hour >= 0) & (hour < 8)).astype(int),
+            'is_london': is_london,
+            'is_ny': is_ny,
+            'is_overlap': ((is_london == 1) & (is_ny == 1)).astype(int),
+            'is_open': ((hour == 9) & (minute < 30)).astype(int),
+            'is_close': ((hour == 15) & (minute > 30)).astype(int),
+        }
 
+        df = df.drop(columns=[c for c in new_cols if c in df.columns], errors='ignore')
+        df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
         return df
 
     def _add_context_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -668,56 +977,334 @@ class FeatureEngineer:
 
         df = df.copy()
 
+        _w = int(self.config.price_norm_window)
+        _mp = max(10, _w // 4)
+
         df["chop_score"] = self._compute_chop_score(df, n=chop_n)
-        score_threshold = df['chop_score'].rolling(200, min_periods=50).quantile(0.85)
+        score_threshold = df['chop_score'].rolling(_w, min_periods=_mp).quantile(0.85)
         df['is_chop'] = (df['chop_score'] >= score_threshold).astype(int)
 
         df["exhaustion_score"] = self._compute_exhaustion_score(df, n=exhaustion_n)
-        exhaustion_threshold = df['exhaustion_score'].rolling(200, min_periods=50).quantile(0.85)
+        exhaustion_threshold = df['exhaustion_score'].rolling(_w, min_periods=_mp).quantile(0.85)
         df["is_exhaustion"] = (df["exhaustion_score"] >= exhaustion_threshold).astype(int)
 
         return df
 
+    def _add_multi_timeframe_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Features derivadas de timeframes agregados (5m, 15m, 1h) reindexadas
+        al timeframe base 1m con forward-fill. Cada barra 1m ve los valores
+        del último cierre completado en el TF correspondiente.
+
+        Sin lookahead: se usa label='right', closed='right' al resamplear y
+        despues reindex con method='ffill'. Para una barra 1m a tiempo T se
+        usa el ultimo bar 5m/15m/1h cuyo cierre fue <= T.
+
+        Indicadores por TF:
+          - EMA21 distancia (close - ema21) / atr * 10000  → bps por ATR
+          - EMA50 distancia
+          - EMA21 slope (pct change rolling 5)
+          - EMA50 slope
+          - RSI(14) normalizado [-1, +1]
+          - MACD hist normalizado por ATR del TF
+          - BB position [0, 1]
+          - ADX(14) normalizado [0, 1]
+          - DM diff (dmp - dmn) / 100
+
+        Total: 9 indicadores x 3 TFs = 27 columnas nuevas.
+        """
+        if 'time' not in df.columns:
+            return df
+
+        df = df.copy()
+        df_idx = pd.to_datetime(df['time'])
+
+        df_tf_src = df[['open', 'high', 'low', 'close']].copy()
+        df_tf_src.index = df_idx
+        df_tf_src = df_tf_src[~df_tf_src.index.duplicated(keep='last')]
+
+        tfs = {
+            '5m':  '5min',
+            '15m': '15min',
+            '1h':  '1h',
+        }
+        new_cols = {}
+
+        for tf_label, tf_rule in tfs.items():
+            agg = df_tf_src.resample(tf_rule, label='right', closed='right').agg(
+                {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}
+            ).dropna()
+            if len(agg) < 60:
+                continue
+
+            ema21 = agg['close'].ewm(span=21, adjust=False).mean()
+            ema50 = agg['close'].ewm(span=50, adjust=False).mean()
+
+            tr = pd.concat([
+                agg['high'] - agg['low'],
+                (agg['high'] - agg['close'].shift(1)).abs(),
+                (agg['low']  - agg['close'].shift(1)).abs(),
+            ], axis=1).max(axis=1)
+            atr_tf = tr.rolling(14, min_periods=1).mean()
+            atr_tf_safe = atr_tf.replace(0, np.nan)
+
+            ema21_dist_bps = (agg['close'] - ema21) / (atr_tf_safe + 1e-10) * 10_000.0
+            ema50_dist_bps = (agg['close'] - ema50) / (atr_tf_safe + 1e-10) * 10_000.0
+            ema21_slope_bps = (ema21.diff(5) / (atr_tf_safe + 1e-10)) * 10_000.0
+            ema50_slope_bps = (ema50.diff(5) / (atr_tf_safe + 1e-10)) * 10_000.0
+
+            try:
+                rsi_tf = ta.rsi(agg['close'], length=14)
+            except Exception:
+                rsi_tf = pd.Series(50.0, index=agg.index)
+            rsi_norm = (rsi_tf - 50.0) / 50.0
+
+            try:
+                macd_df_tf = ta.macd(agg['close'], fast=12, slow=26, signal=9)
+                macd_hist_tf = macd_df_tf['MACDh_12_26_9']
+            except Exception:
+                macd_hist_tf = pd.Series(0.0, index=agg.index)
+            macd_hist_atr = (macd_hist_tf / (atr_tf_safe + 1e-10)).clip(-10, 10)
+
+            try:
+                bb_tf = ta.bbands(agg['close'], length=20, std=2)
+                bb_pos = (
+                    (agg['close'] - bb_tf['BBL_20_2.0'])
+                    / (bb_tf['BBU_20_2.0'] - bb_tf['BBL_20_2.0'] + 1e-10)
+                ).clip(-0.5, 1.5)
+            except Exception:
+                bb_pos = pd.Series(0.5, index=agg.index)
+
+            try:
+                adx_df_tf = ta.adx(agg['high'], agg['low'], agg['close'], length=14)
+                adx_tf = adx_df_tf['ADX_14'] / 100.0
+                dm_diff_tf = (
+                    adx_df_tf['DMP_14'] - adx_df_tf['DMN_14']
+                ) / 100.0
+            except Exception:
+                adx_tf = pd.Series(0.0, index=agg.index)
+                dm_diff_tf = pd.Series(0.0, index=agg.index)
+
+            tf_feats = pd.DataFrame({
+                f'ema21_dist_{tf_label}_bps':  ema21_dist_bps,
+                f'ema50_dist_{tf_label}_bps':  ema50_dist_bps,
+                f'ema21_slope_{tf_label}_bps': ema21_slope_bps,
+                f'ema50_slope_{tf_label}_bps': ema50_slope_bps,
+                f'rsi_{tf_label}_norm':        rsi_norm,
+                f'macd_hist_{tf_label}_atr':   macd_hist_atr,
+                f'bb_position_{tf_label}':     bb_pos,
+                f'adx_{tf_label}_norm':        adx_tf,
+                f'dm_diff_{tf_label}_norm':    dm_diff_tf,
+            })
+
+            tf_feats_1m = tf_feats.reindex(df_idx, method='ffill')
+            for col in tf_feats_1m.columns:
+                new_cols[col] = tf_feats_1m[col].to_numpy()
+
+        if new_cols:
+            df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+        return df
+
+    def _add_extended_calendar_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Features de calendario adicionales no cubiertas por
+        _add_temporal_features. Foco en granularidad sub-hora y posicion
+        relativa dentro de la sesion.
+        """
+        if 'time' not in df.columns:
+            return df
+
+        df = df.copy()
+        t = pd.to_datetime(df['time'])
+
+        minute_of_day = t.dt.hour * 60 + t.dt.minute
+        df['minute_of_day_sin'] = np.sin(2 * np.pi * minute_of_day / 1440.0)
+        df['minute_of_day_cos'] = np.cos(2 * np.pi * minute_of_day / 1440.0)
+
+        df['day_of_month'] = t.dt.day
+        df['is_month_end'] = (t.dt.day >= 28).astype(int)
+        df['is_friday'] = (t.dt.dayofweek == 4).astype(int)
+
+        hour = t.dt.hour
+        minute = t.dt.minute
+        df['is_eu_first_hour'] = ((hour == 8) & (minute < 60)).astype(int)
+        df['is_us_first_hour'] = ((hour == 13) & (minute < 60)).astype(int)
+        df['is_us_last_hour']  = ((hour == 20) & (minute < 60)).astype(int)
+        df['is_lunch_eu']      = ((hour == 12)).astype(int)
+
+        return df
+
+    # Features identificadas como ruido por permutation importance sobre 202200
+    # (drop_max < 0.0005 sobre AUC-PR). Se eliminan cuando
+    # use_reduced_features=True. Total: 25 features (~25.8% del input).
+    _REDUCED_DROP_SEQ_SHORT = {
+        "doji", "hammer", "shooting_star",  # candle patterns: muy raros
+        "rsi_norm",                          # duplicado con sequence_long.rsi_norm
+        "ret_5_atr",                         # redundante con ret_3/ret_10
+    }
+    _REDUCED_DROP_SEQ_LONG = {
+        "rsi_15m_norm", "macd_hist_15m_atr",  # multi-TF 15m no aporta
+        "adx_15m_norm", "ema21_slope_15m_bps",
+        "ema50_dist_5m_bps",                  # ema21_5m manda, ema50_5m no
+        "direction_bias_20",
+    }
+    _REDUCED_DROP_CONTEXT = {
+        "ema_bull", "ema_bear",               # binarios duplican con macd_pos/neg
+        "bb_position_1h",                     # ya tenemos bb_width_bps_z + 1h ema
+        "is_eu_first_hour",                   # otros calendar features ganan
+        "vol_z_1h", "vol_concentration",      # vol_z_1h ya esta en seq_short
+        "vwap_slope_atr",                     # vwap_dist_atr y _4h dominan
+        "is_chop",                            # chop_score continuo basta
+        "dist_low_60",                        # dist_high y position_range bastan
+        "rsi_1h_norm",                        # rsi_norm seq_long manda
+        "exhaustion_score",                   # is_exhaustion binario funciona
+        "range_expansion",                    # bb_width_bps_z ya cubre
+        "ema50_dist_1h_bps",                  # ema21_1h domina
+        "rsi_overbought",                     # binario duplica rsi_norm
+        "poc_dist_atr",                       # poc_dist en seq_short manda
+    }
+
+    # Segunda iteracion (sobre 202300): features con drop_max < 0.001 tras
+    # reentrenar con 72 features. Threshold mas conservador (0.001 vs 0.0005).
+    # Total: 38 features adicionales (>50% del set ya reducido) — captura las
+    # redundancias que se hicieron evidentes tras la primera reduccion.
+    _ULTRA_REDUCED_DROP_SEQ_SHORT = {
+        "vol_z_1h",                  # ya redundante (vol_spike captura mejor)
+        "macd_hist_atr_log",         # seq_long.macd_hist_atr_log ya manda
+        "body_rel",                  # range_hl_rel + wicks bastan
+        "range_hl_rel",              # ya cubierto por wick_rel
+        "ret_3_atr",                 # ret_1 y ret_10 cubren
+    }
+    _ULTRA_REDUCED_DROP_SEQ_LONG = {
+        "dm_diff_15m_norm", "rsi_5m_norm", "rsi_norm",
+        "dm_diff_5m_norm", "macd_hist_5m_atr",
+        "ema_50_slope_atr", "bb_position_5m", "trend_dir",
+        "ema_50_dist_atr", "range_hl_rel", "close_norm",
+        "efficiency_20", "realized_vol_20_bps_z",
+        "ema_21_dist_atr",            # ema_9_dist_atr seq_short manda
+        "adx_5m_norm", "adx_norm",
+        "ema21_dist_15m_bps", "ema50_dist_15m_bps",
+    }
+    _ULTRA_REDUCED_DROP_CONTEXT = {
+        "vwap_dist_4h_atr",           # vwap_dist_atr seq_short suficiente
+        "macd_positive",              # binarios redundantes
+        "bb_width_bps_z",             # atr_norm_bps_z lo cubre
+        "adx_norm",                   # adx_1h_norm domina
+        "vol_trend_1h",               # vol_pct_1h y vol_spike bastan
+        "chop_score",                 # is_chop ya removido en ultra
+        "is_us_first_hour",
+        "macd_negative",
+        "ema21_dist_1h_bps",          # info ya en seq_long
+        "adx_smooth_norm",            # adx_1h_norm domina
+        "is_us_last_hour",
+        "is_exhaustion",
+        "dist_high_60",
+        "dm_diff_norm",               # dm_diff_1h_norm domina
+        "rsi_oversold",
+    }
+
     def _assign_features_to_inputs(self):
         """Define qué features van a cada input del modelo"""
 
+        # Si use_vol_invariant_features=True, sustituimos las _bps que el
+        # distribution_shift_analyzer marcó como WARNING (PSI ~ 0.23-0.25 con
+        # sigma_ratio ~ 2 en holdout) por sus equivalentes ATR-normalizadas.
+        # Bps son sensibles al cambio de regimen de volatilidad; ATR-normalized
+        # son invariantes porque el ATR recoge la vol local.
+        use_atr = bool(getattr(self.config, "use_vol_invariant_features", False))
+        use_reduced = bool(getattr(self.config, "use_reduced_features", False))
+        use_ultra = bool(getattr(self.config, "use_ultra_reduced_features", False))
+
+        def _suffix(bps_name: str) -> str:
+            """Para nombres tipo 'ret_5_bps' o 'ema_9_dist_bps', devuelve el
+            equivalente _atr cuando use_atr=True, si la feature ATR existe.
+            """
+            if not use_atr:
+                return bps_name
+            atr_name = bps_name[:-len("_bps")] + "_atr"
+            return atr_name
+
+        def _filter_reduced(cols: list, drop_set: set,
+                            ultra_drop_set: set | None = None) -> list:
+            """Aplica los filtros de reducción según los flags activos.
+            ultra es un superset (segundo recorte sobre 202300)."""
+            if not use_reduced and not use_ultra:
+                return cols
+            drops = set(drop_set) if use_reduced else set()
+            if use_ultra and ultra_drop_set is not None:
+                drops |= set(ultra_drop_set)
+            return [c for c in cols if c not in drops]
+
         # Features para secuencia corta (más reactivas)
-        self.feature_columns['sequence_short'] = [
+        self.feature_columns['sequence_short'] = _filter_reduced([
             'close_norm', 'open_norm', 'high_norm', 'low_norm',
             'body_rel', 'upper_wick_rel', 'lower_wick_rel', 'range_hl_rel',
-            'ret_1_bps', 'ret_3_bps', 'ret_5_bps', 'ret_10_bps',
-            'ema_9_dist_bps', 'ema_21_dist_bps', 'ema_9_slope_bps',
+            _suffix('ret_1_bps'), _suffix('ret_3_bps'),
+            _suffix('ret_5_bps'), _suffix('ret_10_bps'),
+            _suffix('ema_9_dist_bps'), _suffix('ema_21_dist_bps'),
+            _suffix('ema_9_slope_bps'),
             'rsi_norm', 'macd_hist_atr_log', 'bb_position',
             'price_velocity', 'price_acceleration',
-            'doji', 'hammer', 'shooting_star'
-        ]
+            'doji', 'hammer', 'shooting_star',
+            # Volumen bar-a-bar: confirmación precio-volumen y bursts locales
+            'vol_z_1h', 'vol_spike',
+            # VWAP / volume profile bar-a-bar (magnet de volumen)
+            'vwap_dist_atr', 'poc_dist_atr',
+        ], self._REDUCED_DROP_SEQ_SHORT, self._ULTRA_REDUCED_DROP_SEQ_SHORT)
 
         # Features para secuencia larga (tendencia)
-        self.feature_columns['sequence_long'] = [
+        # Incluye multi-TF (5m, 15m) que aportan contexto a escalas mayores
+        # sin que el modelo tenga que inferirlo desde la secuencia 1m.
+        self.feature_columns['sequence_long'] = _filter_reduced([
             'close_norm', 'range_hl_rel',
-            'ema_21_dist_bps', 'ema_50_dist_bps',
-            'ema_21_slope_bps', 'ema_50_slope_bps',
+            _suffix('ema_21_dist_bps'), _suffix('ema_50_dist_bps'),
+            _suffix('ema_21_slope_bps'), _suffix('ema_50_slope_bps'),
             'trend_dir',
             'rsi_norm', 'adx_norm', 'macd_hist_atr_log',
-            'ret_20_bps', 'ret_60_bps',
+            _suffix('ret_20_bps'), _suffix('ret_60_bps'),
             'realized_vol_20_bps_z', 'efficiency_20',
-            'direction_bias_20'
-        ]
+            'direction_bias_20',
+            # Multi-TF 5m (PSI bajo en holdout — no necesitan ATR-norm)
+            'ema21_dist_5m_bps', 'ema50_dist_5m_bps',
+            'ema21_slope_5m_bps', 'rsi_5m_norm',
+            'macd_hist_5m_atr', 'bb_position_5m',
+            'adx_5m_norm', 'dm_diff_5m_norm',
+            # Multi-TF 15m (PSI bajo en holdout — no necesitan ATR-norm)
+            'ema21_dist_15m_bps', 'ema50_dist_15m_bps',
+            'ema21_slope_15m_bps', 'rsi_15m_norm',
+            'macd_hist_15m_atr', 'adx_15m_norm', 'dm_diff_15m_norm',
+        ], self._REDUCED_DROP_SEQ_LONG, self._ULTRA_REDUCED_DROP_SEQ_LONG)
 
         # Features de contexto (estado actual del mercado)
-        self.feature_columns['context'] = [
+        # Incluye 1h multi-TF y calendario extendido para macro-context.
+        self.feature_columns['context'] = _filter_reduced([
             'atr_norm_bps_z', 'adx_norm', 'adx_smooth_norm', 'dm_diff_norm',
             'bb_width_bps_z', 'range_expansion',
             'dist_high_60', 'dist_low_60', 'position_range_240',
             'chop_score', 'exhaustion_score', 'is_chop', 'is_exhaustion',
             'ema_bull', 'ema_bear', 'rsi_oversold', 'rsi_overbought',
-            'macd_positive', 'macd_negative'
-        ]
+            'macd_positive', 'macd_negative',
+            # Multi-TF 1h (contexto largo)
+            'ema21_dist_1h_bps', 'ema50_dist_1h_bps',
+            'rsi_1h_norm', 'adx_1h_norm', 'dm_diff_1h_norm',
+            'bb_position_1h',
+            # Calendario extendido
+            'is_month_end', 'is_friday',
+            'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour',
+            # Volumen (ticks_volume — magnitud/convicción del movimiento)
+            'vol_z_1h', 'vol_pct_1h', 'vol_spike', 'vol_trend_1h',
+            # VWAP rolling (1h corta + 4h larga, banda y pendiente)
+            'vwap_dist_atr', 'vwap_dist_4h_atr', 'vwap_band_pos', 'vwap_slope_atr',
+            # Volume profile rolling 4h (POC y concentración)
+            'poc_dist_atr', 'vol_concentration',
+        ], self._REDUCED_DROP_CONTEXT, self._ULTRA_REDUCED_DROP_CONTEXT)
 
         # Features temporales
         self.feature_columns['time'] = [
             'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
-            'is_asia', 'is_london', 'is_ny', 'is_overlap'
+            'is_asia', 'is_london', 'is_ny', 'is_overlap',
+            'minute_of_day_sin', 'minute_of_day_cos',
         ]
 
         for k, cols in self.feature_columns.items():

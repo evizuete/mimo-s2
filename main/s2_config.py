@@ -122,7 +122,15 @@ class ReversalGuardConfig:
     long_min_rsi: float = 46.0
     short_max_rsi: float = 54.0
     require_macd_flip: bool = True
-    min_proba_edge: float = 0.02
+    # 2026-05-20: bajado de 0.02 a 0.015 tras swap calibrador iso→Platt.
+    # Análisis OOF (n=3251) con el calibrador nuevo:
+    #   · LONG_in_TREND_DOWN edge=|cal_long-cal_short|>=0.02 pasaba 13.1% (era 27.7% con iso)
+    #   · LONG_in_TREND_DOWN edge>=0.015 pasa 21% (recupera proximidad al rate iso)
+    #   · SHORT_in_TREND_UP edge>=0.015 pasa 55% (apenas cambia)
+    # El rango cal_probs con Platt está comprimido (LONG max 0.35 vs iso 1.0),
+    # así que el edge típico también es menor. 0.015 mantiene el espíritu del
+    # filtro (rechazar reversals tibios) sin estrangular el flow.
+    min_proba_edge: float = 0.015
     require_indicators_present: bool = True
 
 
@@ -147,6 +155,37 @@ class OpenGuardConfig:
 
 
 # ============================================================================
+# STRATEGY GATE (chop / exhaustion)
+# ============================================================================
+
+@dataclass
+class StrategyGateConfig:
+    """Configuración del StrategyGate (filtros chop/exhaustion sobre la decisión).
+
+    Antes hardcoded en `mimo/strategies/trading_simulator_v3.py:920-924`. Expuesto
+    aquí tras incident INC-2026-05-20 para poder ajustar sin tocar código del
+    simulator.
+
+    chop_block:        si True, bloquea entradas cuando is_chop=1 (NO_TRADE).
+                       Si False, permite entrada con tamaño chop_size_mult.
+    chop_size_mult:    multiplicador de tamaño cuando is_chop=1.
+                       0.0 = bloqueo total (equivalente a chop_block=True).
+                       0.5 = entrada con la mitad del tamaño (defensa parcial).
+                       1.0 = sin penalización.
+    exhaustion_blocks_reentry: si True, bloquea reentrada en el mismo trend
+                       cuando is_exhaustion=1 (defensivo).
+
+    Nota: el detector `is_chop` (feature_builder.py:983-985) usa percentil 85
+    móvil, así que por construcción ~15% de las barras tienen is_chop=1.
+    Con chop_block=True + chop_size_mult=0.0 (config original), eso bloquea
+    ~15% de las entradas potenciales independientemente del régimen.
+    """
+    chop_block: bool = False
+    chop_size_mult: float = 0.5
+    exhaustion_blocks_reentry: bool = True
+
+
+# ============================================================================
 # S2 CONFIG (raíz)
 # ============================================================================
 
@@ -156,6 +195,7 @@ class S2Config:
     counter_trend: CounterTrendConfig = field(default_factory=CounterTrendConfig)
     reversal_guard: ReversalGuardConfig = field(default_factory=ReversalGuardConfig)
     open_guard: OpenGuardConfig = field(default_factory=OpenGuardConfig)
+    strategy_gate: StrategyGateConfig = field(default_factory=StrategyGateConfig)
 
     # ── Geometry / order builder ────────────────────────────────────────────
     min_vsl_points: int = 20
@@ -166,6 +206,19 @@ class S2Config:
     rsi_oversold_threshold: float = 25.0
 
     # ── Transition weak-signal filter (FIX 17/04/2026 BUG-3) ───────────────
-    transition_min_proba_delta: float = 0.10
+    # 2026-05-20: bajado de 0.10 a 0.04 tras análisis empírico.
+    # En datos OOF (n=72 muestras en TRANSITION):
+    #   · P50=0.021  P85=0.036  P90=0.040  P95=0.050  P99=0.056 (Platt actual)
+    #   · P50=0.029  P90=0.055  P99=0.090 (isotónico antiguo)
+    # El valor original 0.10 estaba por ENCIMA del P99 de ambos calibradores
+    # → bloqueo del 100% de señales en TRANSITION (confirmado en runtime
+    # 20/05/2026: 3 SELL consecutivos en TRANSITION_DOWN con deltas 0.017,
+    # 0.030, 0.037 todos bloqueados pese a tener scores 0.54-0.65).
+    # El caso histórico del 17/04/2026 (3 SELL con delta≈0.088 que perdieron
+    # -675pts) era P99 del isotónico — un outlier raro, no la masa de la
+    # distribución. Con threshold=0.04 (P90 Platt) bloqueamos 89% del ruido
+    # y dejamos pasar señales realmente fuertes para el rango natural del
+    # calibrador Platt.
+    transition_min_proba_delta: float = 0.04
 
     startup_grace_bars: int = 1

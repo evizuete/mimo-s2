@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from mimo_analysis_common import (
+from .mimo_analysis_common import (
     bucket_quantiles,
     compute_binary_metrics,
     ensure_period_column,

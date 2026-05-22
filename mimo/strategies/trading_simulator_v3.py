@@ -833,6 +833,14 @@ class TradingSimulator:
             # --- antinat / anomaly (v2) ---
             anomaly_block_threshold: float = 1.0,   # anomaly_score >= umbral → bloquea señal
             signal_cooldown_bars: int = 3,           # velas de silencio tras bloqueo por anomalía
+
+            # --- strategy gate (chop / exhaustion) ---
+            # Expuesto en kwargs tras incident INC-2026-05-20 (antes hardcoded
+            # en self.strategy_gate = StrategyGate(...) más abajo). Defaults
+            # = config tras fix #2 del incident (relajación del chop).
+            chop_block: bool = False,
+            chop_size_mult: float = 0.5,
+            exhaustion_blocks_reentry: bool = True,
     ):
 
         self._last_df_prepared = None
@@ -911,10 +919,19 @@ class TradingSimulator:
         )
 
         self.helper = Helper(general_config=general_config, path=artifacts_path)
+        # StrategyGate ahora configurable vía kwargs (defaults = config tras
+        # incident INC-2026-05-20: chop_block=False, chop_size_mult=0.5,
+        # exhaustion_blocks_reentry=True). El operador pasa estos kwargs desde
+        # s2_main.py leyendo S2Config.strategy_gate.* — ver s2_config.py.
         self.strategy_gate = StrategyGate(
-            chop_block=True,
-            chop_size_mult=0.0,
-            exhaustion_blocks_reentry=True
+            chop_block=bool(chop_block),
+            chop_size_mult=float(chop_size_mult),
+            exhaustion_blocks_reentry=bool(exhaustion_blocks_reentry),
+        )
+        print(
+            f"[StrategyGate] chop_block={self.strategy_gate.chop_block} "
+            f"chop_size_mult={self.strategy_gate.chop_size_mult} "
+            f"exhaustion_blocks_reentry={self.strategy_gate.exhaustion_blocks_reentry}"
         )
 
         # Policy por defecto (si no pasas una)
@@ -1069,6 +1086,32 @@ class TradingSimulator:
 
         return df_p
 
+    @staticmethod
+    def _extract_side_proba(raw, side: str) -> np.ndarray:
+        """
+        Extrae la cabeza del lado correcto del output de model.predict().
+
+        - multitask: dict {'signal_long': arr, 'signal_short': arr}  → toma side
+        - multitask: list/tuple [out_long, out_short]                → idem por orden
+        - single-side: array (N, 1) o (N,)                           → reshape(-1)
+        - triple_class: (N, 3)                                       → P(TP) = col 2
+        """
+        if isinstance(raw, dict):
+            key = f"signal_{side}"
+            if key in raw:
+                return np.asarray(raw[key]).reshape(-1)
+            # fallback por keys conocidas
+            if "signal_long" in raw and "signal_short" in raw:
+                return np.asarray(raw[f"signal_{side}"]).reshape(-1)
+            raise ValueError(f"Output dict del modelo sin keys signal_long/short: {list(raw.keys())}")
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            idx = 0 if side == "long" else 1
+            return np.asarray(raw[idx]).reshape(-1)
+        arr = np.asarray(raw)
+        if arr.ndim == 2 and arr.shape[-1] == 3:
+            return arr[:, 2]
+        return arr.reshape(-1)
+
     def predict_side_pack(self, side_pack: dict, df: pd.DataFrame, side: str):
         X_seq_short = side_pack[side]['seq_short']
         X_seq_long = side_pack[side]['seq_long']
@@ -1080,9 +1123,10 @@ class TradingSimulator:
             return None, None, None
 
         model = self.models[side]
-        proba_raw = model.predict(
+        raw_out = model.predict(
             [X_seq_short, X_seq_long, X_context, X_time], verbose=1
-        ).reshape(-1)
+        )
+        proba_raw = self._extract_side_proba(raw_out, side)
 
         if side in self.calibrators:
             proba_cal = self.calibrators[side].predict(proba_raw)
@@ -1106,7 +1150,8 @@ class TradingSimulator:
         X = [data["seq_short"], data["seq_long"], data["context"], data["time"]]
 
         model = self.models[side]
-        p_raw = model.predict(X, batch_size=self.batch_size, verbose=0).reshape(-1).astype(np.float32)
+        raw_out = model.predict(X, batch_size=self.batch_size, verbose=0)
+        p_raw = self._extract_side_proba(raw_out, side).astype(np.float32)
 
         cal = self.calibrators[side]
         try:
@@ -1243,11 +1288,12 @@ class TradingSimulator:
             X_time    = pack['time'][-1:]
 
             model = self.models[side]
-            p_raw = model.predict(
+            raw_out = model.predict(
                 [X_short, X_long, X_context, X_time],
                 batch_size=1,
                 verbose=0,
-            ).reshape(-1).astype(np.float32)
+            )
+            p_raw = self._extract_side_proba(raw_out, side).astype(np.float32)
 
             cal = self.calibrators[side]
             try:
@@ -2225,15 +2271,55 @@ class TradingSimulator:
             session.commit()
 
         if order is None:
-            # La acción del decision engine fue 'none': score bajo, régimen filtrado,
-            # delta_rel insuficiente, strategy_gate bloqueó, etc.
-            # El motivo específico está en dec.debug['strategy_gate_reason'] si existe.
-            gate_reason = ""
-            debug = getattr(dec, "debug", None)
-            if isinstance(debug, dict):
+            # Determinar la causa REAL del no-order para diagnóstico claro.
+            # Antes (genérico): "DECISION_ENGINE_NONE" sin pista de la causa.
+            # Ahora: extraer la causa específica del dec.debug y combinaciones de
+            # estado (action válida pero qty=0 tras penalty es el caso más sutil
+            # — el modelo decidió operar pero anomaly_score penalizó el score
+            # hasta 0). Ver INC-2026-05-20 lección 5.
+            debug = getattr(dec, "debug", None) or {}
+            dec_action = str(getattr(dec, "action", "none"))
+
+            if dec_action == "none":
+                # El engine rechazó. Usar el reason interno del engine.
+                engine_reason = str(debug.get("reason", "ENGINE_NONE"))
                 gate_reason = str(debug.get("strategy_gate_reason", ""))
-            _reject(f'DECISION_ENGINE_NONE{(":" + gate_reason) if gate_reason else ""}',
-                    row=row, dec=dec)
+                # Si el reason es "trade" pero strategy_gate bloqueó, usar gate_reason
+                if engine_reason == "trade" and gate_reason and gate_reason not in ("OK", "ALLOW_MIN_IN_CHOP"):
+                    final_reason = f"STRATEGY_GATE_{gate_reason}"
+                else:
+                    # Mapear los reasons internos del engine a etiquetas operativas
+                    final_reason = {
+                        "trade": "DECISION_ENGINE_NONE",       # fallback no informativo
+                        "no_gate_pass": "NO_GATE_PASS",         # cal < gate threshold
+                        "HARD_SPIKE": "HARD_SPIKE",             # spike anormal de barra
+                        "COOLDOWN": "COOLDOWN",                 # cooldown post-anomaly
+                        "ANOMALY_BLOCKED": "ANOMALY_BLOCKED",   # anomaly >= block_threshold
+                        "SIGNAL_COOLDOWN": "SIGNAL_COOLDOWN",   # post-anomaly cooldown
+                        "low_vol_blocked": "LOW_VOL_BLOCKED",
+                        "volatile_blocked": "VOLATILE_BLOCKED",
+                    }.get(engine_reason, f"ENGINE_{engine_reason}")
+            else:
+                # action es "buy" o "sell" pero el order quedó en None.
+                # Caso típico: chosen_score=0 → risk_pct=0 → qty=0 → build_order=None
+                anomaly_score = float(debug.get("anomaly_score", 0.0) or 0.0)
+                penalty = float(debug.get("penalty", 1.0) or 1.0)
+                chosen_score = float(getattr(dec, "chosen_score", 0.0) or 0.0)
+
+                if anomaly_score >= 0.5 and penalty < 0.5:
+                    # La causa probable: penalty exp(-λ·anomaly) redujo el score a ~0
+                    final_reason = (
+                        f"ANOMALY_PENALTY_ZEROED(action={dec_action},"
+                        f"anomaly={anomaly_score:.2f},penalty={penalty:.3f})"
+                    )
+                elif chosen_score <= 1e-6:
+                    # Score quedó en 0 sin penalty alto — probablemente cal apenas pasó gate
+                    final_reason = f"ZERO_SCORE_NO_ORDER(action={dec_action})"
+                else:
+                    # Score > 0 pero qty=0 — error en sizing (sl_dist 0, etc.)
+                    final_reason = f"ZERO_QTY_NO_ORDER(action={dec_action},score={chosen_score:.4f})"
+
+            _reject(final_reason, row=row, dec=dec)
             return None
 
         # --- RL gate-only (live): decide TAKE / SKIP sobre señal base ---

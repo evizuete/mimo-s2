@@ -12,6 +12,16 @@ from mimo.data_managers.data_pipeline_v2 import DataPipeline
 from mimo.data_managers.databases import Database
 from mimo.models.model_builder import Config
 
+# Side-effect import: forzar la carga del módulo model_alternatives para que
+# el decorator @register_keras_serializable de WeightedSumPooling1D (y otras
+# custom layers que se añadan en el futuro) ejecute y registre las clases en
+# el registry global de Keras. Sin esto, load_model() de un .keras que use
+# una custom layer del TCN falla con:
+#   TypeError: Could not locate class 'WeightedSumPooling1D'.
+# El registro ocurre al importar, NO al usar el módulo, por eso basta con
+# importarlo en helper.py (que es el módulo central de carga de modelos).
+from mimo.models import model_alternatives as _register_custom_layers  # noqa: F401
+
 class Helper:
     def __init__(self, general_config: Config, path: str = None):
         self.general_config = general_config
@@ -26,19 +36,59 @@ class Helper:
 
     def predict_proba_keras(self, model: Model, X: np.ndarray, batch_size: int = 4096) -> np.ndarray:
         X = np.asarray(X, dtype=np.float32)
-        p = model.predict(X, batch_size=batch_size, verbose=0).reshape(-1)
-        return p
+        raw = model.predict(X, batch_size=batch_size, verbose=0)
+        # multitask: output dict/list con [signal_long, signal_short].
+        # Devolvemos shape (N, 2) — col 0=P_long, col 1=P_short.
+        if isinstance(raw, dict):
+            if 'signal_long' in raw and 'signal_short' in raw:
+                p_l = np.asarray(raw['signal_long']).reshape(-1)
+                p_s = np.asarray(raw['signal_short']).reshape(-1)
+                return np.stack([p_l, p_s], axis=-1)
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            p_l = np.asarray(raw[0]).reshape(-1)
+            p_s = np.asarray(raw[1]).reshape(-1)
+            return np.stack([p_l, p_s], axis=-1)
+        # triple_class: output (N, 3) softmax → P(TP) = col 2.
+        if raw.ndim == 2 and raw.shape[-1] == 3:
+            return raw[:, 2]
+        return raw.reshape(-1)
 
     def load_model(self, side: str):
-        model = load_model(f'{self.path}/model_{self.general_config.release}_{side}.keras')
+        # safe_mode=False permite cargar Lambda layers (usadas p.ej. en el
+        # attention pooling del TCN: tf.reduce_sum vía layers.Lambda). El
+        # .keras file lo genera nuestro propio pipeline (no untrusted input),
+        # así que es seguro relajar el check de deserialización.
+        model = load_model(
+            f'{self.path}/model_{self.general_config.release}_{side}.keras',
+            safe_mode=False,
+        )
         return model
 
     def load_everything(self, pipeline: DataPipeline):
-        models = {}
-        calibrators = {}
-        for side in ['long', 'short']:
-            models[side] = self.load_model(side)
-            calibrators[side] = self.load_calibrator(side)
+        # Multitask: si existe `model_{release}_multitask.keras` cargamos UN
+        # solo modelo y un calibrador único (dict {'long': ..., 'short': ...}).
+        # Devolvemos models como {'long': model, 'short': model} apuntando a
+        # la misma instancia, y calibradores expandidos por lado.
+        release = self.general_config.release
+        multitask_model_path = Path(f'{self.path}/model_{release}_multitask.keras')
+        multitask_cal_path = Path(f'{self.path}/oof_calibrator_{release}_multitask.joblib')
+
+        if multitask_model_path.exists() and multitask_cal_path.exists():
+            multi_model = load_model(str(multitask_model_path), safe_mode=False)
+            cal_dict = joblib.load(str(multitask_cal_path))
+            if not isinstance(cal_dict, dict) or 'long' not in cal_dict or 'short' not in cal_dict:
+                raise ValueError(
+                    f"Calibrator multitask inválido en {multitask_cal_path}: "
+                    f"se esperaba dict con keys 'long'/'short'."
+                )
+            models = {'long': multi_model, 'short': multi_model}
+            calibrators = {'long': cal_dict['long'], 'short': cal_dict['short']}
+        else:
+            models = {}
+            calibrators = {}
+            for side in ['long', 'short']:
+                models[side] = self.load_model(side)
+                calibrators[side] = self.load_calibrator(side)
 
         scalers = pipeline.load_scalers(self.path)
         return models, calibrators, scalers

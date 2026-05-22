@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from mimo_analysis_common import (
+from .mimo_analysis_common import (
     ensure_period_column,
     load_dataframe,
     normalize_binary_target,

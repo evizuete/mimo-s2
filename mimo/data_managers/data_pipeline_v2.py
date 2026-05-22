@@ -14,6 +14,49 @@ from mimo.models.model_builder import Config, ModelConfig
 from mimo.states_manager.state_detector import StateConfig, add_mimo_state, StateDetector
 
 
+def _extract_labels_weights(df: pd.DataFrame, start: int, end: int) -> tuple:
+    """
+    Extrae (labels, weights) del slice [start:end] del df.
+
+    Detecta automáticamente el modo multitask por la presencia de las columnas
+    'signal_long' y 'signal_short' (escritas por _dual_triple_barrier_labels).
+    En multitask devuelve labels y weights como (N, 2) — primera columna LONG,
+    segunda SHORT — para alimentar al modelo de dos cabezas.
+
+    En modo single-side (legacy) devuelve labels y weights 1D.
+    """
+    is_multitask = ('signal_long' in df.columns) and ('signal_short' in df.columns)
+
+    if is_multitask:
+        sl = df['signal_long'].values[start:end].astype(np.float32)
+        ss = df['signal_short'].values[start:end].astype(np.float32)
+        labels = np.stack([sl, ss], axis=-1)
+
+        # Weights: por ahora la misma columna 'regime_weight' replicada en
+        # ambas dimensiones. Una variante futura permitirá per-side weights
+        # vía columnas 'regime_weight_long' / 'regime_weight_short'.
+        if 'regime_weight_long' in df.columns and 'regime_weight_short' in df.columns:
+            wl = df['regime_weight_long'].values[start:end].astype(np.float32)
+            ws = df['regime_weight_short'].values[start:end].astype(np.float32)
+            weights = np.stack([wl, ws], axis=-1)
+        elif 'regime_weight' in df.columns:
+            w = df['regime_weight'].values[start:end].astype(np.float32)
+            weights = np.stack([w, w], axis=-1)
+        else:
+            n = end - start
+            weights = np.ones((n, 2), dtype=np.float32)
+        return labels, weights
+
+    # Legacy single-side
+    labels = df['signal'].values[start:end].astype(np.float32) if 'signal' in df.columns else None
+    if 'regime_weight' in df.columns:
+        weights = df['regime_weight'].values[start:end].astype(np.float32)
+    else:
+        n = end - start
+        weights = np.ones(n, dtype=np.float32)
+    return labels, weights
+
+
 class DataPipeline:
     """
     Pipeline completo de preparación de datos - VERSIÓN OPTIMIZADA
@@ -44,7 +87,35 @@ class DataPipeline:
         self.scalers = {}
         self.is_fitted = False
 
-        self.use_rolling_scaler = True
+        # ── Configuración del scaler (varios modos seleccionables por env vars) ─
+        #
+        # MODO 1 (default, LEGACY): use_rolling_scaler=True + causal_scaler_fit=False
+        #   El fit muestrea TODO el train con stride (data_pipeline_v2.py:894-896
+        #   + rolling_scaler.py:212-216) → look-ahead INTRA-TRAIN. NO afecta al
+        #   test directamente, pero contamina el aprendizaje del modelo.
+        #
+        # MODO 2 (NO_ROLLING_SCALER=1): use_rolling_scaler=False
+        #   Usa sklearn RobustScaler estándar fit sobre todo el train sin sampling.
+        #   Sin look-ahead, pero MISMATCH con prod (que sí usa rolling+update).
+        #
+        # MODO 3 (CAUSAL_SCALER=1): use_rolling_scaler=True + causal_scaler_fit=True
+        #   Fit causal del rolling scaler: warmup con primeras warmup_size filas
+        #   + update secuencial del resto del train en chunks. El scaler queda
+        #   al final con stats que reflejan los últimos window_size filas (igual
+        #   estado que tendría en prod justo al cierre del train). Sin look-ahead
+        #   en el fit, y CONSISTENTE con prod que sigue actualizándose live.
+        #   Recomendado para experimentos honest desplegables. (Opción B)
+        #
+        # CAUSAL_SCALER tiene precedencia sobre NO_ROLLING_SCALER si ambos son 1.
+        import os as _os
+        _causal     = _os.environ.get("CAUSAL_SCALER", "0") == "1"
+        _no_rolling = _os.environ.get("NO_ROLLING_SCALER", "0") == "1"
+        if _causal:
+            self.use_rolling_scaler = True
+            self.causal_scaler_fit  = True
+        else:
+            self.use_rolling_scaler = not _no_rolling
+            self.causal_scaler_fit  = False
         self.scaler_window_size = 2880
         self.scaler_warmup_size = 390
         self.scaler_smooth_alpha = 0.1
@@ -52,7 +123,9 @@ class DataPipeline:
             'seq_short': { 'doji', 'hammer', 'shooting_star'},
             'seq_long': { 'trend_dir' },
             'context': { 'is_chop', 'is_exhaustion', 'ema_bull', 'ema_bear',
-                         'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative'}
+                         'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative',
+                         'is_month_end', 'is_friday',
+                         'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour'}
         }
 
         self._last_live_time = None
@@ -194,12 +267,14 @@ class DataPipeline:
             time_vals = df[cols['time']].values[context_offset_base:context_offset_base + n_samples]
 
             if train:
-                if 'signal' not in df.columns:
-                    raise ValueError('Training mode requires "signal" column in DataFrame')
-                labels = df['signal'].values[context_offset_base:context_offset_base + n_samples]
-                weights = (df['regime_weight'].values[context_offset_base:context_offset_base + n_samples]
-                           if 'regime_weight' in df.columns
-                           else np.ones(n_samples, dtype=np.float32))
+                if 'signal' not in df.columns and 'signal_long' not in df.columns:
+                    raise ValueError(
+                        'Training mode requires "signal" or "signal_long"+"signal_short" '
+                        'columns in DataFrame'
+                    )
+                labels, weights = _extract_labels_weights(
+                    df, context_offset_base, context_offset_base + n_samples,
+                )
             else:
                 labels  = None
                 weights = None
@@ -209,8 +284,8 @@ class DataPipeline:
                 'seq_long':  seq_long_side.astype(np.float32),
                 'context':   context_side.astype(np.float32),
                 'time':      time_vals,
-                'labels':    labels.astype(np.float32)  if labels  is not None else None,
-                'weights':   weights.astype(np.float32) if weights is not None else None,
+                'labels':    labels  if labels  is not None else None,
+                'weights':   weights if weights is not None else None,
             }
 
         return out
@@ -274,11 +349,11 @@ class DataPipeline:
         context = df[feature_cols['context']].values[context_offset:context_offset + n_samples]
         time = df[feature_cols['time']].values[context_offset:context_offset + n_samples]
 
-        # 5. Labels (si aplica)
+        # 5. Labels (si aplica) — soporta multitask vía _extract_labels_weights
         if train:
-            labels = df['signal'].values[context_offset:context_offset + n_samples]
-            weights = df.get('regime_weight', pd.Series(1.0, index=df.index)).values[
-                context_offset:context_offset + n_samples]
+            labels, weights = _extract_labels_weights(
+                df, context_offset, context_offset + n_samples,
+            )
         else:
             labels = None
             weights = None
@@ -378,12 +453,30 @@ class DataPipeline:
         df = self.feature_engineer.generate_all_features(df)
 
         # 2. Detectar estado de mercado (StateDetector unificado)
-        state_cfg_overrides = getattr(self, '_state_config_overrides', {})
-        state_cfg = StateConfig(**state_cfg_overrides) if state_cfg_overrides else StateConfig()
-
+        # FIX runtime drift 2026-05-20: usar `self.state_detector.config`
+        # directamente en lugar de reconstruir un StateConfig desde el dict
+        # `_state_config_overrides`. El attribute path indirecto fallaba:
+        # cuando load_scalers invocaba _inject_regime_thresholds, los
+        # `fixed_*` se seteaban en `self.state_detector.config` pero
+        # `_state_config_overrides` no siempre llegaba a ser leído en
+        # add_mimo_state (timing/instance issues). Resultado: cada prepare_data
+        # creaba un StateDetector NUEVO sin thresholds inyectados y caía al
+        # path DINÁMICO, recomputando vol_high/low sobre el buffer corto del
+        # runtime (~1,128 barras) en lugar de usar los persistidos en meta.json.
+        #
+        # Síntoma: 68% del tiempo etiquetado VOLATILE incluso tras recalibrar
+        # thresholds en meta.json. Confirmado por el warning `[StateDetector]
+        # Computing thresholds DYNAMICALLY from the current df` apareciendo en
+        # cada tick. Ver docs/RUNBOOK.md → Apéndice C.
+        #
+        # Pasando `self.state_detector.config` garantizamos que el StateDetector
+        # interno de add_mimo_state hereda EXACTAMENTE el cfg cuyos `fixed_*`
+        # fueron poblados por inject_thresholds. Retrocompat: cuando no se ha
+        # inyectado nada (training/Optuna), config.fixed_* son None y el path
+        # dinámico se mantiene — mismo comportamiento que antes.
         df = add_mimo_state(
             df,
-            cfg=state_cfg,
+            cfg=self.state_detector.config,
             set_market_condition=set_market_condition,
         )
 
@@ -396,9 +489,22 @@ class DataPipeline:
             print(f"[DIAG PRE] side={side} | regime_barriers_short set: {self.label_generator.config.regime_barriers_short is not None} | regime_barriers: {self.label_generator.config.regime_barriers}")
 
             df = self.label_generator.generate_labels(df, side)
-            print(f"[DIAG {side}] pos_rate: {df['signal'].mean():.4f} ({df['signal'].sum()} positivos de {len(df)} filas)")
-            print(f"[DIAG {side}] por régimen:")
-            print(df.groupby('state')['signal'].agg(['mean', 'sum', 'count']))
+            # En modo quantile_return el target es continuo (return en ATR),
+            # por lo que pos_rate/positivos no aplican: reportamos mean/std
+            # con etiqueta "mean_return" para evitar confusión.
+            if self.label_generator.config.label_method == 'quantile_return':
+                _s = df['signal']
+                print(
+                    f"[DIAG {side}] mean_return(ATR)={_s.mean():.4f} "
+                    f"std={_s.std():.4f} min={_s.min():.4f} max={_s.max():.4f} "
+                    f"n_finite={int(_s.notna().sum())}/{len(df)}"
+                )
+                print(f"[DIAG {side}] por régimen (mean_return / std / count):")
+                print(df.groupby('state')['signal'].agg(['mean', 'std', 'count']))
+            else:
+                print(f"[DIAG {side}] pos_rate: {df['signal'].mean():.4f} ({df['signal'].sum()} positivos de {len(df)} filas)")
+                print(f"[DIAG {side}] por régimen:")
+                print(df.groupby('state')['signal'].agg(['mean', 'sum', 'count']))
 
             df = df.dropna()
         else:
@@ -412,7 +518,9 @@ class DataPipeline:
         # Features binarias que NO se escalan
         no_scale = {
             'is_chop', 'is_exhaustion', 'ema_bull', 'ema_bear',
-            'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative'
+            'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative',
+            'is_month_end', 'is_friday',
+            'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour'
         }
 
         scale_mask = np.array([c not in no_scale for c in context_cols])
@@ -662,7 +770,9 @@ class DataPipeline:
             if hasattr(scaler, 'stats_'):
                 n_features_saved = scaler.stats_['center'].shape[0]
                 no_scale = {'is_chop', 'is_exhaustion', 'ema_bull', 'ema_bear',
-                            'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative'}
+                            'rsi_oversold', 'rsi_overbought', 'macd_positive', 'macd_negative',
+                            'is_month_end', 'is_friday',
+                            'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour'}
                 context_cols = feature_cols.get('context', [])
                 n_features_to_scale = sum(1 for c in context_cols if c not in no_scale)
 
@@ -696,11 +806,11 @@ class DataPipeline:
         context = df[feature_cols['context']].values[context_offset:context_offset + n_samples]
         time = df[feature_cols['time']].values[context_offset:context_offset + n_samples]
 
-        # 5. Labels y pesos
+        # 5. Labels y pesos — soporta multitask vía _extract_labels_weights
         if train:
-            labels = df['signal'].values[context_offset:context_offset + n_samples]
-            weights = df['regime_weight'].values[
-                context_offset:context_offset + n_samples] if 'regime_weight' in df else None
+            labels, weights = _extract_labels_weights(
+                df, context_offset, context_offset + n_samples,
+            )
         else:
             labels = None
             weights = None
@@ -769,7 +879,9 @@ class DataPipeline:
                 nan_policy='zero',
                 scale_before_warmup=True,
                 skip_features=skip,
-                min_iqr=1e-4
+                min_iqr=1e-4,
+                feature_names=list(feature_cols) if feature_cols is not None else None,
+                name=str(name),
             )
 
             data_scaled = scaler.fit_transform(data)
@@ -808,21 +920,44 @@ class DataPipeline:
                 nan_policy='zero',
                 scale_before_warmup=True,
                 skip_features=skip,
-                min_iqr=1e-4
+                min_iqr=1e-4,
+                feature_names=list(feature_cols) if feature_cols is not None else None,
+                name=str(name),
             )
-            # El scaler solo necesita window_size=2880 filas representativas
-            # Las cogemos con stride para cubrir toda la distribución temporal
             n_rows = raw_data.shape[0]
-            if n_rows > self.scaler_window_size:
-                stride = max(1, n_rows // self.scaler_window_size)
-                sample = np.ascontiguousarray(raw_data[::stride][:self.scaler_window_size].astype(np.float32))
-            else:
-                sample = raw_data.astype(np.float32)
 
-            scaler.fit(sample)
-            del sample
-            progress = scaler.get_warmup_progress() * 100.0
-            print(f'\tScaler {name}: warmup {progress:.1f}%')
+            if self.causal_scaler_fit:
+                # Modo CAUSAL: warmup con primeras warmup_size filas + update
+                # secuencial del resto en chunks. Replica el régimen que tendría
+                # el scaler en producción justo al final del train (después de
+                # haber procesado todas las barras causalmente). No hay stride
+                # sobre todo el train → no hay look-ahead intra-train en el fit.
+                warmup_n = min(self.scaler_warmup_size, n_rows)
+                scaler.fit(raw_data[:warmup_n].astype(np.float32))
+                # Resto del train: update secuencial en chunks pequeños
+                # (chunk_size=128 mantiene buena dinámica rolling sin matar
+                # performance — recompute_every del scaler controla coste real).
+                if n_rows > warmup_n:
+                    chunk_size = 128
+                    for start in range(warmup_n, n_rows, chunk_size):
+                        end = min(start + chunk_size, n_rows)
+                        scaler.update(raw_data[start:end].astype(np.float32))
+                progress = scaler.get_warmup_progress() * 100.0
+                print(f'\tScaler {name}: causal fit warmup {progress:.1f}%')
+            else:
+                # Modo LEGACY: stride sobre todo el train → look-ahead intra-train
+                # (la fila 0 se escala con stats de filas posteriores del mismo
+                # train al transformarse después). Mantener solo por compatibilidad.
+                if n_rows > self.scaler_window_size:
+                    stride = max(1, n_rows // self.scaler_window_size)
+                    sample = np.ascontiguousarray(raw_data[::stride][:self.scaler_window_size].astype(np.float32))
+                else:
+                    sample = raw_data.astype(np.float32)
+
+                scaler.fit(sample)
+                del sample
+                progress = scaler.get_warmup_progress() * 100.0
+                print(f'\tScaler {name}: warmup {progress:.1f}%')
         else:
             from sklearn.preprocessing import RobustScaler
             scaler = RobustScaler(quantile_range=(25.0, 75.0))
@@ -938,7 +1073,9 @@ class DataPipeline:
             'seq_short': ['doji', 'hammer', 'shooting_star'],
             'seq_long': ['trend_dir'],
             'context': ['is_chop', 'is_exhaustion', 'ema_bull', 'ema_bear', 'rsi_oversold', 'rsi_overbought',
-                        'macd_positive', 'macd_negative']
+                        'macd_positive', 'macd_negative',
+                        'is_month_end', 'is_friday',
+                        'is_eu_first_hour', 'is_us_first_hour', 'is_us_last_hour']
         }
 
         # Calcular columnas escalables del contexto (sin no_scale) para auditoría
