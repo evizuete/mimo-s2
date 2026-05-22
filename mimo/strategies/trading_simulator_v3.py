@@ -2259,7 +2259,35 @@ class TradingSimulator:
 
         dec, order = self.decide_at(df_pred, i, eq, has_position=has_pos, pos_side=pos_side)
         print(f'\tDecision: {dec}')
-        print(f'\tOrder: {order}')
+        # 2026-05-22: imprimir Order junto con la causa cuando sea None.
+        # Antes solo "Order: None" — operador tenía que mirar signals_*.jsonl
+        # para diagnóstico. Ahora se muestra la razón inline.
+        if order is None:
+            # Detectar la causa con la misma lógica del bloque siguiente (DRY-ish)
+            _dbg = getattr(dec, "debug", None) or {}
+            _action = str(getattr(dec, "action", "none"))
+            _cs = float(getattr(dec, "chosen_score", 0.0) or 0.0)
+            _anom = float(_dbg.get("anomaly_score", 0.0) or 0.0)
+            _pen = float(_dbg.get("penalty", 1.0) or 1.0)
+            _gate = str(_dbg.get("strategy_gate_reason", ""))
+            if _action == "none":
+                _eng_r = str(_dbg.get("reason", "ENGINE_NONE"))
+                if _eng_r == "trade" and _gate and _gate not in ("OK", "ALLOW_MIN_IN_CHOP"):
+                    _causa = f"STRATEGY_GATE_{_gate}"
+                else:
+                    _causa = {
+                        "trade": "DECISION_ENGINE_NONE",
+                        "no_gate_pass": "NO_GATE_PASS",
+                    }.get(_eng_r, _eng_r.upper())
+            elif _anom >= 0.5 and _pen < 0.5:
+                _causa = f"ANOMALY_PENALTY_ZEROED(anom={_anom:.2f},pen={_pen:.3f})"
+            elif _cs <= 1e-6:
+                _causa = f"ZERO_SCORE_NO_ORDER(action={_action})"
+            else:
+                _causa = f"ZERO_QTY_NO_ORDER(action={_action},score={_cs:.4f})"
+            print(f'\tOrder: None  ⚠️  {_causa}')
+        else:
+            print(f'\tOrder: {order}')
 
         event = DecisionEvent.from_decision(
             dec,
