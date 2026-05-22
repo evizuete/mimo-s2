@@ -1150,6 +1150,14 @@ class S2Service:
             effective_positions=effective_positions,
         )
 
+        # 2026-05-22: observabilidad — si el simulator devolvió una Order
+        # válida pero el service la bloquea, imprimir la causa en stdout.
+        # Antes solo iba al signals_*.jsonl → operador veía "Order: {...}"
+        # pero ninguna explicación de por qué no se enrutó. Ahora hace
+        # match con el block_reason inline.
+        if live_order is not None and block_reason:
+            print(f"\t⚠️  SIGNAL_BLOCKED by service: {block_reason}")
+
         # Enriquecer model_diag con estado del cooldown para visibilidad en
         # NO_SIGNAL aunque el modelo no haya generado señal (live_order=None).
         _now_ts = time.time()
