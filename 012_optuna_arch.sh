@@ -14,16 +14,19 @@
 #   transformer ~2-3h
 #   tcn         ~4-6h
 #
-# FLUJO recomendado (TCN — release 202500):
+# FLUJO recomendado (TCN — release 202700, datos hasta 2026-05-22):
 #   Tras observar asimetría LONG/SHORT en tcn_v3 (LONG +60R, SHORT +11R con
 #   PWR 40%), v4 cambia la estrategia por defecto: tunear cada side por
 #   separado. SIDE=both queda como opción legacy o para multi-objective.
 #
+#   OBJECTIVE default es ev_net (alineado con deploy). Para ranking puro:
+#   OBJECTIVE=auc_pr ...
+#
 #   1. SIDE=long  bash 012_optuna_arch.sh tcn 40   # ~5-6h
 #   2. SIDE=short bash 012_optuna_arch.sh tcn 40   # ~5-6h
 #   3. Walkforward 2-study combinando ambos:
-#      CNN_STUDY_LONG=oof_study_202500_tcn_long_only_v4 \
-#      CNN_STUDY_SHORT=oof_study_202500_tcn_short_only_v4 \
+#      CNN_STUDY_LONG=oof_study_202700_tcn_long_only_v4 \
+#      CNN_STUDY_SHORT=oof_study_202700_tcn_short_only_v4 \
 #      SPLIT_MODELS=1 SPLIT_ZERO_OTHER_LOSS=1 ARCH=tcn \
 #      bash 010_walkforward_cnn.sh
 #
@@ -54,7 +57,7 @@ fi
 ARCH=$1
 N_TRIALS=${2:-${N_TRIALS:-30}}
 
-export RELEASE=${RELEASE:-202500}
+export RELEASE=${RELEASE:-202700}
 export SEED=${SEED:-47}
 # SIDE=both|long|short. Default both (multitask, comportamiento legacy).
 # SIDE=long → single-side LONG (focal_alpha_short y loss_weight_short fijos
@@ -62,14 +65,15 @@ export SEED=${SEED:-47}
 # Cuando SIDE!=both, el study default cambia a oof_study_..._<side>_only.
 export SIDE=${SIDE:-both}
 
-# Split train/val para tuning (12m train + 2m val por defecto)
+# Split train/val para tuning (12m train + 4m val por defecto).
 # Distinto del rango de walkforward para no contaminar:
 #   walkforward usa 2025-01-01 → 2026-04-10 con train 12m
-#   tuning usa 2024-05-01 → 2025-07-01 (anterior al walk)
+#   tuning usa 2024-05-01 → 2025-09-01 (anterior al walk salvo solape menor).
+# VAL extendido a 4m para reflejar más cobertura con los datos hasta 2026-05-22.
 export TRAIN_FROM=${TRAIN_FROM:-2024-05-01}
 export TRAIN_TO=${TRAIN_TO:-2025-05-01}
 export VAL_FROM=${VAL_FROM:-2025-05-01}
-export VAL_TO=${VAL_TO:-2025-07-01}
+export VAL_TO=${VAL_TO:-2025-09-01}
 
 # Epochs por trial (acortados para velocidad — el tuning busca rankings, no convergencia perfecta)
 export EPOCHS=${EPOCHS:-15}
@@ -77,8 +81,10 @@ export PATIENCE=${PATIENCE:-4}
 
 export OPTUNA_STORAGE=${OPTUNA_STORAGE:-mysql+pymysql://evizuete:Ev1z43t3.00@10.1.21.25:3306/optuna_db}
 
-# Objective config (default ranking puro). Para TCN v4 es opcional alinear a EV.
-export OBJECTIVE=${OBJECTIVE:-auc_pr}
+# Objective config. Default ev_net (alineado con walkforward/deploy: max EV_net
+# vía threshold sweep en val, en R con tp/sl/cost iguales al deploy).
+# Para ranking puro auc_pr, override con OBJECTIVE=auc_pr.
+export OBJECTIVE=${OBJECTIVE:-ev_net}
 export MULTI_OBJECTIVE=${MULTI_OBJECTIVE:-0}
 export EV_TP_MULT=${EV_TP_MULT:-2.0}
 export EV_SL_MULT=${EV_SL_MULT:-0.8}
