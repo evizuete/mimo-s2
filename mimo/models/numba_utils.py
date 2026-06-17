@@ -171,6 +171,62 @@ def triple_barrier_fixed_numba(close, high, low, atr, horizon, tp_mult, sl_mult,
 
 
 @jit(nopython=True, cache=NUMBA_CACHE)
+def triple_barrier_3class_numba(close, high, low, atr, horizon, tp_mult, sl_mult, side_is_long):
+    """
+    Triple barrier 3-class labeling. Devuelve {0=SL, 1=TIMEOUT, 2=TP}.
+
+    Filas con horizonte incompleto o ATR inválido quedan como 1 (TIMEOUT)
+    por convención — el pipeline filtrará via dropna donde aplique.
+    """
+    n = len(close)
+    label = np.ones(n, dtype=np.int8)  # default TIMEOUT (1)
+
+    for i in range(n - horizon):
+        entry   = close[i]
+        atr_val = atr[i]
+
+        if np.isnan(atr_val) or atr_val <= 0:
+            continue
+
+        if side_is_long:
+            tp_level = entry + tp_mult * atr_val
+            sl_level = entry - sl_mult * atr_val
+        else:
+            tp_level = entry - tp_mult * atr_val
+            sl_level = entry + sl_mult * atr_val
+
+        hit_tp = -1
+        hit_sl = -1
+
+        for k in range(1, horizon + 1):
+            j = i + k
+            if j >= n:
+                break
+
+            if side_is_long:
+                if hit_tp == -1 and high[j] >= tp_level:
+                    hit_tp = k
+                if hit_sl == -1 and low[j] <= sl_level:
+                    hit_sl = k
+            else:
+                if hit_tp == -1 and low[j] <= tp_level:
+                    hit_tp = k
+                if hit_sl == -1 and high[j] >= sl_level:
+                    hit_sl = k
+
+            if hit_tp != -1 and hit_sl != -1:
+                break
+
+        if hit_tp != -1 and (hit_sl == -1 or hit_tp <= hit_sl):
+            label[i] = 2  # TP first
+        elif hit_sl != -1:
+            label[i] = 0  # SL first
+        # else: queda como 1 (TIMEOUT)
+
+    return label
+
+
+@jit(nopython=True, cache=NUMBA_CACHE)
 def triple_barrier_adaptive_numba(close, high, low, atr, horizon, side_is_long):
     """
     Triple barrier adaptativo - calcula potencial sin umbrales fijos.

@@ -1,0 +1,16 @@
+Fase A - Discover (decidir arquitectura de calibracion)
+# 1. Generar ghost_predict sobre el HOLDOUT completo (no LOCKBOX aún)
+python scripts/ghost_predict.py \
+  --release 202500 \
+  --deploy-subdir deploy_2026_04_combined_specialists_seed47 \
+  --from 2025-11-01 --to 2026-04-10 \
+  --include-tail \
+  --out /tmp/ghost_holdout.parquet
+
+# 2. Simular calibradores
+python scripts/simulate_calibrators.py \
+  --release 202500 \
+  --specialist-tag rw_both_Lvol_boost_td_down_h3_Svol_boost_h3 \
+  --seed 47 \
+  --test-parquet /tmp/ghost_holdout.parquet \
+  --out-report reports/cal_sim_phaseA.csv

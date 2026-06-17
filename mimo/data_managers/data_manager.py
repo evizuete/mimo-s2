@@ -40,12 +40,53 @@ class DataManager:
         return cls(df)
 
     @classmethod
-    def from_database_historical_2(cls, database, from_date, to_date):
+    def from_database_historical_2(cls, database, from_date, to_date, resample: str = None):
+        """
+        Carga rates 1m de la BD entre `from_date` y `to_date`.
+
+        Si `resample` está definido (p.ej. '5min', '15min', '1h'), agrega las
+        velas 1m al timeframe indicado:
+          open  → first
+          high  → max
+          low   → min
+          close → last
+          ticks_volume → sum
+        Esto permite reentrenar el pipeline OOF sobre una resolución base
+        más alta sin tocar el resto del código (las features y el target
+        se computan sobre el df devuelto por este método).
+
+        Si `resample is None` (default), comportamiento original sin cambios.
+        """
         query = f"SELECT r.id, r.time, r.open, r.high, r.low, r.close, r.volume as ticks_volume from historical_rates r WHERE r.time BETWEEN '{from_date}' AND '{to_date}'"
         rates = database.read(query=query)
 
         if rates is None or rates.empty:
             return None
+
+        if resample is not None:
+            n_before = len(rates)
+            rates = rates.copy()
+            rates['time'] = pd.to_datetime(rates['time'])
+            rates = rates.sort_values('time').drop_duplicates(subset='time', keep='first')
+            rates = rates.set_index('time')
+            agg = {
+                'open':  'first',
+                'high':  'max',
+                'low':   'min',
+                'close': 'last',
+            }
+            if 'ticks_volume' in rates.columns:
+                agg['ticks_volume'] = 'sum'
+            rates = (
+                rates.resample(resample, label='right', closed='right')
+                     .agg(agg)
+                     .dropna()
+                     .reset_index()
+            )
+            # 'id' se pierde tras el resample; lo regeneramos para mantener
+            # compatibilidad con código downstream que asume su presencia.
+            rates['id'] = np.arange(len(rates), dtype=np.int64)
+            print(f"[DataManager] Resampled to {resample}: {n_before:,} bars 1m → {len(rates):,} bars {resample}")
 
         return cls(rates)
 

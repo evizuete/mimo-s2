@@ -7,7 +7,7 @@ import pandas as pd
 import zmq
 import logging
 
-from config.decision_policies_config import gate_by_action_and_state, score_cap_by_state, risk_mult_by_state
+from config.decision_policies_config_202500_2026_04_seed47 import gate_by_action_and_state, score_cap_by_state, risk_mult_by_state
 from s2_config import S2Config
 from s2_service_v2 import S2Service
 
@@ -156,41 +156,59 @@ def main(release: str, mode: str = 'production'):
     )
 
     model_config = ModelConfig(
-        seq_len_short=64,
-        seq_len_long=256,
-        epochs=80,
+        seq_len_short=24,
+        seq_len_long=96,
+        epochs=90,
         patience=12,
         use_hierarchical_fusion=True,
-        ranking_loss_weight=0.2,
+        ranking_loss_weight=0.0,
+        target_type="multitask",
     )
 
     feature_config = FeatureConfig(
         ema_periods=[9, 21, 50],
         label_method="triple_barrier",
-        label_horizon=10,
-        tp_barrier=2.5,
-        sl_barrier=1.5,
+        label_horizon=3,
+        tp_barrier=2.0,
+        sl_barrier=0.8,
         label_method_long="triple_barrier",
         regime_barriers_long={
-            "trending": {"tp": 3.5, "sl": 1.25},
-            "ranging": {"tp": 2.25, "sl": 1.25},
-            "low_vol": {"tp": 2.75, "sl": 1.00},
-            "high_vol": {"tp": 3.50, "sl": 2.00},
+            "trending": {"tp": 2.0, "sl": 0.8},
+            "ranging":  {"tp": 1.8, "sl": 0.8},
+            "low_vol":  {"tp": 1.8, "sl": 0.8},
+            "high_vol": {"tp": 2.2, "sl": 1.0},
         },
         label_method_short="triple_barrier",
         regime_barriers_short={
-            "trending": {"tp": 3.0, "sl": 1.25},
-            "ranging": {"tp": 2.25, "sl": 1.25},
-            "low_vol": {"tp": 2.50, "sl": 1.00},
-            "high_vol": {"tp": 3.25, "sl": 2.00},
+            "trending": {"tp": 2.0, "sl": 0.8},
+            "ranging":  {"tp": 1.8, "sl": 0.8},
+            "low_vol":  {"tp": 1.8, "sl": 0.8},
+            "high_vol": {"tp": 2.2, "sl": 1.0},
         },
         tp_barrier_short=None,
         sl_barrier_short=None,
+        use_vol_invariant_features=True,   # release 202500
+        use_reduced_features=True,          # release 202500
         feature_masks={
-            "long": {"ema_bull": True, "rsi_oversold": True, "macd_positive": True},
-            "short": {"ema_bear": True, "rsi_overbought": True, "macd_negative": True},
+            "long": {"ema_bull": True, "rsi_oversold": True, "macd_positive": True,
+                     "ema_bear": True, "rsi_overbought": True, "macd_negative": True},
+            "short": {"ema_bull": True, "rsi_oversold": True, "macd_positive": True,
+                      "ema_bear": True, "rsi_overbought": True, "macd_negative": True},
         },
     )
+
+    '''
+            feature_masks={
+                "long": {
+                    "ema_bull": True,  "rsi_oversold": True,  "macd_positive": True,
+                    "ema_bear": False, "rsi_overbought": False, "macd_negative": False,
+                },
+                "short": {
+                    "ema_bear": True,  "rsi_overbought": True, "macd_negative": True,
+                    "ema_bull": False, "rsi_oversold": False,  "macd_positive": False,
+                },
+            },
+            '''
 
     regime_config = RegimeConfig(
         adx_trend_threshold=25.0
@@ -215,7 +233,9 @@ def main(release: str, mode: str = 'production'):
     )
 
     base_dir = Path(__file__).resolve().parent
-    artifacts_path = str((base_dir / ".." / "artifacts" / release / "oof" / "deploy_full").resolve())
+    #artifacts_path = str((base_dir / ".." / "artifacts" / release / "oof" / "deploy_full").resolve())
+    artifacts_path = str((base_dir / ".." / "artifacts" / release / "oof" / "deploy_2026_04_combined_specialists_seed47").resolve())
+
     policy_path = str((base_dir / ".." / "artifacts" / release / "rl" / "final" / f"rl_policy_gate_{release}.npz").resolve())
     rl_config = {
         "lr": 0.002,  # FINETUNE_LR del freeze
@@ -223,7 +243,7 @@ def main(release: str, mode: str = 'production'):
         "baseline_beta": 0.88,  # igual que staged
         "chop_soft_thr": 0.3670136046832346,  # trial 121
         "exhaustion_soft_thr": 0.4805561001350015,  # trial 121
-        "rl_take_threshold": 0.036, #0.1444771151557441,  # trial 121
+        "rl_take_threshold": 0.036, #0.1444771151557441, # trial 121
         "chop_penalty_coef": 0.004458284077367999,  # trial 121
         "exhaustion_penalty_coef": 0.003,  # fijo staged
         "max_grad_norm": 5.0,
@@ -252,8 +272,8 @@ def main(release: str, mode: str = 'production'):
         max_daily_profit_pct=None,
         compound=True,
         enable_live_scaler_updates=True,
-        anomaly_block_threshold=1.2,  # FIX v10.1: subido de 0.8 → 1.2 (0.8 bloqueaba 3h en sesión europea XAUUSD)
-        signal_cooldown_bars=3
+        anomaly_block_threshold=1.5,
+        signal_cooldown_bars=1
     )
 
     db = build_db()
@@ -269,4 +289,4 @@ def main(release: str, mode: str = 'production'):
     service.run()
 
 if __name__ == "__main__":
-    main(release='200383')
+    main(release='202500')

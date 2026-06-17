@@ -7,6 +7,7 @@ from collections import deque
 from typing import Any, Dict, Optional, Set
 
 import pandas as pd
+import numpy as np
 import zmq
 
 from s2_state import RuntimeState, S3State
@@ -51,8 +52,18 @@ class S2Service:
     _ZMQ_RECONNECT_AFTER_TIMEOUTS = 40
     _NO_TICK_WARN_SECS = 90
 
+    # ── Modelo entrenado a 5-min (release 202500 y posteriores) ────────────
+    # MT5/S1 publica ticks 1m. Resamplear 1m→BASE_TF antes de pasar al
+    # simulador, y solo invocar decide_live() en cierre de barra base_tf.
+    # Si el modelo es 1-min (releases legacy 200xxx), poner BASE_TF_MINUTES=1
+    # y el resample es no-op.
+    BASE_TF_MINUTES = 5
+
+    # 1m bars desde BD (~5.5 días con 8000): suficiente para que multi-TF
+    # features (15m/1h) tengan ≥60 bars con warmup ADX_14/EMA50.
+    LAST_N_RATES = 8000
+
     VOLUME_MA_PERIOD = 20
-    LAST_N_RATES = 800
     OPEN_BE_OFFSET_POINTS = 15
     RUNNER_TIGHT_TRAIL_PTS = 20
 
@@ -80,6 +91,12 @@ class S2Service:
         self._keepalive_last_sent: Dict[int, float] = {}
         self._keepalive_last_bar_time: Dict[int, int] = {}
         self._keepalive_last_indicators: Dict[int, Dict[str, Any]] = {}
+
+        # Tracker para idempotencia del cierre de barra base_tf.
+        # Solo invocamos decide_live una vez por barra (no por cada tick 1m
+        # que llega dentro de la barra). Almacena pd.Timestamp del último
+        # bar base_tf procesado.
+        self._last_processed_basetf_bar_ts = None
         self._keepalive_last_context: Dict[int, Dict[str, Any]] = {}
         self._startup_bars_seen: Set[int] = set()
         self._volume_sma = IncrementalSMA(period=self.VOLUME_MA_PERIOD)
@@ -948,6 +965,81 @@ class S2Service:
 
         return None
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Gating del base_tf del modelo (5min para release 202500+)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _resample_to_base_tf(self, df_1m: pd.DataFrame) -> pd.DataFrame:
+        """Resamplea OHLCV de 1-min al BASE_TF_MINUTES configurado.
+
+        Si BASE_TF_MINUTES == 1 → devuelve el df tal cual (no-op).
+
+        Para releases entrenados con base_tf=5min (202200, 202300, 202500,
+        ...) hay que pasar bars 5m al modelo, no 1m, porque las sequencias
+        seq_short/seq_long se construyen sobre el TF nativo del modelo y
+        sus features (ATR, EMA, etc.) también.
+        """
+        if self.BASE_TF_MINUTES == 1:
+            return df_1m
+
+        df = df_1m.copy()
+        df["time"] = pd.to_datetime(df["time"])
+        df = df.set_index("time").sort_index()
+
+        agg_spec = {"open": "first", "high": "max", "low": "min", "close": "last"}
+        if "ticks_volume" in df.columns:
+            agg_spec["ticks_volume"] = "sum"
+        if "real_volume" in df.columns:
+            agg_spec["real_volume"] = "sum"
+        if "spread" in df.columns:
+            # spread es ruidoso; usamos el último del bin
+            agg_spec["spread"] = "last"
+
+        rule = f"{self.BASE_TF_MINUTES}min"
+        agg = (
+            df.resample(rule, label="right", closed="right")
+            .agg(agg_spec)
+            .dropna(subset=["close"])
+            .reset_index()
+        )
+        agg["id"] = np.arange(len(agg), dtype=np.int64)
+        return agg
+
+    def _should_process_basetf_close(self, tick_time_epoch) -> bool:
+        """Decide si el tick actual cierra una nueva barra base_tf.
+
+        Returns True solo cuando:
+          1. El minuto del tick es múltiplo de BASE_TF_MINUTES (e.g. 0,5,10,...).
+          2. No hemos procesado ya esta barra (idempotencia, por si llega más
+             de un tick con el mismo timestamp del bar de cierre).
+
+        Si BASE_TF_MINUTES == 1, siempre devuelve True (todo tick es cierre
+        de barra 1m).
+        """
+        if tick_time_epoch is None:
+            return False
+        try:
+            tick_time_epoch = int(tick_time_epoch)
+        except (TypeError, ValueError):
+            return False
+
+        ts = pd.Timestamp(tick_time_epoch, unit="s")
+        if self.BASE_TF_MINUTES == 1:
+            bar_key = ts.replace(second=0, microsecond=0)
+            if self._last_processed_basetf_bar_ts == bar_key:
+                return False
+            self._last_processed_basetf_bar_ts = bar_key
+            return True
+
+        if ts.minute % self.BASE_TF_MINUTES != 0:
+            return False
+
+        bar_key = ts.replace(second=0, microsecond=0)
+        if self._last_processed_basetf_bar_ts == bar_key:
+            return False
+        self._last_processed_basetf_bar_ts = bar_key
+        return True
+
     def process_tick(self, data: dict):
         print(f"Data from MT5: {data}")
 
@@ -976,7 +1068,31 @@ class S2Service:
             "spread": data.get("spread"),
         }
 
-        df_rates = self.simulator.helper.load_from_database_real(self.db, last_n_rates=self.LAST_N_RATES)
+        # ── 1) Carga 1m bars (cubre warmup multi-TF: 8000 1m ≈ 5.5 días)
+        df_rates_1m = self.simulator.helper.load_from_database_real(
+            self.db, last_n_rates=self.LAST_N_RATES
+        )
+
+        # ── 2) Resamplea 1m → base_tf SIEMPRE (coste despreciable)
+        # Necesario para que _extract_pipeline_snapshot trabaje con bars
+        # del mismo TF que el modelo, y para que indicators reflejen la
+        # granularidad correcta en el keepalive a S3.
+        df_rates = self._resample_to_base_tf(df_rates_1m)
+        if len(df_rates) < 100:
+            print(f"[S2][WARN] solo {len(df_rates)} bars {self.BASE_TF_MINUTES}m tras resample. "
+                  f"Aborto este tick (warmup insuficiente).")
+            return
+
+        # ── 3) Trigger del modelo solo en cierre de barra base_tf
+        # En ticks intermedios (minute % 5 != 0 para BASE_TF=5m) NO llamamos
+        # a decide_live, pero SÍ corremos keepalive + guards + position
+        # management en bloques posteriores de esta función. Esto evita que
+        # S3 marque posiciones como NOT_TRACKED por timeout (el keepalive
+        # se envía cada tick, no cada cierre 5m).
+        tick_time_epoch = data.get("time")
+        should_invoke_model = self._should_process_basetf_close(tick_time_epoch)
+        ts_dbg = (pd.Timestamp(int(tick_time_epoch), unit="s")
+                  if tick_time_epoch else "n/a")
 
         s3_n_pre = self.s3_state.n_positions()
         s3_n_local = len(self._s3_open_tickets_local)
@@ -987,14 +1103,21 @@ class S2Service:
                 f"→ using effective={effective_positions}"
             )
 
-        live_order = self.simulator.decide_live(
-            df_rates=df_rates,
-            equity=float(equity),
-            current_positions=effective_positions,
-            max_positions=2,
-        )
-
-        model_diag = getattr(self.simulator, "_last_diag", None)
+        live_order = None
+        model_diag = None
+        if should_invoke_model:
+            print(f"[S2][TF] 1m → {self.BASE_TF_MINUTES}m: {len(df_rates_1m)} → {len(df_rates)} bars  "
+                  f"cierre @ {df_rates['time'].iloc[-1]}")
+            live_order = self.simulator.decide_live(
+                df_rates=df_rates,
+                equity=float(equity),
+                current_positions=effective_positions,
+                max_positions=2,
+            )
+            model_diag = getattr(self.simulator, "_last_diag", None)
+        else:
+            print(f"[S2][SKIP-MODEL] tick @ {ts_dbg} no cierra bar "
+                  f"{self.BASE_TF_MINUTES}m → keepalive only, decide_live skipped")
         _, pip_last, pip_prev, pip_get, bb_upper, bb_lower = self._extract_pipeline_snapshot(df_rates)
 
         current_indicators = self._build_current_indicators(

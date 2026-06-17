@@ -26,19 +26,52 @@ class Helper:
 
     def predict_proba_keras(self, model: Model, X: np.ndarray, batch_size: int = 4096) -> np.ndarray:
         X = np.asarray(X, dtype=np.float32)
-        p = model.predict(X, batch_size=batch_size, verbose=0).reshape(-1)
-        return p
+        raw = model.predict(X, batch_size=batch_size, verbose=0)
+        # multitask: output dict/list con [signal_long, signal_short].
+        # Devolvemos shape (N, 2) — col 0=P_long, col 1=P_short.
+        if isinstance(raw, dict):
+            if 'signal_long' in raw and 'signal_short' in raw:
+                p_l = np.asarray(raw['signal_long']).reshape(-1)
+                p_s = np.asarray(raw['signal_short']).reshape(-1)
+                return np.stack([p_l, p_s], axis=-1)
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            p_l = np.asarray(raw[0]).reshape(-1)
+            p_s = np.asarray(raw[1]).reshape(-1)
+            return np.stack([p_l, p_s], axis=-1)
+        # triple_class: output (N, 3) softmax → P(TP) = col 2.
+        if raw.ndim == 2 and raw.shape[-1] == 3:
+            return raw[:, 2]
+        return raw.reshape(-1)
 
     def load_model(self, side: str):
         model = load_model(f'{self.path}/model_{self.general_config.release}_{side}.keras')
         return model
 
     def load_everything(self, pipeline: DataPipeline):
-        models = {}
-        calibrators = {}
-        for side in ['long', 'short']:
-            models[side] = self.load_model(side)
-            calibrators[side] = self.load_calibrator(side)
+        # Multitask: si existe `model_{release}_multitask.keras` cargamos UN
+        # solo modelo y un calibrador único (dict {'long': ..., 'short': ...}).
+        # Devolvemos models como {'long': model, 'short': model} apuntando a
+        # la misma instancia, y calibradores expandidos por lado.
+        release = self.general_config.release
+        multitask_model_path = Path(f'{self.path}/model_{release}_multitask.keras')
+        multitask_cal_path = Path(f'{self.path}/oof_calibrator_{release}_multitask.joblib')
+
+        if multitask_model_path.exists() and multitask_cal_path.exists():
+            multi_model = load_model(str(multitask_model_path))
+            cal_dict = joblib.load(str(multitask_cal_path))
+            if not isinstance(cal_dict, dict) or 'long' not in cal_dict or 'short' not in cal_dict:
+                raise ValueError(
+                    f"Calibrator multitask inválido en {multitask_cal_path}: "
+                    f"se esperaba dict con keys 'long'/'short'."
+                )
+            models = {'long': multi_model, 'short': multi_model}
+            calibrators = {'long': cal_dict['long'], 'short': cal_dict['short']}
+        else:
+            models = {}
+            calibrators = {}
+            for side in ['long', 'short']:
+                models[side] = self.load_model(side)
+                calibrators[side] = self.load_calibrator(side)
 
         scalers = pipeline.load_scalers(self.path)
         return models, calibrators, scalers

@@ -1,0 +1,24 @@
+{
+  "long": {
+    "TREND_UP": "iso_full",
+    "TRANSITION_DOWN": "iso_45d",
+    "LOW_VOL": "per_state_iso_45d",
+    "BREAKOUT_WAIT_DOWN": "per_state_iso_45d",
+    "TREND_DOWN": "beta_45d",
+    "RANGE": "iso_45d",
+    "TRANSITION_UP": "beta_45d",
+    "BREAKOUT_WAIT_UP": "iso_full",
+    "VOLATILE": "beta_45d"
+  },
+  "short": {
+    "TREND_UP": "per_state_iso_45d",
+    "TRANSITION_DOWN": "iso_full",
+    "LOW_VOL": "iso_full",
+    "BREAKOUT_WAIT_DOWN": "iso_full",
+    "TREND_DOWN": "iso_full",
+    "RANGE": "iso_full",
+    "TRANSITION_UP": "iso_full",
+    "BREAKOUT_WAIT_UP": "iso_full",
+    "VOLATILE": "iso_full"
+  }
+}

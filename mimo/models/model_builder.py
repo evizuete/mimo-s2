@@ -68,6 +68,24 @@ class ModelConfig:
     # no solo a clasificarlas — mejora directamente la calidad de los percentiles.
     ranking_loss_weight: float = 0.0
 
+    # Tipo de target/output:
+    #   "binary"   → clasificación binaria con sigmoid + focal/hybrid loss (default)
+    #   "quantile" → regresión cuantílica con cabeza lineal y pinball loss.
+    # En modo quantile el modelo predice len(quantile_levels) cuantiles del
+    # forward return normalizado por ATR; ranking_loss y focal_alpha/gamma se
+    # ignoran. La calibración en probs_calibration aplica un shift conformal.
+    target_type: str = "binary"
+    quantile_levels: tuple = (0.25, 0.50, 0.75)
+
+    # Multi-task LONG+SHORT (target_type='multitask'):
+    #   Dos cabezas binarias compartiendo el trunk. Cada una con su loss focal,
+    #   sus métricas (auc_pr, auc_roc) y sus sample_weights independientes.
+    #   loss_weight_long/short escalan la contribución de cada cabeza al loss
+    #   total. Útil para compensar asimetría: si SHORT pos_rate >> LONG, subir
+    #   loss_weight_long para que la cabeza débil reciba más gradient.
+    loss_weight_long: float = 1.0
+    loss_weight_short: float = 1.0
+
 class TradingModel:
     """Modelo de deep learning con arquitectura multi-scale"""
 
@@ -77,6 +95,85 @@ class TradingModel:
         self.side = side
         self.model = None
         self.history = None
+
+    def _build_output_head(self, x, init_bias):
+        """
+        Construye la cabeza de salida según self.model_config.target_type.
+
+        target_type='binary' (default):
+            Dense(1) → sigmoid → 'signal' (probabilidad).
+            init_bias (float) se aplica al bias del Dense para acelerar
+            convergencia con clases desbalanceadas.
+
+        target_type='quantile':
+            Dense(N_q, linear) → 'signal' (vector de cuantiles del return).
+
+        target_type='triple_class':
+            Dense(3, softmax) → 'signal' sobre {0=SL, 1=TIMEOUT, 2=TP}.
+
+        target_type='multitask':
+            Dos cabezas binarias compartiendo el trunk:
+              Dense(1, sigmoid) → 'signal_long'
+              Dense(1, sigmoid) → 'signal_short'
+            init_bias debe ser dict {'long': bias_l, 'short': bias_s} o
+            un float (se aplica a ambas cabezas).
+            Devuelve LISTA [p_long, p_short]; el resto de la API de Keras
+            (Model(outputs=...), compile con loss dict, fit con y dict)
+            se encarga del wiring.
+        """
+        if self.model_config.target_type == "quantile":
+            n_q = len(self.model_config.quantile_levels)
+            return layers.Dense(
+                n_q,
+                activation='linear',
+                name='signal',
+                kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+                bias_initializer='zeros',
+            )(x)
+
+        if self.model_config.target_type == "triple_class":
+            # Softmax(3) sobre clases {0=SL, 1=TIMEOUT, 2=TP}.
+            # Downstream usa signal[..., 2] como P(TP) para calibración y umbrales.
+            return layers.Dense(
+                3,
+                activation='softmax',
+                name='signal',
+                kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+                bias_initializer='zeros',
+            )(x)
+
+        if self.model_config.target_type == "multitask":
+            if isinstance(init_bias, dict):
+                bias_long = float(init_bias.get('long', 0.0))
+                bias_short = float(init_bias.get('short', 0.0))
+            else:
+                bias_long = bias_short = float(init_bias)
+            logit_long = layers.Dense(
+                1, name='logit_long',
+                kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+                bias_initializer=tf.keras.initializers.Constant(bias_long),
+            )(x)
+            logit_short = layers.Dense(
+                1, name='logit_short',
+                kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+                bias_initializer=tf.keras.initializers.Constant(bias_short),
+            )(x)
+            p_long = layers.Activation('sigmoid', name='signal_long')(logit_long)
+            p_short = layers.Activation('sigmoid', name='signal_short')(logit_short)
+            # Devolvemos un dict — Keras 3 usa estructura dict-keyed para
+            # match loss/metrics/y/sample_weight por nombre. Devolverlo como
+            # list provoca KeyError(0) en compile_utils.resolve_path al
+            # intentar indexar un dict de losses con un int de la lista.
+            return {'signal_long': p_long, 'signal_short': p_short}
+
+        # Camino original (binario): logits + sigmoid
+        signal_logit = layers.Dense(
+            1,
+            name='signal_logit',
+            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
+            bias_initializer=tf.keras.initializers.Constant(float(init_bias)),
+        )(x)
+        return layers.Activation('sigmoid', name='signal')(signal_logit)
 
     def build_model(self,
                     shape_short: Tuple[int, int],
@@ -196,16 +293,7 @@ class TradingModel:
         x = layers.Dropout(config.dropout_dense)(x)
 
         # === OUTPUT ===
-        # Capa de logits para poder extraerlos si es necesario
-        signal_logit = layers.Dense(
-            1,
-            name='signal_logit',
-            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
-            bias_initializer=tf.keras.initializers.Constant(init_bias)
-        )(x)
-
-        # Activación sigmoid para probabilidad
-        signal_output = layers.Activation('sigmoid', name='signal')(signal_logit)
+        signal_output = self._build_output_head(x, init_bias)
 
         # === CREAR MODELO ===
         model = Model(
@@ -333,16 +421,7 @@ class TradingModel:
         x = layers.Dropout(config.dropout_dense)(x)
 
         # === OUTPUT ===
-        # Capa de logits para poder extraerlos si es necesario
-        signal_logit = layers.Dense(
-            1,
-            name='signal_logit',
-            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
-            bias_initializer=tf.keras.initializers.Constant(init_bias)
-        )(x)
-
-        # Activación sigmoid para probabilidad
-        signal_output = layers.Activation('sigmoid', name='signal')(signal_logit)
+        signal_output = self._build_output_head(x, init_bias)
 
         # === CREAR MODELO ===
         model = Model(
@@ -498,14 +577,7 @@ class TradingModel:
         x = layers.Dropout(config.dropout_dense)(x)
 
         # === OUTPUT ===
-        signal_logit = layers.Dense(
-            1,
-            name='signal_logit',
-            kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
-            bias_initializer=tf.keras.initializers.Constant(init_bias)
-        )(x)
-
-        signal_output = layers.Activation('sigmoid', name='signal')(signal_logit)
+        signal_output = self._build_output_head(x, init_bias)
 
         model = Model(
             inputs=[input_short, input_long, input_context, input_time],
@@ -517,6 +589,87 @@ class TradingModel:
         return model
 
     def compile_model(self, class_weight: Dict[int, float] = None):
+        optimizer = Adam(
+            learning_rate=self.model_config.learning_rate,
+            clipnorm=1.0,
+            beta_1=0.9,
+            beta_2=0.999,
+            epsilon=1e-8
+        )
+
+        if self.model_config.target_type == "quantile":
+            # ── Quantile regression ───────────────────────────────────────────
+            # Pinball loss multi-output. focal_alpha/gamma y ranking_loss_weight
+            # se ignoran (no aplican). Métricas: MAE sobre el cuantil mediano y
+            # cobertura empírica del intervalo predicho.
+            qs = self.model_config.quantile_levels
+            loss = PinballLoss(quantiles=qs)
+
+            mid_idx = len(qs) // 2  # típicamente 1 para (0.25, 0.50, 0.75)
+            metrics = [
+                QuantileMAE(quantile_idx=mid_idx, name=f"mae_q{int(qs[mid_idx]*100)}"),
+                QuantileCoverage(low_idx=0, high_idx=len(qs) - 1, name="coverage"),
+            ]
+            self.model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
+            return
+
+        if self.model_config.target_type == "triple_class":
+            # ── Triple barrier 3-class ────────────────────────────────────────
+            # SparseCategoricalCrossentropy sobre {0=SL, 1=TIMEOUT, 2=TP}.
+            # focal_alpha/gamma y ranking_loss_weight se ignoran. La métrica
+            # AUC se computa sobre P(TP) vs no-TP (binarización implícita).
+            loss = tf.keras.losses.SparseCategoricalCrossentropy()
+            metrics = [
+                tf.keras.metrics.SparseCategoricalAccuracy(name='acc'),
+                TripleClassTPAUC(name='auc_pr_tp', curve='PR'),
+                TripleClassTPAUC(name='auc_roc_tp', curve='ROC'),
+            ]
+            self.model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
+            return
+
+        if self.model_config.target_type == "multitask":
+            # ── Multi-task LONG + SHORT (dos cabezas binarias) ────────────────
+            # Cada cabeza tiene su propio focal loss. focal_alpha puede venir
+            # como float (mismo para ambas) o como dict {'long': ..., 'short': ...}.
+            # ranking_loss_weight se ignora (la diversidad ya viene de las dos
+            # cabezas con regimen weights independientes).
+            fa = self.model_config.focal_alpha
+            if isinstance(fa, dict):
+                alpha_long = float(fa.get('long', 0.35))
+                alpha_short = float(fa.get('short', 0.40))
+            else:
+                alpha_long = alpha_short = float(fa)
+            gamma = float(self.model_config.focal_gamma)
+
+            losses = {
+                'signal_long': ClippedBinaryFocalCrossentropy(
+                    alpha=alpha_long, gamma=gamma, from_logits=False,
+                ),
+                'signal_short': ClippedBinaryFocalCrossentropy(
+                    alpha=alpha_short, gamma=gamma, from_logits=False,
+                ),
+            }
+            metrics = {
+                'signal_long': [
+                    tf.keras.metrics.AUC(name='auc_roc', curve='ROC'),
+                    tf.keras.metrics.AUC(name='auc_pr', curve='PR'),
+                ],
+                'signal_short': [
+                    tf.keras.metrics.AUC(name='auc_roc', curve='ROC'),
+                    tf.keras.metrics.AUC(name='auc_pr', curve='PR'),
+                ],
+            }
+            # loss_weights configurables vía atributos en model_config; defaults 1.0.
+            lw_long = float(getattr(self.model_config, 'loss_weight_long', 1.0))
+            lw_short = float(getattr(self.model_config, 'loss_weight_short', 1.0))
+            self.model.compile(
+                optimizer=optimizer,
+                loss=losses,
+                loss_weights={'signal_long': lw_long, 'signal_short': lw_short},
+                metrics=metrics,
+            )
+            return
+
         # ── Hybrid loss: focal + ranking (ListNet) ────────────────────────────
         # Si ranking_loss_weight=0.0 → solo focal (retrocompatible con v1/v2).
         # Si ranking_loss_weight>0.0 → focal + ListNet ponderado.
@@ -563,15 +716,6 @@ class TradingModel:
             tf.keras.metrics.Recall(name='recall_40', thresholds=0.40),
         ]
 
-        # Optimizador
-        optimizer = Adam(
-            learning_rate=self.model_config.learning_rate,
-            clipnorm=1.0,
-            beta_1=0.9,
-            beta_2=0.999,
-            epsilon=1e-8
-        )
-
         # loss ya definida arriba: focal puro (ranking_loss_weight=0) o hybrid (>0)
         self.model.compile(
             optimizer=optimizer,
@@ -580,7 +724,13 @@ class TradingModel:
         )
 
     def get_logits(self, X: Dict[str, np.ndarray]) -> np.ndarray:
-        """Extrae los logits antes de la activación sigmoid"""
+        """Extrae los logits antes de la activación sigmoid (solo modo binary)."""
+        if self.model_config.target_type == "quantile":
+            raise NotImplementedError(
+                "get_logits() no aplica en modo quantile: la cabeza es lineal "
+                "y no hay layer 'signal_logit'. Usa model.predict() directamente "
+                "para obtener los cuantiles."
+            )
         logit_model = Model(
             inputs=self.model.inputs,
             outputs=self.model.get_layer('signal_logit').output
@@ -615,6 +765,21 @@ class TradingModel:
         """
 
         # Callbacks
+        is_quantile_callbacks = (self.model_config.target_type == "quantile")
+        is_triple_class_callbacks = (self.model_config.target_type == "triple_class")
+        is_multitask_callbacks = (self.model_config.target_type == "multitask")
+        # Para triple_class, las métricas binarias usan sufijo '_tp'.
+        # Para multitask, vigilamos el AUC-PR de la cabeza LONG (suele ser
+        # el lado con menos pos_rate y por tanto más informativo); el SHORT
+        # entrena en paralelo con su propia loss.
+        if is_triple_class_callbacks:
+            train_auc_metric = "auc_pr_tp"
+        elif is_multitask_callbacks:
+            train_auc_metric = "signal_long_auc_pr"
+        else:
+            train_auc_metric = "auc_pr"
+        val_auc_metric = f"val_{train_auc_metric}"
+
         if for_production:
             callbacks = [
                 # LR schedule: reduce a mitad cada N épocas fijas si la loss no mejora
@@ -628,24 +793,48 @@ class TradingModel:
                 ),
                 TerminateOnNaN(),
             ]
+        elif is_quantile_callbacks:
+            # En quantile mode no hay val_auc_pr; usamos val_loss (pinball) a minimizar.
+            # GeneralizationGapStopping se desactiva: val_loss es continuo y la noción
+            # de "gap" entre auc_pr de train y val no aplica directamente (la pinball
+            # de train baja monotónicamente y la "gap" es ruidosa para regresión).
+            mon = 'val_loss' if X_val is not None else 'loss'
+            callbacks = [
+                EarlyStopping(
+                    monitor=mon,
+                    patience=self.model_config.patience,
+                    restore_best_weights=True,
+                    mode='min',
+                    verbose=verbose,
+                ),
+                ReduceLROnPlateau(
+                    monitor=mon,
+                    factor=0.5,
+                    patience=self.model_config.patience // 3,
+                    min_lr=1e-6,
+                    mode='min',
+                    verbose=verbose,
+                ),
+                TerminateOnNaN(),
+            ]
         else:
             callbacks = [
                 EarlyStopping(
-                    monitor='val_auc_pr' if X_val is not None else 'auc_pr',
+                    monitor=val_auc_metric if X_val is not None else train_auc_metric,
                     patience=self.model_config.patience,
                     restore_best_weights=True,
                     mode='max',
                     verbose=verbose
                 ),
-                ReduceLROnPlateau(monitor='val_auc_pr' if X_val is not None else 'auc_pr',
+                ReduceLROnPlateau(monitor=val_auc_metric if X_val is not None else train_auc_metric,
                                   factor=0.5,
                                   patience=self.model_config.patience // 3,  # más reactivo que ES
                                   min_lr=1e-6,
                                   mode='max',  # ← obligatorio cuando monitor es AUC
                                   verbose=verbose),
                 GeneralizationGapStopping(
-                    monitor_train='auc_pr',
-                    monitor_val='val_auc_pr',
+                    monitor_train=train_auc_metric,
+                    monitor_val=val_auc_metric,
                     mode='max',
                     max_gap=0.03,
                     min_epochs=8,
@@ -654,12 +843,38 @@ class TradingModel:
                 ), TerminateOnNaN(),
             ]
 
+        # Multitask: y_train/y_val esperados como np.ndarray (N, 2) con columnas
+        # [is_long_TP, is_short_TP]. sample_weight esperado como (N, 2) con la
+        # misma convención. Convertimos a dict para Keras multi-output.
+        if is_multitask_callbacks:
+            def _split_dual(arr, name=''):
+                if arr is None:
+                    return None
+                a = np.asarray(arr)
+                if a.ndim != 2 or a.shape[-1] != 2:
+                    raise ValueError(
+                        f"multitask {name}: shape {a.shape} inesperado, "
+                        f"se requiere (N, 2) con columnas [long, short]."
+                    )
+                return {
+                    'signal_long': a[:, 0].astype(np.float32),
+                    'signal_short': a[:, 1].astype(np.float32),
+                }
+
+            y_train_in = _split_dual(y_train, 'y_train')
+            y_val_in = _split_dual(y_val, 'y_val')
+            sw_in = _split_dual(sample_weight, 'sample_weight')
+        else:
+            y_train_in = y_train
+            y_val_in = y_val
+            sw_in = sample_weight
+
         # Datos de validación
         validation_data = None
-        if X_val is not None and y_val is not None:
+        if X_val is not None and y_val_in is not None:
             validation_data = (
                 [X_val['seq_short'], X_val['seq_long'], X_val['context'], X_val['time']],
-                y_val
+                y_val_in
             )
         else:
             validation_data = None
@@ -667,11 +882,11 @@ class TradingModel:
         # Entrenar
         self.history = self.model.fit(
             x=[X_train['seq_short'], X_train['seq_long'], X_train['context'], X_train['time']],
-            y=y_train,
+            y=y_train_in,
             batch_size=self.model_config.batch_size,
             epochs=self.model_config.epochs,
             validation_data=validation_data,
-            sample_weight=sample_weight,
+            sample_weight=sw_in,
             callbacks=callbacks,
             verbose=verbose,
             shuffle=False  # Importante para series temporales
@@ -869,3 +1084,110 @@ class ClippedBinaryFocalCrossentropy(tf.keras.losses.Loss):
             "from_logits": self.from_logits,
         })
         return cfg
+
+
+@register_keras_serializable(package="mimo_old")
+class PinballLoss(tf.keras.losses.Loss):
+    """
+    Quantile regression loss (pinball / check loss) para regresión cuantílica
+    multi-output.
+
+    y_true: shape (batch, 1) o (batch,) — target continuo (forward return).
+    y_pred: shape (batch, n_quantiles) — predicciones para cada cuantil.
+
+    pinball_q(e) = max(q*e, (q-1)*e),  donde e = y_true - y_pred
+
+    Promedia sobre cuantiles y batch. Si todos los cuantiles fueran q=0.5
+    coincide con MAE (Mean Absolute Error).
+    """
+
+    def __init__(self, quantiles=(0.25, 0.50, 0.75),
+                 reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE,
+                 name="pinball"):
+        super().__init__(reduction=reduction, name=name)
+        self.quantiles = tuple(float(q) for q in quantiles)
+
+    def call(self, y_true, y_pred):
+        # y_true puede venir (batch,) o (batch, 1); broadcast a (batch, 1)
+        y_true = tf.cast(tf.reshape(y_true, (-1, 1)), y_pred.dtype)
+        q = tf.constant(self.quantiles, dtype=y_pred.dtype)
+        diff = y_true - y_pred  # (batch, n_q)
+        loss = tf.maximum(q * diff, (q - 1.0) * diff)
+        return tf.reduce_mean(loss)
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({"quantiles": list(self.quantiles)})
+        return cfg
+
+
+@register_keras_serializable(package="mimo_old")
+class QuantileMAE(tf.keras.metrics.Metric):
+    """MAE sobre uno de los cuantiles predichos (típicamente q50)."""
+
+    def __init__(self, quantile_idx: int = 1, name: str = "mae_q50", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.quantile_idx = int(quantile_idx)
+        self.total = self.add_weight(name="total", initializer="zeros")
+        self.count = self.add_weight(name="count", initializer="zeros")
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(tf.reshape(y_true, (-1,)), y_pred.dtype)
+        y_pred_q = y_pred[:, self.quantile_idx]
+        ae = tf.abs(y_true - y_pred_q)
+        self.total.assign_add(tf.reduce_sum(ae))
+        self.count.assign_add(tf.cast(tf.size(ae), self.total.dtype))
+
+    def result(self):
+        return tf.math.divide_no_nan(self.total, self.count)
+
+    def reset_state(self):
+        self.total.assign(0.0)
+        self.count.assign(0.0)
+
+
+@register_keras_serializable(package="mimo_old")
+class QuantileCoverage(tf.keras.metrics.Metric):
+    """
+    Cobertura empírica del intervalo [q_low, q_high]. Para q=(0.25,0.75) la
+    cobertura ideal es 0.50; valores menores indican intervalos demasiado
+    estrechos (overconfidence), mayores indican demasiado anchos.
+    """
+
+    def __init__(self, low_idx: int = 0, high_idx: int = 2,
+                 name: str = "coverage", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.low_idx = int(low_idx)
+        self.high_idx = int(high_idx)
+        self.inside = self.add_weight(name="inside", initializer="zeros")
+        self.count = self.add_weight(name="count", initializer="zeros")
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(tf.reshape(y_true, (-1,)), y_pred.dtype)
+        lo = y_pred[:, self.low_idx]
+        hi = y_pred[:, self.high_idx]
+        inside = tf.cast((y_true >= lo) & (y_true <= hi), self.inside.dtype)
+        self.inside.assign_add(tf.reduce_sum(inside))
+        self.count.assign_add(tf.cast(tf.size(inside), self.inside.dtype))
+
+    def result(self):
+        return tf.math.divide_no_nan(self.inside, self.count)
+
+    def reset_state(self):
+        self.inside.assign(0.0)
+        self.count.assign(0.0)
+
+
+@register_keras_serializable(package="mimo_old")
+class TripleClassTPAUC(tf.keras.metrics.AUC):
+    """
+    AUC sobre P(TP) = softmax[..., 2] vs binarización (clase==2) para
+    target_type='triple_class'. Permite trackear discriminación TP vs no-TP
+    durante el entrenamiento 3-class.
+    """
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true_int = tf.cast(tf.reshape(y_true, (-1,)), tf.int32)
+        y_true_tp = tf.cast(tf.equal(y_true_int, 2), tf.float32)
+        p_tp = y_pred[:, 2]
+        return super().update_state(y_true_tp, p_tp, sample_weight=sample_weight)

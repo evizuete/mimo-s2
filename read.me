@@ -1,0 +1,218 @@
+[1] 40 trials Optuna 202500             ← en marcha
+       comando: main_oof_regime_weights_v7 --use-tpe --optuna-trials 40 \
+                --objective ev_net --cost-per-signal 0.05 ...
+       output: oof_study_202500_multitask en MySQL + artifacts dir
+
+[1.5] Análisis del study + decisión A/B/C
+       python -m mimo.oof.extract_best_per_side --release 202500 \
+         --top-n 5 --out-json artifacts/.../best_per_side.json
+       Decisión:
+         - AMBOS lados positivos en mismo trial → A
+         - lados óptimos en trials distintos    → B (caso actual)
+         - ningún trial >0 en ambos             → C
+
+[2a] OPCIÓN A: nada nuevo, continuar con [3] sobre el modelo del best trial.
+
+[2b] OPCIÓN B: entrenar specialists
+       python -m mimo.oof.train_specialist \
+         --best-per-side-json artifacts/.../best_per_side.json \
+         --side both --release 202500 ...
+       output: dos artifacts dirs (_long_specialist, _short_specialist),
+       cada uno con su modelo, calibrador, holdout_predictions, etc.
+
+[2c] OPCIÓN C: relanzar trials con objetivo distinto
+       (cambia `compute_balanced_objective` a `min` o aumenta penalty
+       a lados negativos). Volver a [1].
+
+[2.5] Sanity check de specialists (sólo opción B)         ← FALTA SCRIPT
+       Reentreno determinista debería reproducir el ev_net del trial
+       original. Si difiere mucho, hay un bug de seed/orden de folds.
+       Te puedo escribir `validate_specialists.py` para esto: compara
+       ev_net/prec_TP/n_signals del trial original vs el specialist.
+
+[3] DRIFT VALIDATION                    ← por specialist (B) o por modelo único (A)
+
+    [3.a] Distribution shift sobre features (PSI/KS):
+          python -m mimo.oof.shift_analyzer.distribution_shift_analyzer \
+            --release 202500 --side multitask
+          Bandera: PSI > 0.25 en alguna feature top-importance.
+
+    [3.b] Calibración: ¿la isotónica entrenada en OOF sigue válida?
+          python -m mimo.oof.shift_analyzer.analyze_calibration_mimo \
+            --release 202500
+          Bandera: reliability diagram torcido en holdout vs OOF.
+          Si calibration drift severo → re-calibrar con tail (lo hace
+          resume_deploy_full automáticamente).
+
+    [3.c] Score → R-multiple realizado:
+          python -m mimo.oof.shift_analyzer.analyze_score_to_pnl \
+            --release 202500 --side both
+          Bandera: a igual P_cal, EV cae fuerte en holdout vs OOF.
+
+    [3.d] Threshold recalibration:
+          python -m mimo.oof.shift_analyzer.analyze_threshold_recalibration \
+            --release 202500 --side both
+          Bandera: thr OOF óptimo difiere mucho del thr holdout óptimo.
+          Si sí → la calibración no generaliza, ranking en peligro.
+
+    [3.e] Temporal weekly stability:
+          python -m mimo.oof.temporal_weekly_stability \
+            --holdout-preds-long .../holdout_predictions_..._long.parquet \
+            --holdout-preds-short .../holdout_predictions_..._short.parquet \
+            --from-db --base-tf 5min \
+            --thr-long 0.115 --thr-short 0.253 \
+            --tp 2.0 --sl 0.8 --horizon 3 --cost 0.05
+          Bandera: pendiente lineal EV_net vs week_index < -0.005 con
+          r² > 0.20 → DECAY temporal, producción arriesgada.
+
+    Veredicto:
+      · Todo verde → [4]
+      · Calibración drifteada pero ranking OK → [4] (resume_deploy_full
+        recalibra con tail y arregla)
+      · Ranking roto / decay temporal severo → ❌ no producción
+
+[4] resume_deploy_full_v5                ← producción artifacts
+
+    Para opción A (un solo modelo):
+       python -m mimo.oof.resume_deploy_full_v5 \
+         --release 202500 --side both \
+         --tail-from 2026-04-01 --tail-to 2026-05-02   # ~5 semanas
+
+    Para opción B (dos llamadas, una por specialist):
+       python -m mimo.oof.resume_deploy_full_v5 \
+         --release 202500 --side both \
+         --exp-tag-suffix _long_specialist \
+         --tail-from 2026-04-01 --tail-to 2026-05-02
+
+       python -m mimo.oof.resume_deploy_full_v5 \
+         --release 202500 --side both \
+         --exp-tag-suffix _short_specialist \
+         --tail-from 2026-04-01 --tail-to 2026-05-02
+
+    Cada llamada:
+      - reentrena modelo en train + (holdout - tail)
+      - re-fit isotónica con tail
+      - recompute percentiles_<release>_<side>.json sobre tail
+      - actualiza inference_policy_<release>_<side>.json con thr final
+      - guarda parquet con preds raw/cal de tail (auditoría posterior)
+
+[4.5] Optimización de percentiles por estado (gate operativo)
+       python -m mimo.oof.optimize_per_state_thresholds \
+         --release 202500 --target-precision 0.286 --min-recall 0.05
+       Genera dict para pegar en decision_engine_percentiles.py con
+       percentiles por (state, side). Producción usa este dict para
+       capa B del decision engine.
+
+[5] Validación post-deploy con DecisionEngine completo    ← FALTA INTEGRACIÓN
+
+    [5.a] Backtest end-to-end con trading_simulator_v3:
+          python -m mimo.strategies.trading_simulator_v3 \
+            --release 202500 \
+            --from 2026-04-01 --to 2026-05-02   # tail recalibrada
+          Aplica A (threshold global) + B (gate por percentil de estado)
+          + anti-conflict + SL/TP por régimen + costes y slippage realistas.
+          Reporta: total_R_net, max_drawdown, sharpe, n_trades, win_rate.
+          Si EV_net en tail > 0 con regla completa → ok seguir.
+
+    [5.b] Inspección de las primeras 20 señales del simulador:
+          ¿Son trades que harías a mano? ¿O hay alguno raro?
+          Sanity check humano antes de paper trading.
+
+[6] Paper trading 4-8 semanas en live    ← antes de capital real
+
+    [6.a] Setup:
+          - Conexión live al broker (MT5/IBKR/...)
+          - Loop de inferencia cada 5min cuando cierra barra:
+              barra → DataManager.get_recent(window)
+                   → FeatureBuilder
+                   → StateDetector
+                   → DataPipeline (scalers cargados)
+                   → modelo_long (P_long_raw)
+                   → modelo_short (P_short_raw)
+                   → IsotonicRegression (P_long_cal, P_short_cal)
+                   → DecisionEngine (capa A + capa B + anti-conflict)
+                   → si emit: enviar orden simulada con SL/TP
+                   → log {time, side, P_cal, state, thr_global, thr_state, outcome}
+
+    [6.b] Métricas a vigilar diariamente:
+          - n_signals/día (esperar ~6-10/día con thr operativo)
+          - P_cal medio (alerta si distribución cambia)
+          - precision rolling 20 trades (alerta si < BE)
+          - drawdown rolling
+          - decay vs primera semana
+
+    [6.c] Decisión a las 4 semanas:
+          - Si EV_net live > 50% del esperado en backtest → continuar paper
+          - Si EV_net negativo durante 2+ semanas seguidas → parar, debug
+          - Si comportamiento errático (signal_rate fluctúa fuerte) →
+            posible bug en feature_builder o state_detector live
+
+    [6.d] Decisión a las 8 semanas:
+          - EV_net positivo y estable → producción con capital pequeño
+            (ej. 5% del capital previsto)
+          - Crecimiento gradual del capital cada 4 semanas si todo ok
+
+[7] Producción con capital real          ← rampeo gradual
+
+    Semana 0-4   : 5% del capital objetivo
+    Semana 4-8   : 25%
+    Semana 8-12  : 50%
+    Semana 12+   : 100% (si todas las métricas siguen sanas)
+
+    Stop conditions:
+      - drawdown > 8% del capital → pausar y revisar
+      - 10 trades consecutivos perdedores → pausar
+      - precision_30d < BE empírico → revisar drift
+      - cambio de régimen macro detectado por monitoring → revisar
+
+[8] Monitoring continuo                  ← background siempre
+
+    [8.a] Job diario (cron):
+          - calcular distribución de P_cal del día y comparar con baseline OOF
+          - PSI/KS sobre features del día vs train
+          - alertar si PSI > 0.25 en alguna feature importante
+          - alertar si signal_rate se desvía > 50% del esperado
+
+    [8.b] Job semanal:
+          - re-correr temporal_weekly_stability con la última semana real
+          - generar reliability diagram cada lunes
+          - revisar drawdown rolling 30d
+
+    [8.c] Job mensual:
+          - decidir si re-entrenar (re-correr [1] con datos extendidos)
+          - actualizar percentiles por estado sobre datos recientes
+          - mantenimiento de la BD Optuna (purge trials > 6 meses)
+
+[9] Reentrenamiento periódico            ← cada 3-6 meses
+
+    El modelo se desactualiza con el régimen del mercado. Cada N meses:
+      - Extender train hasta hoy - 30 días
+      - Holdout = últimos 30 días para drift validation
+      - Re-correr [1]-[6] del flujo
+      - Si nuevos params son mejores → reemplazar
+      - Si peores → mantener actuales y prolongar reentreno
+
+
+[1] 40 trials Optuna 202500
+[1.5] extract_best_per_side                → best_per_side.json
+[2b] train_specialist --side both          → dos artifacts dirs
+[2.5] validate_specialists                 ← AQUÍ
+       Si PASS → continuar a [3] drift validation
+       Si FAIL → debug seed/folds antes de seguir
+[3] drift validation
+[4] resume_deploy_full
+[5] post-deploy validation
+[6] paper trading
+[7] producción gradual
+[8] monitoring continuo
+[9] reentrenamiento periódico
+
+
+
+[1] 40 trials Optuna (en marcha)
+[1.5] extract_best_per_side al terminar
+        Si AMBOS > 0 en mismo trial → opción A directa
+[2] Drift validation sobre el best trial agregado
+[3] resume_deploy_full (un solo deploy, no dos)
+[4] Validación post-deploy
+[5] Paper trading
