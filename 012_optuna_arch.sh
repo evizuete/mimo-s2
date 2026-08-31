@@ -14,7 +14,11 @@
 #   transformer ~2-3h
 #   tcn         ~4-6h
 #
-# FLUJO recomendado (TCN — release 202700, datos hasta 2026-05-22):
+# FLUJO recomendado (TCN — release 203100, datos hasta 2026-05-22):
+#   Release 203100 NO hereda de ninguna otra: usa _DEFAULT_BARRIERS
+#   (tp=2.5/sl=1.5) y features raw completas. Los cost multipliers
+#   EV_TP/SL_MULT vienen alineados a esos barriers por defecto.
+#
 #   Tras observar asimetría LONG/SHORT en tcn_v3 (LONG +60R, SHORT +11R con
 #   PWR 40%), v4 cambia la estrategia por defecto: tunear cada side por
 #   separado. SIDE=both queda como opción legacy o para multi-objective.
@@ -25,8 +29,8 @@
 #   1. SIDE=long  bash 012_optuna_arch.sh tcn 40   # ~5-6h
 #   2. SIDE=short bash 012_optuna_arch.sh tcn 40   # ~5-6h
 #   3. Walkforward 2-study combinando ambos:
-#      CNN_STUDY_LONG=oof_study_202700_tcn_long_only_v4 \
-#      CNN_STUDY_SHORT=oof_study_202700_tcn_short_only_v4 \
+#      CNN_STUDY_LONG=oof_study_203100_tcn_long_only_v4 \
+#      CNN_STUDY_SHORT=oof_study_203100_tcn_short_only_v4 \
 #      SPLIT_MODELS=1 SPLIT_ZERO_OTHER_LOSS=1 ARCH=tcn \
 #      bash 010_walkforward_cnn.sh
 #
@@ -57,7 +61,13 @@ fi
 ARCH=$1
 N_TRIALS=${2:-${N_TRIALS:-30}}
 
-export RELEASE=${RELEASE:-202700}
+# RELEASE 203100 NO está registrada en _VOL_INVARIANT_RELEASES,
+# _REDUCED_FEATURES_RELEASES ni BARRIERS_BY_RELEASE → cae a _DEFAULTS:
+#   · barriers: tp_base=2.5, sl_base=1.5  (distintos de 202500=2.0/0.8)
+#   · features: raw ret_*_bps SIN ATR-norm, feature set completo (no reducido)
+# Los targets y features son incompatibles con checkpoints de 202500/202600.
+# Es un experimento independiente, no una continuación.
+export RELEASE=${RELEASE:-203100}
 export SEED=${SEED:-47}
 # SIDE=both|long|short. Default both (multitask, comportamiento legacy).
 # SIDE=long → single-side LONG (focal_alpha_short y loss_weight_short fijos
@@ -86,8 +96,12 @@ export OPTUNA_STORAGE=${OPTUNA_STORAGE:-mysql+pymysql://evizuete:Ev1z43t3.00@10.
 # Para ranking puro auc_pr, override con OBJECTIVE=auc_pr.
 export OBJECTIVE=${OBJECTIVE:-ev_net}
 export MULTI_OBJECTIVE=${MULTI_OBJECTIVE:-0}
-export EV_TP_MULT=${EV_TP_MULT:-2.0}
-export EV_SL_MULT=${EV_SL_MULT:-0.8}
+# EV_TP/SL_MULT alineados con _DEFAULT_BARRIERS de 203100 (tp=2.5, sl=1.5)
+# para que el threshold sweep de ev_net mida rentabilidad con el mismo cost
+# model que los targets. Para releases con barriers 2.0/0.8 (p.ej. 202500),
+# override con EV_TP_MULT=2.0 EV_SL_MULT=0.8.
+export EV_TP_MULT=${EV_TP_MULT:-2.5}
+export EV_SL_MULT=${EV_SL_MULT:-1.5}
 export EV_COST=${EV_COST:-0.05}
 export EV_MIN_SIGNALS=${EV_MIN_SIGNALS:-30}
 
